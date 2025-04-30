@@ -10,10 +10,9 @@ def format_welcome_message() -> str:
         Formatted welcome message text
     """
     return (
-        "Welcome to the Solana Volume Bot! 🚀\n\n"
+        "Welcome to the TokenStorm! 🚀\n\n"
         "This bot helps you generate legitimate-looking trading activity for any SPL token "
         "by creating randomized transfers between multiple wallets.\n\n"
-        "A 0.1% service fee will be applied to each transfer.\n\n"
         "Let's get started by setting up a wallet for your transactions."
     )
 
