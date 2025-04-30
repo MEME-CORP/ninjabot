@@ -7,7 +7,6 @@ This script sets up logging directories and runs the bot.
 
 import os
 import sys
-import asyncio
 from pathlib import Path
 
 # Ensure 'bot' directory is in the Python path
@@ -18,7 +17,10 @@ logs_dir = Path("logs")
 logs_dir.mkdir(exist_ok=True)
 
 # Import the bot's main function after setting up paths
-from bot.main import main
+from bot.main import setup_bot
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    # Get application instance without running it
+    app = setup_bot()
+    # Let the application handle its own event loop
+    app.run_polling() 

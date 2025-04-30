@@ -49,8 +49,8 @@ class InterceptHandler(logging.Handler):
             level, record.getMessage()
         )
 
-async def main():
-    """Initialize and start the bot."""
+def setup_bot():
+    """Initialize the bot and return the application instance."""
     # Setup logging first for observability
     setup_logging()
     
@@ -59,27 +59,23 @@ async def main():
     # Create the Application and pass it your bot's token
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     
-    # Start the event system
-    await event_system.start()
-    
     # Register command handlers
     register_start_handler(application)
     
     # Add error handler for graceful fallbacks
     application.add_error_handler(error_handler)
     
-    # Start the Bot
-    logger.info("Bot is starting polling")
-    await application.initialize()
-    await application.start_polling()
+    # Return the application without running it
+    return application
+
+async def start_event_system():
+    """Start the event system."""
+    await event_system.start()
     
-    # Block until the user presses Ctrl-C or the process receives SIGINT,
-    # SIGTERM or SIGABRT
-    await application.idle()
-    
-    # Shutdown the event system
+async def stop_event_system():
+    """Stop the event system."""
     await event_system.stop()
-    
+
 async def error_handler(update, context):
     """Log errors and send a user-friendly message."""
     logger.error(
@@ -93,6 +89,22 @@ async def error_handler(update, context):
             chat_id=update.effective_chat.id,
             text="Sorry, something went wrong. Please try again or restart with /start."
         )
+
+# We keep the main function for backward compatibility
+async def main():
+    """This function is kept for compatibility but should not be used directly."""
+    app = setup_bot()
+    await app.initialize()
+    await start_event_system()
+    
+    try:
+        await app.start()
+        # Run until stopped
+        await app.updater.stop()
+    finally:
+        await stop_event_system()
+        await app.stop()
+        await app.shutdown()
 
 if __name__ == '__main__':
     asyncio.run(main()) 
