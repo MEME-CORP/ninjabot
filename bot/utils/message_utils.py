@@ -60,8 +60,9 @@ def format_child_wallets_message(num_wallets: int) -> str:
         Formatted confirmation message
     """
     return (
-        f"Great! {num_wallets} child wallets will be created.\n\n"
-        f"Now, what's the total token volume you want to generate?"
+        f"✅ {num_wallets} child wallets have been created successfully!\n\n"
+        f"Now, what's the total token volume in USD you want to generate? "
+        f"Enter a number like 1000 for $1,000 USD."
     )
 
 def format_volume_confirmation_message(volume: float) -> str:
@@ -75,8 +76,8 @@ def format_volume_confirmation_message(volume: float) -> str:
         Formatted volume confirmation message
     """
     return (
-        f"Volume set to {volume:,.2f} tokens.\n\n"
-        f"Now, please enter the SPL token contract address you want to use:"
+        f"✅ Volume amount set to ${volume:,} USD.\n\n"
+        f"Now, please enter the token address you want to use:"
     )
 
 def format_schedule_preview(
@@ -149,12 +150,10 @@ def format_insufficient_balance_message(
         Formatted insufficient balance message
     """
     return (
-        f"⚠️ Insufficient balance\n\n"
+        f"⚠️ **Insufficient Balance**\n\n"
         f"Current balance: {current_balance:,.2f} {token_symbol}\n"
-        f"Required balance: {required_balance:,.2f} {token_symbol}\n\n"
-        f"Please transfer {required_balance - current_balance:,.2f} {token_symbol} "
-        f"to continue.\n\n"
-        f"The bot will automatically detect when funds arrive."
+        f"Required balance: ${required_balance:,} USD\n\n"
+        f"Please fund your wallet with the required amount and then click 'Check Again'."
     )
 
 def format_sufficient_balance_message(
@@ -172,9 +171,9 @@ def format_sufficient_balance_message(
         Formatted sufficient balance message
     """
     return (
-        f"✅ Sufficient balance detected!\n\n"
-        f"Current balance: {balance:,.2f} {token_symbol}\n\n"
-        f"You can now start the transfer execution."
+        f"✅ **Sufficient Balance Detected**\n\n"
+        f"Current balance: ${balance:,.2f} USD\n\n"
+        f"Ready to begin transfer execution. Click 'Begin Transfers' to start."
     )
 
 def format_transaction_status_message(

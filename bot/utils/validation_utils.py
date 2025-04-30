@@ -29,26 +29,37 @@ def validate_child_wallets_input(text: str) -> Tuple[bool, Union[int, str]]:
         
 def validate_volume_input(text: str) -> Tuple[bool, Union[float, str]]:
     """
-    Validate the volume input.
+    Validate user input for volume amount.
     
     Args:
-        text: The user input text
+        text: User input text
         
     Returns:
-        A tuple of (is_valid, value_or_error_message)
+        Tuple (is_valid, value_or_error)
     """
     try:
-        # Remove commas and spaces from input
-        cleaned_text = text.replace(',', '').replace(' ', '')
-        value = float(cleaned_text)
+        # Remove commas and USD signs if present
+        cleaned_text = text.replace(",", "").replace("$", "").strip()
         
-        if value < MIN_VOLUME:
-            return False, f"Volume must be at least {MIN_VOLUME}."
-            
-        return True, value
+        # Try to convert to float
+        volume = float(cleaned_text)
+        
+        # Check if positive
+        if volume <= 0:
+            return False, "Volume must be a positive number in USD."
+        
+        # Check if within reasonable range
+        if volume < 10:
+            return False, "Volume must be at least $10 USD."
+        
+        if volume > 1000000000:  # Billion dollar limit
+            return False, "Volume cannot exceed $1,000,000,000 USD."
+        
+        # Return as integer if it's a whole number, otherwise as float
+        return True, int(volume) if volume.is_integer() else volume
         
     except ValueError:
-        return False, "Please enter a valid number."
+        return False, "Please enter a valid number in USD (e.g., 1000 for $1,000 USD)."
 
 def validate_token_address(text: str) -> Tuple[bool, Union[str, str]]:
     """
