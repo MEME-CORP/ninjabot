@@ -2,6 +2,7 @@ from typing import Dict, List, Any, Optional
 import asyncio
 import telegram
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
 from telegram.ext import (
     CallbackContext, 
     CommandHandler, 
@@ -70,7 +71,7 @@ async def start(update: Update, context: CallbackContext) -> int:
     await update.message.reply_text(
         format_welcome_message(),
         reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=telegram.ParseMode.MARKDOWN
+        parse_mode=ParseMode.MARKDOWN
     )
     
     return ConversationState.WALLET_CHOICE
@@ -110,7 +111,7 @@ async def wallet_choice(update: Update, context: CallbackContext) -> int:
             # Send confirmation and ask for number of child wallets
             await query.edit_message_text(
                 format_wallet_created_message(address),
-                parse_mode=telegram.ParseMode.MARKDOWN
+                parse_mode=ParseMode.MARKDOWN
             )
             
             return ConversationState.NUM_CHILD_WALLETS
@@ -191,7 +192,7 @@ async def import_wallet(update: Update, context: CallbackContext) -> int:
         await context.bot.send_message(
             chat_id=user.id,
             text=format_wallet_imported_message(address),
-            parse_mode=telegram.ParseMode.MARKDOWN
+            parse_mode=ParseMode.MARKDOWN
         )
         
         return ConversationState.NUM_CHILD_WALLETS
@@ -447,7 +448,7 @@ async def generate_preview(update: Update, context: CallbackContext) -> None:
         
         await message.edit_text(
             preview_text,
-            parse_mode=telegram.ParseMode.MARKDOWN
+            parse_mode=ParseMode.MARKDOWN
         )
         
         # Add "wait for funding" message
