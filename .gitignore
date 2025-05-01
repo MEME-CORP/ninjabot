@@ -46,5 +46,11 @@ logs/
 htmlcov/
 .pytest_cache/
 
+#solana
+solana/wallet-storage/mother-wallet.json
+solana/wallet-storage/child-wallets.json
+solana/node_modules/
+
+
 # Prompts
 monoprompting/

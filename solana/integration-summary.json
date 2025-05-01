@@ -1,0 +1,45 @@
+{
+  "networkType": "devnet",
+  "totalOperations": 6,
+  "confirmedOperations": 0,
+  "failedOperations": 6,
+  "skippedOperations": 0,
+  "totalAmount": "0",
+  "totalFees": "0",
+  "feesCollected": "0",
+  "averageConfirmationTimeMs": 0,
+  "startTime": 1746105979936,
+  "endTime": 1746105979939,
+  "results": [
+    {
+      "opIndex": 0,
+      "status": "failed",
+      "error": "Failed to load source wallet at index 0"
+    },
+    {
+      "opIndex": 0,
+      "status": "failed",
+      "error": "Failed to load source wallet at index 0"
+    },
+    {
+      "opIndex": 1,
+      "status": "failed",
+      "error": "Failed to load source wallet at index 1"
+    },
+    {
+      "opIndex": 1,
+      "status": "failed",
+      "error": "Failed to load source wallet at index 1"
+    },
+    {
+      "opIndex": 2,
+      "status": "failed",
+      "error": "Failed to load source wallet at index 2"
+    },
+    {
+      "opIndex": 2,
+      "status": "failed",
+      "error": "Failed to load source wallet at index 2"
+    }
+  ]
+}
