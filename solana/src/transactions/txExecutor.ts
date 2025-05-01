@@ -268,10 +268,7 @@ export class TxExecutor extends EventEmitter<TxExecutorEvent, TxExecutorEventPay
         transaction.sign(...signers as unknown as Keypair[]);
         
         // Get signature from transaction
-        const txSignature = transaction.signature?.toString() || '';
-
-        // Send transaction
-        const sendResponse = await this.rpcClient.connection.sendRawTransaction(
+        const txSignature = await this.rpcClient.connection.sendRawTransaction(
           transaction.serialize(),
           {
             skipPreflight,
@@ -292,7 +289,11 @@ export class TxExecutor extends EventEmitter<TxExecutorEvent, TxExecutorEventPay
         const confirmationPromise = new Promise<any>((resolve, reject) => {
           // Use the standard Connection.confirmTransaction method instead of WebSockets
           this.rpcClient.connection.confirmTransaction(
-            txSignature,
+            {
+              signature: txSignature,
+              lastValidBlockHeight,
+              blockhash
+            },
             'confirmed'
           ).then(resolve).catch(reject);
         });
@@ -437,11 +438,11 @@ export class TxExecutor extends EventEmitter<TxExecutorEvent, TxExecutorEventPay
         }
 
         // Get source token account
-        const sourceTokenAccountsResponse = await this.rpcClient.rpc.getTokenAccountsByOwner(
+        const sourceTokenAccountsResponse = await this.rpcClient.getTokenAccountsByOwner(
           sourceWallet.publicKey.toString(),
           { mint: tokenMint },
           { encoding: 'jsonParsed' }
-        ).send();
+        );
 
         // Validate token accounts response
         if (!isTokenAccountsByOwnerResponse(sourceTokenAccountsResponse) || 
@@ -452,11 +453,11 @@ export class TxExecutor extends EventEmitter<TxExecutorEvent, TxExecutorEventPay
         const sourceTokenAccount = sourceTokenAccountsResponse.value[0].pubkey;
 
         // Get or create destination token account
-        const destinationTokenAccountsResponse = await this.rpcClient.rpc.getTokenAccountsByOwner(
+        const destinationTokenAccountsResponse = await this.rpcClient.getTokenAccountsByOwner(
           operation.destinationAddress,
           { mint: tokenMint },
           { encoding: 'jsonParsed' }
-        ).send();
+        );
 
         // Validate destination token accounts response
         if (!isTokenAccountsByOwnerResponse(destinationTokenAccountsResponse) || 
@@ -530,10 +531,7 @@ export class TxExecutor extends EventEmitter<TxExecutorEvent, TxExecutorEventPay
         transaction.sign(...signers as unknown as Keypair[]);
         
         // Get signature from transaction
-        const txSignature = transaction.signature?.toString() || '';
-
-        // Send transaction
-        const sendResponse = await this.rpcClient.connection.sendRawTransaction(
+        const txSignature = await this.rpcClient.connection.sendRawTransaction(
           transaction.serialize(),
           {
             skipPreflight,
@@ -554,7 +552,11 @@ export class TxExecutor extends EventEmitter<TxExecutorEvent, TxExecutorEventPay
         const confirmationPromise = new Promise<any>((resolve, reject) => {
           // Use the standard Connection.confirmTransaction method instead of WebSockets
           this.rpcClient.connection.confirmTransaction(
-            txSignature,
+            {
+              signature: txSignature,
+              lastValidBlockHeight,
+              blockhash
+            },
             'confirmed'
           ).then(resolve).catch(reject);
         });

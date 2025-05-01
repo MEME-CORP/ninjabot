@@ -54,7 +54,7 @@ export class FeeOracle {
   async getCurrentPriorityFee(): Promise<bigint> {
     try {
       // Get recent prioritization fees from the network
-      const response = await this.rpcClient.rpc.getRecentPrioritizationFees().send();
+      const response = await this.rpcClient.getRecentPrioritizationFees();
       
       // Use type guard to validate response format
       if (isPrioritizationFeesResponse(response)) {

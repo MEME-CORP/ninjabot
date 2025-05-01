@@ -52,7 +52,7 @@ export interface TokenAccountsByOwnerResponse {
  * Prioritization fees response from getRecentPrioritizationFees RPC method
  */
 export interface PrioritizationFeesResponse {
-  context: {
+  context?: {
     slot: number;
   };
   value: Array<{

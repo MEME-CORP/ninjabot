@@ -1,4 +1,4 @@
-import { Connection } from '@solana/web3.js';
+import { Connection, PublicKey, Commitment, GetAccountInfoConfig, SendOptions } from '@solana/web3.js';
 import { SolNetworkError } from './errors';
 import { 
   BalanceResponse, 
@@ -25,10 +25,10 @@ export class SolanaRpcClient {
    */
   async getLatestBlockhash(): Promise<{ blockhash: string; lastValidBlockHeight: number }> {
     try {
-      const { value } = await this.rpc.getLatestBlockhash().send();
+      const response = await this.connection.getLatestBlockhash();
       return {
-        blockhash: value.blockhash,
-        lastValidBlockHeight: value.lastValidBlockHeight
+        blockhash: response.blockhash,
+        lastValidBlockHeight: response.lastValidBlockHeight
       };
     } catch (error) {
       throw new SolNetworkError(`Failed to get latest blockhash: ${error instanceof Error ? error.message : String(error)}`);
@@ -40,8 +40,11 @@ export class SolanaRpcClient {
    */
   async getBalance(address: string): Promise<BalanceResponse> {
     try {
-      const response = await this.rpc.getBalance(address).send();
-      return response as BalanceResponse;
+      const balance = await this.connection.getBalance(new PublicKey(address));
+      return {
+        context: { slot: await this.connection.getSlot() },
+        value: balance
+      };
     } catch (error) {
       throw new SolNetworkError(`Failed to get balance: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -52,8 +55,17 @@ export class SolanaRpcClient {
    */
   async getAccountInfo(address: string, encoding = 'base64'): Promise<AccountInfoResponse> {
     try {
-      const response = await this.rpc.getAccountInfo(address, { encoding }).send();
-      return response as AccountInfoResponse;
+      const config: GetAccountInfoConfig = { commitment: 'confirmed' };
+      const accountInfo = await this.connection.getAccountInfo(new PublicKey(address), config);
+      return {
+        context: { slot: await this.connection.getSlot() },
+        value: accountInfo ? {
+          data: [Buffer.from(accountInfo.data).toString('base64'), encoding],
+          executable: accountInfo.executable,
+          lamports: accountInfo.lamports,
+          owner: accountInfo.owner.toString()
+        } : null
+      };
     } catch (error) {
       throw new SolNetworkError(`Failed to get account info: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -68,8 +80,29 @@ export class SolanaRpcClient {
     config: { encoding?: string } = { encoding: 'jsonParsed' }
   ): Promise<TokenAccountsByOwnerResponse> {
     try {
-      const response = await this.rpc.getTokenAccountsByOwner(owner, filter, config).send();
-      return response as TokenAccountsByOwnerResponse;
+      const ownerPublicKey = new PublicKey(owner);
+      const filterKey = filter.mint 
+        ? { mint: new PublicKey(filter.mint) } 
+        : { programId: new PublicKey(filter.programId!) };
+      
+      const accounts = await this.connection.getTokenAccountsByOwner(
+        ownerPublicKey,
+        filterKey,
+        { commitment: 'confirmed' }
+      );
+      
+      return {
+        context: { slot: await this.connection.getSlot() },
+        value: accounts.value.map(item => ({
+          pubkey: item.pubkey.toString(),
+          account: {
+            data: [Buffer.from(item.account.data).toString('base64'), 'base64'],
+            executable: item.account.executable,
+            lamports: item.account.lamports,
+            owner: item.account.owner.toString()
+          }
+        }))
+      };
     } catch (error) {
       throw new SolNetworkError(`Failed to get token accounts: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -80,8 +113,14 @@ export class SolanaRpcClient {
    */
   async getRecentPrioritizationFees(): Promise<PrioritizationFeesResponse> {
     try {
-      const response = await this.rpc.getRecentPrioritizationFees().send();
-      return response as PrioritizationFeesResponse;
+      // In web3.js v1 we need to call the RPC method directly since there's no getRecentPrioritizationFees helper
+      const response = await this.connection.getRecentPrioritizationFees();
+      return { 
+        value: response.map(fee => ({
+          slot: fee.slot,
+          prioritizationFee: fee.prioritizationFee
+        })) 
+      };
     } catch (error) {
       throw new SolNetworkError(`Failed to get prioritization fees: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -92,11 +131,21 @@ export class SolanaRpcClient {
    */
   async sendTransaction(
     transaction: any, 
-    options: { skipPreflight?: boolean; maxRetries?: number; preflightCommitment?: string } = {}
+    options: { skipPreflight?: boolean; maxRetries?: number; preflightCommitment?: Commitment } = {}
   ): Promise<string> {
     try {
-      const response = await this.rpc.sendTransaction(transaction, options).send();
-      return response as string;
+      const sendOptions: SendOptions = {
+        skipPreflight: options.skipPreflight,
+        maxRetries: options.maxRetries,
+        preflightCommitment: options.preflightCommitment
+      };
+      
+      const signature = await this.connection.sendTransaction(
+        transaction,
+        [],
+        sendOptions
+      );
+      return signature;
     } catch (error) {
       throw new SolNetworkError(`Failed to send transaction: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -107,11 +156,25 @@ export class SolanaRpcClient {
    */
   async confirmTransaction(
     transaction: { signature: string; blockhash: string; lastValidBlockHeight: number },
-    commitment = 'confirmed'
+    commitment: Commitment = 'confirmed'
   ): Promise<TransactionConfirmationResponse> {
     try {
-      const response = await this.rpc.confirmTransaction(transaction, commitment).send();
-      return response as TransactionConfirmationResponse;
+      const result = await this.connection.confirmTransaction(
+        {
+          signature: transaction.signature,
+          blockhash: transaction.blockhash,
+          lastValidBlockHeight: transaction.lastValidBlockHeight
+        },
+        commitment
+      );
+      
+      return {
+        context: { slot: result.context.slot },
+        value: {
+          err: result.value.err,
+          confirmations: null
+        }
+      };
     } catch (error) {
       throw new SolNetworkError(`Failed to confirm transaction: ${error instanceof Error ? error.message : String(error)}`);
     }

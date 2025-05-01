@@ -413,12 +413,12 @@ export class WalletFunder extends EventEmitter<WalletFunderEvent, WalletFunderEv
         // Sign transaction
         transaction.sign(motherWallet);
 
-        // Send transaction - cast to any to work around type issues
-        const txSignature = await (this.rpcClient.rpc.sendTransaction as any)(transaction, {
+        // Send transaction
+        const txSignature = await this.rpcClient.sendTransaction(transaction, {
           skipPreflight,
           maxRetries: 1,
           preflightCommitment: 'confirmed'
-        }).send();
+        });
 
         if (!txSignature) {
           throw new SolNetworkError('Failed to send transaction: Empty signature returned');
@@ -435,15 +435,16 @@ export class WalletFunder extends EventEmitter<WalletFunderEvent, WalletFunderEv
         const confirmStartTime = Date.now();
 
         // Wait for confirmation with timeout
-        const confirmationResult = await Promise.race([
-          (this.rpcClient.rpc.confirmTransaction as any)(
-            { signature: txSignature, blockhash, lastValidBlockHeight: Number(lastValidBlockHeight) },
-            'confirmed'
-          ).send(),
-          new Promise<null>((resolve) => 
-            setTimeout(() => resolve(null), confirmationTimeoutMs)
-          )
-        ]);
+        const confirmationPromise = this.rpcClient.confirmTransaction(
+          { signature: txSignature, blockhash, lastValidBlockHeight: Number(lastValidBlockHeight) },
+          'confirmed'
+        );
+        
+        const timeoutPromise = new Promise<null>((resolve) => 
+          setTimeout(() => resolve(null), confirmationTimeoutMs)
+        );
+        
+        const confirmationResult = await Promise.race([confirmationPromise, timeoutPromise]);
 
         // Check for timeout
         if (confirmationResult === null) {
@@ -461,10 +462,10 @@ export class WalletFunder extends EventEmitter<WalletFunderEvent, WalletFunderEv
         // Get transaction fee from the transaction response
         let fee: bigint = 0n;
         try {
-          const txResponse = await (this.rpcClient.rpc.getTransaction as any)(
+          const txResponse = await this.rpcClient.connection.getTransaction(
             txSignature,
             { commitment: 'confirmed', maxSupportedTransactionVersion: 0 }
-          ).send();
+          );
           
           if (txResponse?.meta?.fee) {
             fee = BigInt(txResponse.meta.fee);
@@ -534,12 +535,8 @@ export class WalletFunder extends EventEmitter<WalletFunderEvent, WalletFunderEv
    */
   private async getWalletBalance(address: string): Promise<bigint> {
     try {
-      const balance = await (this.rpcClient.rpc.getBalance as any)(
-        address,
-        { commitment: 'confirmed' }
-      ).send();
-      
-      return BigInt(balance);
+      const response = await this.rpcClient.getBalance(address);
+      return BigInt(response.value);
     } catch (error) {
       throw new Error(`Failed to get wallet balance: ${error instanceof Error ? error.message : String(error)}`);
     }

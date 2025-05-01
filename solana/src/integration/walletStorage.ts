@@ -131,7 +131,7 @@ export async function generateAndStoreChildWallets(count: number): Promise<any[]
     
     const childData = {
       index: i,
-      publicKey: childSigner.address,
+      publicKey: childSigner.publicKey.toString(),
       derivationPath: `m/0/${i}`, // Based on the derivation path in walletManager
       parentPublicKey: motherWalletData.publicKey,
       createdAt: new Date().toISOString(),

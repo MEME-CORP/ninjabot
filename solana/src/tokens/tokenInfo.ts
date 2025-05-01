@@ -78,10 +78,10 @@ export class TokenInfo {
       new PublicKey(mintAddress);
       
       // Fetch token metadata from the chain
-      const response = await this.rpcClient.rpc.getAccountInfo(
+      const response = await this.rpcClient.getAccountInfo(
         mintAddress,
-        { encoding: 'jsonParsed' }
-      ).send();
+        'jsonParsed'
+      );
       
       // Use type guard to validate response format
       if (!isAccountInfoResponse(response) || !response.value) {
@@ -218,10 +218,7 @@ export class TokenInfo {
    */
   private async fetchMintAccount(mintAddress: string): Promise<{ data: Buffer } | null> {
     try {
-      const response = await this.rpcClient.rpc.getAccountInfo({
-        pubkey: mintAddress,
-        encoding: 'base64'
-      }).send();
+      const response = await this.rpcClient.getAccountInfo(mintAddress, 'base64');
       
       // Use type guard to validate response format
       if (!isAccountInfoResponse(response) || !response.value) {

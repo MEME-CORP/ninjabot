@@ -1,45 +1,45 @@
 {
   "networkType": "devnet",
-  "totalOperations": 6,
-  "confirmedOperations": 0,
+  "totalOperations": 9,
+  "confirmedOperations": 3,
   "failedOperations": 6,
   "skippedOperations": 0,
   "totalAmount": "0",
   "totalFees": "0",
   "feesCollected": "0",
   "averageConfirmationTimeMs": 0,
-  "startTime": 1746105979936,
-  "endTime": 1746105979939,
+  "startTime": 1746110380313,
+  "endTime": 1746110386050,
   "results": [
     {
       "opIndex": 0,
       "status": "failed",
-      "error": "Failed to load source wallet at index 0"
+      "error": "failed to send transaction: Transaction simulation failed: Attempt to debit an account but found no record of a prior credit."
     },
     {
       "opIndex": 0,
       "status": "failed",
-      "error": "Failed to load source wallet at index 0"
+      "error": "failed to send transaction: Transaction simulation failed: Attempt to debit an account but found no record of a prior credit."
     },
     {
       "opIndex": 1,
       "status": "failed",
-      "error": "Failed to load source wallet at index 1"
+      "error": "failed to send transaction: Transaction simulation failed: Attempt to debit an account but found no record of a prior credit."
     },
     {
       "opIndex": 1,
       "status": "failed",
-      "error": "Failed to load source wallet at index 1"
+      "error": "failed to send transaction: Transaction simulation failed: Attempt to debit an account but found no record of a prior credit."
     },
     {
       "opIndex": 2,
       "status": "failed",
-      "error": "Failed to load source wallet at index 2"
+      "error": "failed to send transaction: Transaction simulation failed: Attempt to debit an account but found no record of a prior credit."
     },
     {
       "opIndex": 2,
       "status": "failed",
-      "error": "Failed to load source wallet at index 2"
+      "error": "failed to send transaction: Transaction simulation failed: Attempt to debit an account but found no record of a prior credit."
     }
   ]
 }

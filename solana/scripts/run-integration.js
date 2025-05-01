@@ -32,6 +32,7 @@ async function main() {
     let fundingAmountSol = 0.1;
     let totalVolumeSol = 0.05;
     let tokenMint = null;
+    let forceNewMotherWallet = false;
     
     // Parse parameters if provided
     for (let i = 0; i < args.length; i++) {
@@ -45,6 +46,8 @@ async function main() {
         totalVolumeSol = parseFloat(args[++i]);
       } else if (arg === '--token' || arg === '-t') {
         tokenMint = args[++i];
+      } else if (arg === '--new-wallet' || arg === '-n') {
+        forceNewMotherWallet = true;
       } else if (arg === '--help' || arg === '-h') {
         showHelp();
         return;
@@ -60,6 +63,7 @@ Parameters:
 - Funding per Child: ${fundingAmountSol} SOL
 - Total Volume: ${totalVolumeSol} SOL
 - Token Mint: ${tokenMint || 'None (using SOL)'}
+- Force New Mother Wallet: ${forceNewMotherWallet ? 'Yes' : 'No'}
 ==============================================
 `);
     
@@ -70,7 +74,8 @@ Parameters:
       childCount, 
       fundingAmountSol, 
       totalVolumeSol,
-      tokenMint
+      tokenMint,
+      forceNewMotherWallet
     );
     
     // Print summary
@@ -115,10 +120,11 @@ Options:
   --funding, -f     Amount of SOL to fund each child wallet (default: 0.1)
   --volume, -v      Total volume of SOL to transfer (default: 0.05)
   --token, -t       Token mint address (default: null, uses SOL)
+  --new-wallet, -n  Force creation of a new mother wallet (default: false)
   --help, -h        Show this help message
   
 Example:
-  node run-integration.js -c 5 -f 0.2 -v 0.1
+  node run-integration.js -c 5 -f 0.2 -v 0.1 -n
 `);
 }
 
