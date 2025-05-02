@@ -193,11 +193,36 @@ export async function getWalletFromIndex(index: number): Promise<Keypair | null>
     return walletCache.get(index) || null;
   }
   
-  // For child wallets, we would derive them from stored data
+  // For child wallets, we load them from stored data
   if (index >= 0) {
     try {
-      // In a production implementation, we would look up actual wallet
-      // For now, generate a test wallet for development
+      const fs = require('fs');
+      const path = require('path');
+      const WALLET_STORAGE_DIR = path.join(process.cwd(), 'wallet-storage');
+      const CHILD_WALLETS_FILE = path.join(WALLET_STORAGE_DIR, 'child-wallets.json');
+      
+      if (fs.existsSync(CHILD_WALLETS_FILE)) {
+        const childWallets = JSON.parse(fs.readFileSync(CHILD_WALLETS_FILE, 'utf8'));
+        
+        // Find the child wallet with the matching index
+        const childWallet = childWallets.find((w: any) => w.index === index);
+        
+        if (childWallet && childWallet.privateKeyBase64) {
+          // Convert base64 private key back to bytes
+          const privateKeyBytes = Buffer.from(childWallet.privateKeyBase64, 'base64');
+          
+          // Create keypair from the private key
+          const childKeypair = Keypair.fromSecretKey(privateKeyBytes);
+          
+          // Cache the wallet
+          walletCache.set(index, childKeypair);
+          
+          return childKeypair;
+        }
+      }
+      
+      // Fallback: If no stored child wallet is found, generate a new one
+      console.warn(`No stored child wallet found at index ${index}, generating a new one.`);
       const testWallet = Keypair.generate();
       walletCache.set(index, testWallet);
       return testWallet;

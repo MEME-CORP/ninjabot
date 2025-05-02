@@ -65,6 +65,7 @@ Parameters:
 - Token Mint: ${tokenMint || 'None (using SOL)'}
 - Force New Mother Wallet: ${forceNewMotherWallet ? 'Yes' : 'No'}
 ==============================================
+${!tokenMint ? '\nNote: Running in devnet test mode - funds will be returned to mother wallet\n' : ''}
 `);
     
     console.log('Starting integration workflow...');
@@ -122,6 +123,13 @@ Options:
   --token, -t       Token mint address (default: null, uses SOL)
   --new-wallet, -n  Force creation of a new mother wallet (default: false)
   --help, -h        Show this help message
+  
+Notes:
+  - When running on devnet without a token mint (default behavior),
+    the script will fund child wallets and then return funds to the
+    mother wallet instead of executing transfers between child wallets.
+  - For mainnet or when a token mint is provided, the regular transfer
+    schedule will be executed between child wallets.
   
 Example:
   node run-integration.js -c 5 -f 0.2 -v 0.1 -n

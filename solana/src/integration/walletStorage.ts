@@ -129,9 +129,13 @@ export async function generateAndStoreChildWallets(count: number): Promise<any[]
   for (let i = 0; i < count; i++) {
     const childSigner = await defaultWalletManager.deriveChildWallet(motherPrivateKeyBytes, i);
     
+    // Store the private key for the child wallet
+    const privateKeyBase64 = Buffer.from(childSigner.secretKey).toString('base64');
+    
     const childData = {
       index: i,
       publicKey: childSigner.publicKey.toString(),
+      privateKeyBase64: privateKeyBase64, // Add private key
       derivationPath: `m/0/${i}`, // Based on the derivation path in walletManager
       parentPublicKey: motherWalletData.publicKey,
       createdAt: new Date().toISOString(),

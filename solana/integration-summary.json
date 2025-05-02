@@ -1,45 +1,33 @@
 {
   "networkType": "devnet",
-  "totalOperations": 9,
+  "totalOperations": 3,
   "confirmedOperations": 3,
-  "failedOperations": 6,
+  "failedOperations": 0,
   "skippedOperations": 0,
-  "totalAmount": "0",
+  "totalAmount": "299985000",
   "totalFees": "0",
   "feesCollected": "0",
-  "averageConfirmationTimeMs": 0,
-  "startTime": 1746110380313,
-  "endTime": 1746110386050,
+  "averageConfirmationTimeMs": 1088,
+  "startTime": 1746191392465,
+  "endTime": 1746191399668,
   "results": [
     {
       "opIndex": 0,
-      "status": "failed",
-      "error": "failed to send transaction: Transaction simulation failed: Attempt to debit an account but found no record of a prior credit."
-    },
-    {
-      "opIndex": 0,
-      "status": "failed",
-      "error": "failed to send transaction: Transaction simulation failed: Attempt to debit an account but found no record of a prior credit."
+      "status": "confirmed",
+      "signature": "594CYJAgbk7WJ54dx7x5AAzug4yn4ReWjvTbAFpeRANbgawoErGg1S7DMGDD5GwWawL5bHwe7yJoyTTWqH78UHVF",
+      "confirmationTime": 1088
     },
     {
       "opIndex": 1,
-      "status": "failed",
-      "error": "failed to send transaction: Transaction simulation failed: Attempt to debit an account but found no record of a prior credit."
-    },
-    {
-      "opIndex": 1,
-      "status": "failed",
-      "error": "failed to send transaction: Transaction simulation failed: Attempt to debit an account but found no record of a prior credit."
+      "status": "confirmed",
+      "signature": "2p15bcD1TuBNZuqEEGYuiBbJuKLJrrrmYJPAdSKcXTWoER1Y32CjWq4wNWkZTsPp5Lp4ekDR2yo7qxp5B7GPod3D",
+      "confirmationTime": 1077
     },
     {
       "opIndex": 2,
-      "status": "failed",
-      "error": "failed to send transaction: Transaction simulation failed: Attempt to debit an account but found no record of a prior credit."
-    },
-    {
-      "opIndex": 2,
-      "status": "failed",
-      "error": "failed to send transaction: Transaction simulation failed: Attempt to debit an account but found no record of a prior credit."
+      "status": "confirmed",
+      "signature": "mRCXeCSmErhyf8qtaFv7UasjKd9snVnmh7yrzwr8GfmHUXZEBDtR8xwvoE7U1Tyi1iqkC39AJgBcbr3Ja1tZ3pk",
+      "confirmationTime": 1099
     }
   ]
 }

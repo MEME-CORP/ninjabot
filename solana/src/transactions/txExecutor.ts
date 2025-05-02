@@ -334,6 +334,17 @@ export class TxExecutor extends EventEmitter<TxExecutorEvent, TxExecutorEventPay
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
         
+        // Log detailed information about the error
+        console.error(`Transaction error details:`, {
+          message: lastError.message,
+          stack: lastError.stack,
+          operation: {
+            sourceIndex: operation.sourceIndex,
+            destinationAddress: operation.destinationAddress,
+            amount: operation.amount.toString()
+          }
+        });
+        
         // Check if this is a retryable error
         const isRetryable = this.isRetryableError(lastError);
         
@@ -596,6 +607,17 @@ export class TxExecutor extends EventEmitter<TxExecutorEvent, TxExecutorEventPay
 
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
+        
+        // Log detailed information about the error
+        console.error(`Transaction error details:`, {
+          message: lastError.message,
+          stack: lastError.stack,
+          operation: {
+            sourceIndex: operation.sourceIndex,
+            destinationAddress: operation.destinationAddress,
+            amount: operation.amount.toString()
+          }
+        });
         
         // Check if this is a retryable error
         const isRetryable = this.isRetryableError(lastError);
