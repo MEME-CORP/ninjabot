@@ -19,7 +19,19 @@
     "test:walletfunder": "node scripts/test-walletfunder.js",
     "test:txexecutor": "node scripts/test-txexecutor.js",
     "integration": "node scripts/run-integration.js",
-    "check-balance": "node scripts/check-balance.js"
+    "check-balance": "node scripts/check-balance.js",
+    "check-balances": "node scripts/check-balances.js",
+    "test:mainnet-wallet": "node scripts/test-mainnet-wallet.js",
+    "test:mainnet-child-wallets": "node scripts/test-mainnet-child-wallets.js",
+    "test:mainnet-funding": "node scripts/test-mainnet-funding.js",
+    "test:mainnet-transfer": "node scripts/test-mainnet-sol-transfer.js",
+    "test:mainnet-return": "node scripts/test-mainnet-return-funds.js",
+    "mainnet-integration": "node scripts/run-mainnet-integration.js",
+    "jupiter:fund": "node scripts/jupiter-volume/fund-wallets.js",
+    "jupiter:quote": "node scripts/jupiter-volume/get-quote.js",
+    "jupiter:buy": "node scripts/jupiter-volume/buy-tokens.js",
+    "jupiter:sell": "node scripts/jupiter-volume/sell-tokens.js",
+    "jupiter:volume": "node scripts/jupiter-volume/run-jupiter-volume.js"
   },
   "keywords": [],
   "author": "",
@@ -37,9 +49,11 @@
   },
   "dependencies": {
     "@solana/spl-token": "^0.3.8",
+    "@solana/spl-token-registry": "^0.2.4574",
     "@solana/web3.js": "^1.87.6",
     "bip39": "^3.1.0",
     "ed25519-hd-key": "^1.3.0",
+    "node-fetch": "^2.7.0",
     "rpc-websockets": "^7.5.1"
   }
 }

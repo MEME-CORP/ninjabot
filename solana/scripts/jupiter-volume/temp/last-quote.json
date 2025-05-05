@@ -1,0 +1,41 @@
+{
+  "inputMint": "So11111111111111111111111111111111111111112",
+  "inAmount": "1000000",
+  "outputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "outAmount": "146702",
+  "otherAmountThreshold": "145969",
+  "swapMode": "ExactIn",
+  "slippageBps": 50,
+  "platformFee": {
+    "amount": "0",
+    "feeBps": 0
+  },
+  "priceImpactPct": "0",
+  "routePlan": [
+    {
+      "swapInfo": {
+        "ammKey": "3msVd34R5KxonDzyNSV5nT19UtUeJ2RF1NaQhvVPNLxL",
+        "label": "Meteora DLMM",
+        "inputMint": "So11111111111111111111111111111111111111112",
+        "outputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "inAmount": "1000000",
+        "outAmount": "146702",
+        "feeAmount": "119",
+        "feeMint": "So11111111111111111111111111111111111111112"
+      },
+      "percent": 100
+    }
+  ],
+  "scoreReport": null,
+  "contextSlot": 338058911,
+  "timeTaken": 0.001401177,
+  "swapUsdValue": "0.1466424301923741918297378149",
+  "simplerRouteUsed": false,
+  "mostReliableAmmsQuoteReport": {
+    "info": {
+      "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE": "146595",
+      "BZtgQEyS6eXUXicYPHecYQ7PybqodXQMvkjUbP4R8mUU": "146235"
+    }
+  },
+  "useIncurredSlippageForQuoting": null
+}

@@ -1,0 +1,10 @@
+{
+  "wallet": "EEEr8wfe5CvhUAcDoSP3QvY4QHhPsmj7MGZ8T2Ga2QBy",
+  "inputToken": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "outputToken": "So11111111111111111111111111111111111111112",
+  "inputAmount": "171456",
+  "inputAmountFormatted": 0.171456,
+  "expectedOutputAmount": 0.001169855,
+  "transactionSignature": "45jBEVPhP6MZtstBFJNmbGzd4RA5ahu5ctdGumyF66EKHjZTM227ubwF2w9oNFzdRjLPp6Dxn9cJjdDQhUZdrm6F",
+  "timestamp": "2025-05-05T19:51:39.760Z"
+}

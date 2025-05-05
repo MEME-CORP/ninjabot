@@ -1,0 +1,27 @@
+{
+  "testConfig": {
+    "solAmount": 0.002,
+    "walletIndices": [
+      0,
+      1
+    ],
+    "tokenMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "timestamp": "2025-05-05T19:50:16.195Z"
+  },
+  "summary": {
+    "totalWallets": 2,
+    "successfulBuys": 2,
+    "successfulSells": 2,
+    "totalSolVolume": 0.00464957,
+    "totalTokenVolume": 0.32989599999999997,
+    "buyTransactions": [
+      "2HnNxG7gzezh3kx2ZLUqwPkSUmFBw1YuBLkkKQQGAzAeJP4aR5pPaJvjuSqAqFcKUU3cRqXxgRtB8ukGBuKiR4cZ",
+      "3Jksyv5zvA4FAkohht4LKCbWjaSVosvozXLbeY3J2LAxKHGk1kYHXozPEF2UpE4mL6WDXWPjEa5EBh435NnQvfjL"
+    ],
+    "sellTransactions": [
+      "45jBEVPhP6MZtstBFJNmbGzd4RA5ahu5ctdGumyF66EKHjZTM227ubwF2w9oNFzdRjLPp6Dxn9cJjdDQhUZdrm6F",
+      "2wJgJE71hZX8QX26o2gD2JqB3uA2DPaHTvABf1WLQhsY1s3LQuu9MfxHZy4WjcyLtYFLesA9MrBCTWCHpXNF59Ax"
+    ],
+    "completedAt": "2025-05-05T19:51:57.271Z"
+  }
+}
