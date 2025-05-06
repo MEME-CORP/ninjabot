@@ -32,7 +32,7 @@ logs/
 *.log
 
 # Project specific
-*.yaml
+monoprompting_exp_v2.2/
 
 # IDE specific
 .idea/
@@ -50,6 +50,7 @@ htmlcov/
 solana/wallet-storage/mother-wallet.json
 solana/wallet-storage/child-wallets.json
 solana/node_modules/
+solana/wallet-storage/
 
 
 # Prompts

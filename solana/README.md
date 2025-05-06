@@ -1,195 +1,374 @@
-# NinjaBot Solana Module
+Ninja
 
-This module provides Solana blockchain integration for the NinjaBot application. It manages wallet creation, token transfers, and fee collection on the Solana blockchain.
 
-## Features
+# Solana Trading Bot API
 
-- Wallet management (mother wallet and child wallets)
-- Transaction scheduling and execution
-- Fee management and collection
-- Priority fee optimization
-- Transaction retry mechanisms
+A comprehensive API for a Solana trading bot with Jupiter DEX integration. This API provides endpoints for wallet management, Jupiter DEX interaction, and fund management.
 
-## Modules
+## Table of Contents
 
-### SolanaRpcClient
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Installation](#installation)
+  - [Running the API](#running-the-api)
+- [API Endpoints](#api-endpoints)
+  - [Wallet Management](#wallet-management)
+  - [Jupiter DEX Integration](#jupiter-dex-integration)
+- [Testing](#testing)
+- [Deployment](#deployment)
+- [Architecture](#architecture)
+- [Security Considerations](#security-considerations)
 
-A wrapper around the Solana web3.js v2 RPC client, providing a consistent interface for making RPC calls to the Solana blockchain.
-
-### WalletManager
-
-Provides functionality for creating, importing, and managing Solana wallets. Supports:
-- Creating new wallets with mnemonic phrases
-- Importing wallets from mnemonics or private keys
-- Deriving child wallets using BIP44 derivation paths
-
-### Scheduler
-
-Generates transaction schedules for distributing tokens among wallets. Features:
-- Creation of randomized, unique amounts that sum to a specified total
-- Verification of transfer operations
-- Round-robin transfer patterns
-
-### FeeOracle
-
-Provides functionality for determining optimal transaction fees and detecting fee spikes. Features:
-- Fetching current network priority fees
-- Setting fee thresholds to detect spikes
-- Calculating optimal fees for successful transactions
-
-### TokenInfo
-
-Provides functionality for retrieving token information from the Solana blockchain. Features:
-- Fetching token decimal places from a mint address
-- Validating token mint addresses
-- Getting token supply information
-- Handling network errors with sensible defaults
-
-## Implementation Status
-
-The project is being implemented in stages:
-
-1. ✅ SolanaRpcClient - Basic RPC wrapper
-2. ✅ WalletManager - Wallet creation and derivation
-3. ✅ Scheduler - Transaction scheduling
-4. ✅ FeeOracle - Fee estimation and spike detection
-5. ✅ TokenInfo - Token metadata helper
-6. ⬜ FeeCollector - Service fee management
-7. ⬜ TxExecutor - Transaction execution with retries
-8. ⬜ Integration with database and UI
-
-## Setup
+## Getting Started
 
 ### Prerequisites
 
-- Node.js (LTS version recommended)
-- npm or yarn
+- Node.js v16 or higher
+- npm v7 or higher
+- Access to a Solana RPC endpoint
 
 ### Installation
 
-```bash
-# Install dependencies
-npm install
+1. Clone the repository
+2. Navigate to the `solana` directory
+3. Install dependencies:
 
-# Build the project
-npm run build
-
-# Run tests
-npm test
-```
-
-## Development
-
-### Project Structure
-
-- `src/`: Source code
-  - `config.ts`: Configuration constants and settings
-  - `utils/`: Utility modules
-    - `solanaRpcClient.ts`: Solana RPC client for blockchain interaction
-  - `wallet/`: Wallet management modules
-  - `scheduler/`: Transaction scheduling modules
-  - `fees/`: Fee calculation and collection modules
-  - `transactions/`: Transaction building and execution modules
-
-### Testing
-
-All modules have corresponding test files in the `tests/` directory. Tests can be run using:
-
-```bash
-npm test
-```
-
-## Usage
-
-This module will be integrated with the NinjaBot Telegram bot application to provide Solana blockchain functionality.
-
-## Solana Integration for Ninjabot
-
-This module provides the core Solana blockchain integration for Ninjabot, with support for:
-
-- Wallet creation and management
-- Transaction scheduling and execution
-- Fee management
-- Token transfers
-- Error handling and retry mechanics
-
-### Getting Started
-
-1. Install dependencies:
 ```bash
 npm install
 ```
 
-2. Build the project:
-```bash
-npm run build
-```
-
-3. Run tests:
-```bash
-npm test
-```
-
-### Solana Devnet Integration
-
-This module includes a complete integration with Solana's Devnet for testing and demonstration:
-
-1. Create a mother wallet and child wallets
-2. Fund child wallets from the mother wallet
-3. Schedule transfers between child wallets with fee collection
-4. Execute the transfers on Solana devnet
-
-#### Running the Integration
-
-To run the integration test on Solana devnet:
+4. Verify dependencies with the provided script:
 
 ```bash
-npm run integration
+./check-dependencies.ps1
 ```
 
-Or with custom parameters:
+### Running the API
+
+The API provides several methods to start the server:
+
+1. Using the simple starter script:
 
 ```bash
-npm run integration -- --children 5 --funding 0.2 --volume 0.1
+./start-api.bat
 ```
 
-Available options:
-- `--children` or `-c`: Number of child wallets to create (default: 3)
-- `--funding` or `-f`: Amount of SOL to fund each child wallet with (default: 0.1)
-- `--volume` or `-v`: Total volume of SOL to transfer (default: 0.05)
-- `--token` or `-t`: Token mint address for token transfers (default: null, uses SOL)
-
-#### Integration Tests
-
-The integration module includes tests that connect to Solana devnet:
+2. Using the robust server starter with error handling:
 
 ```bash
-npm run test:integration
+./run-api-server.cmd
 ```
 
-These tests create real wallets on devnet without executing transactions.
+3. Directly using Node.js:
 
-### Wallet Storage
+```bash
+node api/index.js
+```
 
-Mother and child wallets are stored in the `wallet-storage` directory in JSON format. This allows
-for persistence between runs and manual inspection of wallet addresses.
+The API will start on port 3000 by default. You can change this by setting the `PORT` environment variable.
 
-**Warning**: In production, private keys should be stored in a secure environment, not in plain text files.
+## API Endpoints
 
-### Transaction Module
+The API provides the following categories of endpoints:
 
-The transaction executor (`txExecutor`) provides:
+### Wallet Management
 
-- SOL transfers between wallets
-- SPL token transfers
-- Fee spike detection
-- Comprehensive error handling
-- Retry mechanisms for transient errors
+#### Create/Import Mother Wallet
 
-### Integration with Python Bot
+- **Endpoint**: `POST /api/wallets/mother`
+- **Description**: Creates a new mother wallet or imports an existing one from a private key.
+- **Request Body**:
+  ```json
+  {
+    "privateKeyBase58": "optional_base58_encoded_private_key"
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "message": "Mother wallet created/imported successfully.",
+    "motherWalletPublicKey": "wallet_public_key",
+    "motherWalletPrivateKeyBase58": "wallet_private_key_base58"
+  }
+  ```
 
-The Solana module is designed to be integrated with the Python bot via:
+#### Get Mother Wallet Info
 
-1. Command-line interface: Run operations through scripts
-2. API: Add a simple REST API layer on top (future enhancement)
-3. Direct integration: Import the compiled JS code from Python using appropriate bindings 
+- **Endpoint**: `GET /api/wallets/mother/:publicKey`
+- **Description**: Gets information about a mother wallet, including its balance.
+- **Response**:
+  ```json
+  {
+    "publicKey": "wallet_public_key",
+    "balanceSol": 0.0,
+    "balanceLamports": 0
+  }
+  ```
+
+#### Derive Child Wallets
+
+- **Endpoint**: `POST /api/wallets/children`
+- **Description**: Derives child wallets from a mother wallet.
+- **Request Body**:
+  ```json
+  {
+    "motherWalletPublicKey": "mother_wallet_public_key",
+    "count": 3,
+    "saveToFile": false
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "message": "Child wallets derived successfully.",
+    "motherWalletPublicKey": "mother_wallet_public_key",
+    "childWallets": [
+      {
+        "publicKey": "child_wallet_public_key",
+        "privateKeyBase58": "child_wallet_private_key_base58"
+      },
+      // More child wallets...
+    ]
+  }
+  ```
+
+#### Fund Child Wallets
+
+- **Endpoint**: `POST /api/wallets/fund-children`
+- **Description**: Funds child wallets from a mother wallet.
+- **Request Body**:
+  ```json
+  {
+    "motherWalletPrivateKeyBase58": "mother_wallet_private_key_base58",
+    "childWallets": [
+      {
+        "publicKey": "child_wallet_public_key",
+        "amountSol": 0.002
+      },
+      // More child wallets...
+    ]
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "status": "success|partial|failed",
+    "results": [
+      {
+        "childPublicKey": "child_wallet_public_key",
+        "transactionId": "transaction_signature",
+        "status": "funded|failed",
+        "error": "optional_error_message",
+        "newBalanceSol": 0.002
+      },
+      // More results...
+    ],
+    "motherWalletFinalBalanceSol": 0.998,
+    "message": "Child wallets funding completed."
+  }
+  ```
+
+#### Return Funds to Mother Wallet
+
+- **Endpoint**: `POST /api/wallets/return-funds`
+- **Description**: Returns funds from a child wallet to a mother wallet.
+- **Request Body**:
+  ```json
+  {
+    "childWalletPrivateKeyBase58": "child_wallet_private_key_base58",
+    "motherWalletPublicKey": "mother_wallet_public_key",
+    "returnAllFunds": false
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "status": "success|failed",
+    "transactionId": "transaction_signature",
+    "amountReturnedSol": 0.0018,
+    "childWalletFinalBalanceSol": 0.0002,
+    "message": "Funds returned to mother wallet successfully."
+  }
+  ```
+
+### Jupiter DEX Integration
+
+#### Get Jupiter Swap Quote
+
+- **Endpoint**: `POST /api/jupiter/quote`
+- **Description**: Gets a swap quote from Jupiter DEX.
+- **Request Body**:
+  ```json
+  {
+    "inputMint": "SOL",
+    "outputMint": "USDC",
+    "amount": 1000000,
+    "slippageBps": 50,
+    "onlyDirectRoutes": false,
+    "asLegacyTransaction": false,
+    "platformFeeBps": 0
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "message": "Jupiter quote retrieved successfully",
+    "quoteResponse": {
+      // Full Jupiter quote response
+      "inAmount": "1000000",
+      "outAmount": "12345678",
+      "amount": "1000000",
+      "otherAmountThreshold": "12222222",
+      // Additional fields...
+    }
+  }
+  ```
+
+#### Execute Jupiter Swap
+
+- **Endpoint**: `POST /api/jupiter/swap`
+- **Description**: Executes a swap on Jupiter DEX with optional fee collection.
+- **Request Body**:
+  ```json
+  {
+    "userWalletPrivateKeyBase58": "user_wallet_private_key_base58",
+    "quoteResponse": {
+      // Full Jupiter quote response from /quote endpoint
+    },
+    "wrapAndUnwrapSol": true,
+    "asLegacyTransaction": false,
+    "collectFees": true
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "message": "Swap executed successfully",
+    "status": "success",
+    "transactionId": "swap_transaction_signature",
+    "feeCollection": {
+      "status": "success|failed|skipped",
+      "transactionId": "fee_transaction_signature",
+      "feeAmount": 0.0001,
+      "feeTokenMint": "fee_token_mint"
+    },
+    "newBalanceSol": 0.5123
+  }
+  ```
+
+#### Get Supported Tokens
+
+- **Endpoint**: `GET /api/jupiter/tokens`
+- **Description**: Gets a list of tokens supported by the API for Jupiter swaps.
+- **Response**:
+  ```json
+  {
+    "message": "Supported tokens retrieved successfully",
+    "tokens": {
+      "SOL": "So11111111111111111111111111111111111111112",
+      "USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+      "BONK": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+    }
+  }
+  ```
+
+## Testing
+
+The API comes with several test scripts to verify its functionality:
+
+1. **API Connectivity Test**:
+   ```bash
+   ./api-test.ps1
+   ```
+
+2. **Wallet API Test**:
+   ```bash
+   ./test-wallet-api.ps1
+   ```
+
+3. **Jupiter Quote API Test**:
+   ```bash
+   ./test-jupiter-api.ps1
+   ```
+
+4. **Jupiter Swap API Test**:
+   ```bash
+   ./test-jupiter-swap-api.ps1
+   ```
+
+5. **Return Funds API Test**:
+   ```bash
+   ./test-return-funds-api.ps1
+   ```
+
+All test scripts include safety features to prevent accidental real transactions on Solana mainnet, with simulation modes enabled by default.
+
+## Deployment
+
+### Deploying to Render
+
+[Render](https://render.com/) is a cloud platform that can host your API with minimal configuration. Here's how to deploy the Solana API to Render:
+
+1. **Create a Git Repository**:
+   Ensure your code is pushed to a Git repository (GitHub, GitLab, etc.)
+
+2. **Sign up for Render**:
+   Create an account at [render.com](https://render.com/)
+
+3. **Create a New Web Service**:
+   - Click "New" and select "Web Service"
+   - Connect your Git repository
+   - Configure the service:
+     - **Name**: `solana-trading-bot-api`
+     - **Environment**: `Node`
+     - **Build Command**: `cd solana && npm install`
+     - **Start Command**: `cd solana && node api/index.js`
+     - **Plan**: Select according to your needs (Free tier works for testing)
+
+4. **Set Environment Variables**:
+   Navigate to "Environment" tab and add any necessary environment variables:
+   - `PORT`: `10000` (Render will provide the PORT, but your code should listen on it)
+   - `NODE_ENV`: `production`
+   - `SOLANA_RPC_URL`: Your Solana RPC endpoint (e.g., a paid service like QuickNode for production)
+
+5. **Deploy**:
+   Render will automatically deploy your API when you push changes to your repository.
+
+### Alternative Deployment Options
+
+1. **Digital Ocean App Platform**:
+   Similar to Render, with more advanced options for scaling.
+
+2. **AWS Elastic Beanstalk**:
+   A more robust solution for production deployments.
+
+3. **Docker + Kubernetes**:
+   For advanced deployment scenarios, you can containerize the API with Docker and deploy it on Kubernetes.
+
+## Architecture
+
+The API follows a classic MVC-like architecture:
+
+- **Routes** (`api/routes/`): Define the API endpoints and handle request routing
+- **Controllers** (`api/controllers/`): Handle request processing and response generation
+- **Services** (`api/services/`): Contain the core business logic
+
+## Security Considerations
+
+1. **Private Key Handling**:
+   - The API does not store private keys long-term
+   - Private keys are only used for transaction signing
+   - Always transmit private keys over HTTPS
+
+2. **Swap Fee Collection**:
+   - The API collects a 0.1% fee on swaps by default
+   - Fees are collected in the token being swapped
+
+3. **Production Recommendations**:
+   - Use a secure RPC endpoint
+   - Set up proper authentication
+   - Rate limit API requests
+   - Monitor for unusual activity
+   - Implement input validation to prevent injection attacks
+   - Use HTTPS for all API communication 

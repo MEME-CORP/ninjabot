@@ -1,0 +1,3 @@
+@echo off
+echo Starting Solana API server...
+node api/index.js 
