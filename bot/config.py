@@ -10,7 +10,7 @@ if not BOT_TOKEN:
     raise ValueError("No BOT_TOKEN found in environment variables")
 
 # API configuration
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://solanaapivolume.onrender.com")
 
 # Logging configuration
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
