@@ -48,21 +48,37 @@ def format_wallet_imported_message(address: str) -> str:
         f"Now, how many child wallets would you like to create? (min: 10)"
     )
 
-def format_child_wallets_message(num_wallets: int) -> str:
+def format_child_wallets_message(num_wallets: int, child_addresses: List[str] = None) -> str:
     """
     Format the message confirming the number of child wallets.
     
     Args:
         num_wallets: Number of child wallets
+        child_addresses: List of child wallet addresses
         
     Returns:
         Formatted confirmation message
     """
-    return (
-        f"✅ {num_wallets} child wallets have been created successfully!\n\n"
+    message = f"✅ {num_wallets} child wallets have been created successfully!\n\n"
+    
+    # Add child wallet addresses if provided (limited to first 5)
+    if child_addresses:
+        message += "Here are your child wallet addresses:\n\n"
+        for i, address in enumerate(child_addresses[:5], 1):
+            message += f"{i}. `{address}`\n"
+        
+        # If there are more than 5 wallets, indicate that more exist
+        if len(child_addresses) > 5:
+            message += f"\n... and {len(child_addresses) - 5} more wallets\n"
+        
+        message += "\n"
+    
+    message += (
         f"Now, what's the total token volume in USD you want to generate? "
         f"Enter a number like 1000 for $1,000 USD."
     )
+    
+    return message
 
 def format_volume_confirmation_message(volume: float) -> str:
     """

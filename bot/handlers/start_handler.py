@@ -274,11 +274,25 @@ async def num_child_wallets(update: Update, context: CallbackContext) -> int:
     mother_wallet = session_manager.get_session_value(user.id, "mother_wallet")
     
     try:
-        # Create child wallets
-        child_wallets = api_client.derive_child_wallets(num_wallets, mother_wallet)
+        # Create child wallets - api_client now returns a normalized format with wallet objects
+        # that always have an 'address' property
+        child_wallets_response = api_client.derive_child_wallets(num_wallets, mother_wallet)
         
-        # Store child wallet addresses
-        child_addresses = [wallet["address"] for wallet in child_wallets]
+        # Extract child wallet addresses - should be simpler now with improved api_client
+        child_addresses = []
+        
+        # Process the normalized response from api_client
+        for wallet in child_wallets_response:
+            if isinstance(wallet, dict) and "address" in wallet:
+                child_addresses.append(wallet["address"])
+        
+        # Ensure we have the expected number of addresses
+        if len(child_addresses) != num_wallets:
+            logger.warning(
+                f"Expected {num_wallets} child wallets but got {len(child_addresses)}",
+                extra={"user_id": user.id}
+            )
+        
         session_manager.update_session_value(user.id, "child_wallets", child_addresses)
         
         logger.info(
@@ -288,9 +302,9 @@ async def num_child_wallets(update: Update, context: CallbackContext) -> int:
         
         # Confirm and ask for volume
         if update.message:
-            await update.message.reply_text(format_child_wallets_message(num_wallets))
+            await update.message.reply_text(format_child_wallets_message(num_wallets, child_addresses))
         else:
-            await query.edit_message_text(format_child_wallets_message(num_wallets))
+            await query.edit_message_text(format_child_wallets_message(num_wallets, child_addresses))
             
         return ConversationState.VOLUME_AMOUNT
         

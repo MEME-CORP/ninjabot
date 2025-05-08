@@ -99,8 +99,8 @@ async def main():
     
     try:
         await app.start()
-        # Run until stopped
-        await app.updater.stop()
+        # Run the bot until the user sends a Ctrl-C
+        await app.idle()
     finally:
         await stop_event_system()
         await app.stop()
