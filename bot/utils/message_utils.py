@@ -70,8 +70,8 @@ def format_child_wallets_message(num_wallets: int, child_addresses: List[str] = 
         message += "\n"
     
     message += (
-        f"Now, what's the total token volume in USD you want to generate? "
-        f"Enter a number like 1000 for $1,000 USD."
+        f"Now, what's the total token volume in SOL you want to generate? "
+        
     )
     
     return message
@@ -87,7 +87,7 @@ def format_volume_confirmation_message(volume: float) -> str:
         Formatted volume confirmation message
     """
     return (
-        f"✅ Volume amount set to ${volume:,} USD.\n\n"
+        f"✅ Volume amount set to {volume:,} SOL.\n\n"
         f"Now, please enter the token address you want to use:"
     )
 
