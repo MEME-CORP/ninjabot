@@ -516,11 +516,24 @@ async def start_balance_polling(user_id: int, context: CallbackContext) -> None:
     async def on_target_reached():
         # Update UI to show sufficient balance
         balance_info = api_client.check_balance(mother_wallet, token_address)
-        current_balance = balance_info.get("balance", 0)
+        
+        # Extract current balance for SOL token
+        current_balance = 0
+        token_symbol = "tokens"
+        
+        if isinstance(balance_info, dict) and 'balances' in balance_info:
+            for token_balance in balance_info['balances']:
+                if token_balance.get('token') == "So11111111111111111111111111111111111111112" or token_balance.get('symbol') == "SOL":
+                    current_balance = token_balance.get('amount', 0)
+                    token_symbol = token_balance.get('symbol', "SOL")
+                    break
         
         await context.bot.send_message(
             chat_id=user_id,
-            text=format_sufficient_balance_message(current_balance),
+            text=format_sufficient_balance_message(
+                balance=current_balance, 
+                token_symbol=token_symbol
+            ),
             reply_markup=InlineKeyboardMarkup([[
                 build_button("Begin Transfers", "start_execution")
             ]])
@@ -542,7 +555,7 @@ async def start_balance_polling(user_id: int, context: CallbackContext) -> None:
 
 async def check_balance(update: Update, context: CallbackContext) -> int:
     """
-    Manually check the wallet balance.
+    Check the balance of the mother wallet.
     
     Args:
         update: The update object
@@ -576,7 +589,17 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
     try:
         # Check balance
         balance_info = api_client.check_balance(mother_wallet, token_address)
-        current_balance = balance_info.get("balance", 0)
+        
+        # Extract current balance for SOL token
+        current_balance = 0
+        token_symbol = "tokens"
+        
+        if isinstance(balance_info, dict) and 'balances' in balance_info:
+            for token_balance in balance_info['balances']:
+                if token_balance.get('token') == "So11111111111111111111111111111111111111112" or token_balance.get('symbol') == "SOL":
+                    current_balance = token_balance.get('amount', 0)
+                    token_symbol = token_balance.get('symbol', "SOL")
+                    break
         
         logger.info(
             f"Checked balance for user {user.id}",
@@ -584,6 +607,7 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
                 "user_id": user.id,
                 "wallet": mother_wallet,
                 "balance": current_balance,
+                "token_symbol": token_symbol,
                 "target": total_volume
             }
         )
@@ -592,7 +616,10 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
         if current_balance >= total_volume:
             # Sufficient balance
             await query.edit_message_text(
-                format_sufficient_balance_message(current_balance),
+                format_sufficient_balance_message(
+                    balance=current_balance,
+                    token_symbol=token_symbol
+                ),
                 reply_markup=InlineKeyboardMarkup([[
                     build_button("Begin Transfers", "start_execution")
                 ]])
@@ -604,7 +631,8 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
             await query.edit_message_text(
                 format_insufficient_balance_message(
                     current_balance=current_balance,
-                    required_balance=total_volume
+                    required_balance=total_volume,
+                    token_symbol=token_symbol
                 ),
                 reply_markup=InlineKeyboardMarkup([[
                     build_button("Check Again", "check_balance")

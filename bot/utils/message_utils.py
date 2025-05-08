@@ -162,8 +162,8 @@ def format_insufficient_balance_message(
     """
     return (
         f"⚠️ **Insufficient Balance**\n\n"
-        f"Current balance: {current_balance:,.2f} {token_symbol}\n"
-        f"Required balance: ${required_balance:,} USD\n\n"
+        f"Current balance: {current_balance:.3f} {token_symbol}\n"
+        f"Required balance: {required_balance:,} {token_symbol}\n\n"
         f"Please fund your wallet with the required amount and then click 'Check Again'."
     )
 
@@ -183,7 +183,7 @@ def format_sufficient_balance_message(
     """
     return (
         f"✅ **Sufficient Balance Detected**\n\n"
-        f"Current balance: ${balance:,.2f} USD\n\n"
+        f"Current balance: {balance:.3f} {token_symbol}\n\n"
         f"Ready to begin transfer execution. Click 'Begin Transfers' to start."
     )
 

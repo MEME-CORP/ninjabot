@@ -843,14 +843,22 @@ class ApiClient:
             # Try standard API call first
             try:
                 response = self._make_request_with_retry('get', endpoint)
-                logger.debug(f"Raw balance response: {json.dumps(response)}")
+                # Log the entire response for debugging
+                logger.info(f"Raw balance response from API: {json.dumps(response)}")
                 
                 # Transform API response into expected format
                 # The API response appears to have a format like:
                 # {"publicKey": "...", "balanceSol": 0, "balanceLamports": 0}
-                if 'publicKey' in response and ('balanceSol' in response or 'balanceLamports' in response):
-                    # Convert to our expected format
-                    sol_balance = response.get('balanceSol', 0)
+                if 'publicKey' in response:
+                    # Check for various possible balance fields
+                    sol_balance = 0
+                    if 'balanceSol' in response:
+                        sol_balance = float(response['balanceSol'])
+                    elif 'balanceLamports' in response:
+                        # Convert lamports to SOL (1 SOL = 1,000,000,000 lamports)
+                        sol_balance = float(response['balanceLamports']) / 1000000000
+                    
+                    logger.info(f"Extracted SOL balance from API response: {sol_balance}")
                     
                     # Format expected by the rest of the code
                     formatted_response = {
@@ -894,18 +902,46 @@ class ApiClient:
                         }
                     ]
                 }
-                
+            
+            # Log the full response for debugging
+            logger.info(f"Direct call response status: {response.status_code}")
+            logger.info(f"Direct call response content: {response.text}")
+            
             # Try to extract balance directly from response text
             try:
                 import re
-                # Extract publicKey and balanceSol using regex
+                # Extract publicKey using regex
                 pubkey_match = re.search(r'"publicKey"\s*:\s*"([^"]+)"', response.text)
-                balance_match = re.search(r'"balanceSol"\s*:\s*([0-9.]+)', response.text)
                 
-                if pubkey_match and balance_match:
+                # Try multiple patterns for balance extraction - the API might return different formats
+                balance_patterns = [
+                    r'"balanceSol"\s*:\s*([0-9.]+)',  # Standard format: "balanceSol": 0.002
+                    r'"balanceSol"\s*:\s*([0-9.e\-+]+)',  # Scientific notation: "balanceSol": 2.0e-3
+                    r'"balance"\s*:\s*([0-9.]+)',  # Alternative key: "balance": 0.002
+                    r'"lamports"\s*:\s*([0-9]+)',  # Lamports format: "lamports": 2000000
+                    r'"balanceLamports"\s*:\s*([0-9]+)'  # Explicit lamports: "balanceLamports": 2000000
+                ]
+                
+                sol_balance = 0
+                for pattern in balance_patterns:
+                    balance_match = re.search(pattern, response.text)
+                    if balance_match:
+                        raw_value = balance_match.group(1)
+                        logger.info(f"Found balance match with pattern '{pattern}': {raw_value}")
+                        
+                        # Handle different format types
+                        if 'lamports' in pattern:
+                            # Convert lamports to SOL (1 SOL = 1,000,000,000 lamports)
+                            sol_balance = float(raw_value) / 1000000000
+                        else:
+                            # Direct SOL value
+                            sol_balance = float(raw_value)
+                        
+                        # Found a match, break the loop
+                        break
+                
+                if pubkey_match:
                     public_key = pubkey_match.group(1)
-                    sol_balance = float(balance_match.group(1))
-                    
                     logger.info(f"Successfully extracted balance for {public_key}: {sol_balance} SOL")
                     return {
                         "wallet": public_key,
@@ -1090,6 +1126,7 @@ class ApiClient:
             logger.info(f"Checking if wallet {mother_wallet} has sufficient balance for {required_volume} tokens")
             
             balance_info = self.check_balance(mother_wallet, token_address)
+            logger.info(f"Balance check result: {json.dumps(balance_info)}")
             
             # Extract the balance of the specific token
             current_balance = 0
@@ -1097,10 +1134,28 @@ class ApiClient:
             
             if isinstance(balance_info, dict) and 'balances' in balance_info:
                 for token_balance in balance_info['balances']:
-                    if token_balance.get('token') == token_address or token_address is None:
+                    # For SOL token (default token or explicitly requested)
+                    if token_address is None or token_address == "So11111111111111111111111111111111111111112":
+                        if token_balance.get('token') == "So11111111111111111111111111111111111111112" or token_balance.get('symbol') == "SOL":
+                            current_balance = token_balance.get('amount', 0)
+                            token_symbol = token_balance.get('symbol', "SOL")
+                            break
+                    # For other specific tokens
+                    elif token_balance.get('token') == token_address:
                         current_balance = token_balance.get('amount', 0)
-                        token_symbol = token_balance.get('symbol', 'tokens')
+                        token_symbol = token_balance.get('symbol', "tokens")
                         break
+            
+            # Ensure balance is a float
+            if not isinstance(current_balance, float):
+                try:
+                    current_balance = float(current_balance)
+                except (TypeError, ValueError):
+                    logger.warning(f"Could not convert balance to float: {current_balance}")
+                    current_balance = 0
+            
+            # Log extracted values for debugging
+            logger.info(f"Extracted balance: {current_balance} {token_symbol}")
             
             # Determine if the balance is sufficient
             sufficient = current_balance >= required_volume

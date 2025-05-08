@@ -131,7 +131,20 @@ class BalancePoller:
             try:
                 # Get current balance
                 balance_info = api_client.check_balance(wallet_address, token_address)
-                current_balance = balance_info.get("balance", 0)
+                
+                # Extract current balance for the token
+                current_balance = 0
+                if isinstance(balance_info, dict) and 'balances' in balance_info:
+                    for token_balance in balance_info['balances']:
+                        # For SOL token specifically
+                        if token_address is None or token_address == "So11111111111111111111111111111111111111112":
+                            if token_balance.get('token') == "So11111111111111111111111111111111111111112" or token_balance.get('symbol') == "SOL":
+                                current_balance = token_balance.get('amount', 0)
+                                break
+                        # For other specific tokens
+                        elif token_balance.get('token') == token_address:
+                            current_balance = token_balance.get('amount', 0)
+                            break
                 
                 # Check if this is a change from last check
                 last_balance = self._last_balances.get(task_id)
