@@ -61,15 +61,11 @@ def format_child_wallets_message(num_wallets: int, child_addresses: List[str] = 
     """
     message = f"✅ {num_wallets} child wallets have been created successfully!\n\n"
     
-    # Add child wallet addresses if provided (limited to first 5)
+    # Add child wallet addresses if provided
     if child_addresses:
         message += "Here are your child wallet addresses:\n\n"
-        for i, address in enumerate(child_addresses[:5], 1):
+        for i, address in enumerate(child_addresses, 1):
             message += f"{i}. `{address}`\n"
-        
-        # If there are more than 5 wallets, indicate that more exist
-        if len(child_addresses) > 5:
-            message += f"\n... and {len(child_addresses) - 5} more wallets\n"
         
         message += "\n"
     
