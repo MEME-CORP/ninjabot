@@ -38,7 +38,7 @@ def validate_volume_input(text: str) -> Tuple[bool, Union[float, str]]:
         Tuple (is_valid, value_or_error)
     """
     try:
-        # Remove commas and USD signs if present
+        # Remove commas and currency signs if present
         cleaned_text = text.replace(",", "").replace("$", "").strip()
         
         # Try to convert to float
@@ -46,20 +46,20 @@ def validate_volume_input(text: str) -> Tuple[bool, Union[float, str]]:
         
         # Check if positive
         if volume <= 0:
-            return False, "Volume must be a positive number in USD."
+            return False, "Volume must be a positive number in SOL."
         
         # Check if within reasonable range
-        if volume < 10:
-            return False, "Volume must be at least $10 USD."
+        if volume < MIN_VOLUME:
+            return False, f"Volume must be at least {MIN_VOLUME} SOL."
         
-        if volume > 1000000000:  # Billion dollar limit
-            return False, "Volume cannot exceed $1,000,000,000 USD."
+        if volume > 1000000000:  # Billion SOL limit
+            return False, "Volume cannot exceed 1,000,000,000 SOL."
         
         # Return as integer if it's a whole number, otherwise as float
         return True, int(volume) if volume.is_integer() else volume
         
     except ValueError:
-        return False, "Please enter a valid number in USD (e.g., 1000 for $1,000 USD)."
+        return False, "Please enter a valid number in SOL (e.g., 0.5 for 0.5 SOL)."
 
 def validate_token_address(text: str) -> Tuple[bool, Union[str, str]]:
     """

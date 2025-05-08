@@ -1,6 +1,5 @@
 from typing import Dict, List, Any, Optional
 from datetime import datetime
-from bot.config import SERVICE_FEE_RATE
 
 def format_welcome_message() -> str:
     """
@@ -88,7 +87,7 @@ def format_volume_confirmation_message(volume: float) -> str:
     """
     return (
         f"✅ Volume amount set to {volume:,} SOL.\n\n"
-        f"Now, please enter the token address you want to use:"
+        f"Now, please enter the token contract address where you want to generate the volume"
     )
 
 def format_schedule_preview(
@@ -109,37 +108,13 @@ def format_schedule_preview(
     Returns:
         Formatted schedule preview
     """
-    total_fee = total_volume * SERVICE_FEE_RATE
-    net_volume = total_volume - total_fee
-    
-    # Format the message header
+    # Simplified message without transfer schedule
     message = (
-        f"📋 Transfer Schedule Preview\n\n"
-        f"Total volume: {total_volume:,.2f} tokens\n"
-        f"Service fee (0.1%): {total_fee:,.2f} tokens\n"
-        f"Net transfer volume: {net_volume:,.2f} tokens\n"
-        f"Token: {token_address[:6]}...{token_address[-4:]}\n"
-        f"Child wallets: {num_child_wallets}\n\n"
-        f"Sample transfers (showing first 5):\n\n"
-    )
-    
-    # Add sample transfers (first 5)
-    for i, transfer in enumerate(schedule[:5]):
-        time_str = datetime.fromtimestamp(transfer["timestamp"]).strftime("%H:%M:%S")
-        message += (
-            f"{i+1}. {time_str}: {transfer['amount']:,.2f} tokens\n"
-            f"   {transfer['from'][:6]}...{transfer['from'][-4:]} → "
-            f"{transfer['to'][:6]}...{transfer['to'][-4:]}\n\n"
-        )
-    
-    # Add summary of remaining transfers
-    remaining = len(schedule) - 5
-    if remaining > 0:
-        message += f"...and {remaining} more transfers.\n\n"
-    
-    message += (
+        f"📋 Overview\n\n"
+        f"Total volume to be generated: {total_volume:,.2f} SOL\n"
+        f"CA: {token_address[:6]}...{token_address[-4:]}\n\n"
         f"To proceed, please fund the mother wallet with sufficient SOL for gas "
-        f"and the required token amount ({total_volume:,.2f} tokens)."
+        f"and the required token amount ({total_volume:,.2f} SOL)."
     )
     
     return message

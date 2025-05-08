@@ -27,7 +27,7 @@ SERVICE_FEE_RATE = 0.001  # 0.1%
 # Validation constants
 MIN_CHILD_WALLETS = 10
 MAX_CHILD_WALLETS = 100
-MIN_VOLUME = 1
+MIN_VOLUME = 0.07  # Minimum volume in SOL
 SOLANA_ADDRESS_LENGTH = 44  # Base58 encoded Solana addresses are 44 characters
 
 # Conversation states enum values
