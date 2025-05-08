@@ -38,6 +38,9 @@ class ApiClient:
         
         # Add correlation ID header for tracing
         self.run_id = None
+        
+        # Store the latest mother wallet address to avoid creating new ones
+        self._latest_mother_wallet = None
     
     def set_run_id(self, run_id: str):
         """Set the run ID for tracing purposes."""
@@ -254,16 +257,22 @@ class ApiClient:
                 time.sleep(backoff)
                 backoff *= 2  # Exponential backoff
                 
-    def check_api_health(self) -> Dict[str, Any]:
+    def check_api_health(self, mother_wallet_address: str = None) -> Dict[str, Any]:
         """
         Check if the API is responsive and functioning.
         
+        Args:
+            mother_wallet_address: Optional mother wallet address to check instead of creating a new one
+            
         Returns:
             Dictionary with API health information
         
         Raises:
             ApiClientError: If the API health check fails
         """
+        # Use provided mother wallet address or the stored one
+        mother_wallet_address = mother_wallet_address or self._latest_mother_wallet
+        
         if self.use_mock:
             return {
                 "status": "healthy",
@@ -306,26 +315,46 @@ class ApiClient:
                 logger.warning(f"Health check failed with {endpoint}: {str(e)}")
                 continue  # Try next endpoint
                 
-        # If we're still here, try creating a mother wallet as a last resort
-        try:
-            logger.info("Trying to create a mother wallet to check API health")
-            wallet_response = self._make_request('post', '/api/wallets/mother')
-            
-            # If wallet creation works, the API is healthy
-            if isinstance(wallet_response, dict) and (
-                'motherWalletPublicKey' in wallet_response or 
-                'error' not in wallet_response
-            ):
-                logger.info("API health check succeeded by creating a wallet")
-                return {
-                    "status": "healthy",
-                    "message": "Health verified via wallet creation",
-                    "tokens": {
-                        "SOL": "So11111111111111111111111111111111111111112"
+        # If mother wallet address is provided, check its balance instead of creating a new wallet
+        if mother_wallet_address:
+            try:
+                logger.info(f"Checking mother wallet balance for health check: {mother_wallet_address}")
+                balance_response = self._make_request_with_retry('get', f'/api/wallets/mother/{mother_wallet_address}')
+                
+                # If we can successfully get the balance, the API is healthy
+                if isinstance(balance_response, dict) and 'publicKey' in balance_response:
+                    logger.info("API health check succeeded by checking existing wallet balance")
+                    return {
+                        "status": "healthy",
+                        "message": "Health verified via wallet balance check",
+                        "tokens": {
+                            "SOL": "So11111111111111111111111111111111111111112"
+                        }
                     }
-                }
-        except Exception as e:
-            logger.error(f"Final health check attempt failed: {str(e)}")
+            except Exception as e:
+                logger.warning(f"Balance check failed for mother wallet: {str(e)}")
+        
+        # Only create a new wallet as a last resort and only if no mother wallet was provided
+        if not mother_wallet_address:
+            try:
+                logger.info("Trying to create a mother wallet to check API health")
+                wallet_response = self._make_request('post', '/api/wallets/mother')
+                
+                # If wallet creation works, the API is healthy
+                if isinstance(wallet_response, dict) and (
+                    'motherWalletPublicKey' in wallet_response or 
+                    'error' not in wallet_response
+                ):
+                    logger.info("API health check succeeded by creating a wallet")
+                    return {
+                        "status": "healthy",
+                        "message": "Health verified via wallet creation",
+                        "tokens": {
+                            "SOL": "So11111111111111111111111111111111111111112"
+                        }
+                    }
+            except Exception as e:
+                logger.error(f"Final health check attempt failed: {str(e)}")
         
         # If all checks fail, return a fallback response for testing
         logger.warning("All health checks failed, using fallback response")
@@ -422,6 +451,8 @@ class ApiClient:
                     private_key = response_data.get('motherWalletPrivateKeyBase58', '')
                     
                     logger.info(f"Successfully created mother wallet: {public_key}")
+                    # Store the mother wallet address for future health checks
+                    self._latest_mother_wallet = public_key
                     return {
                         'address': public_key,
                         'private_key': private_key,
@@ -514,6 +545,8 @@ class ApiClient:
                 if match:
                     public_key = match.group(1)
                     logger.info(f"Successfully extracted imported wallet address: {public_key}")
+                    # Store the mother wallet address for future health checks
+                    self._latest_mother_wallet = public_key
                     return {
                         'address': public_key,
                         'private_key': private_key,
@@ -834,7 +867,7 @@ class ApiClient:
                     # If a specific token was requested and it's not SOL, add a placeholder
                     if token_address and token_address != "So11111111111111111111111111111111111111112":
                         # Try to find the token in tokens list
-                        token_info = self._get_token_info(token_address)
+                        token_info = self._get_token_info(token_address, wallet_address)
                         if token_info:
                             formatted_response["balances"].append({
                                 "token": token_address,
@@ -917,10 +950,10 @@ class ApiClient:
                 ]
             }
     
-    def _get_token_info(self, token_address: str) -> Dict[str, Any]:
+    def _get_token_info(self, token_address: str, mother_wallet_address: str = None) -> Dict[str, Any]:
         """Get token information."""
         try:
-            tokens_response = self.check_api_health()
+            tokens_response = self.check_api_health(mother_wallet_address)
             if 'tokens' in tokens_response:
                 tokens_dict = tokens_response['tokens']
                 # Find the token by address
@@ -1035,6 +1068,64 @@ class ApiClient:
             }
             
         return self._make_request_with_retry('get', f'/api/transactions/{tx_hash}')
+
+    def check_sufficient_balance(self, mother_wallet: str, token_address: str, required_volume: float) -> Dict[str, Any]:
+        """
+        Check if the mother wallet has sufficient balance for the required volume.
+        
+        Args:
+            mother_wallet: Mother wallet address
+            token_address: Token contract address
+            required_volume: Required token volume
+            
+        Returns:
+            Dictionary containing:
+            - sufficient (bool): Whether the wallet has sufficient balance
+            - current_balance (float): Current wallet balance
+            - required_balance (float): Required balance
+            - token_symbol (str): Token symbol
+        """
+        try:
+            # Check the wallet balance
+            logger.info(f"Checking if wallet {mother_wallet} has sufficient balance for {required_volume} tokens")
+            
+            balance_info = self.check_balance(mother_wallet, token_address)
+            
+            # Extract the balance of the specific token
+            current_balance = 0
+            token_symbol = "tokens"
+            
+            if isinstance(balance_info, dict) and 'balances' in balance_info:
+                for token_balance in balance_info['balances']:
+                    if token_balance.get('token') == token_address or token_address is None:
+                        current_balance = token_balance.get('amount', 0)
+                        token_symbol = token_balance.get('symbol', 'tokens')
+                        break
+            
+            # Determine if the balance is sufficient
+            sufficient = current_balance >= required_volume
+            
+            if sufficient:
+                logger.info(f"Wallet has sufficient balance: {current_balance} {token_symbol}")
+            else:
+                logger.info(f"Wallet balance insufficient: {current_balance}/{required_volume} {token_symbol}")
+            
+            return {
+                'sufficient': sufficient,
+                'current_balance': current_balance,
+                'required_balance': required_volume,
+                'token_symbol': token_symbol
+            }
+            
+        except Exception as e:
+            logger.error(f"Error checking sufficient balance: {str(e)}")
+            return {
+                'sufficient': False,
+                'current_balance': 0,
+                'required_balance': required_volume,
+                'token_symbol': 'tokens',
+                'error': str(e)
+            }
 
 # Create a singleton instance
 api_client = ApiClient() 
