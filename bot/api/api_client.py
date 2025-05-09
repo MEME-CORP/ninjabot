@@ -4,6 +4,12 @@ from typing import Dict, List, Any, Optional, Callable
 import requests
 from loguru import logger
 from bot.config import API_BASE_URL
+import uuid
+import hashlib
+import random
+import asyncio
+import os
+import re
 
 class ApiClientError(Exception):
     """Base exception for API client errors."""
@@ -41,6 +47,11 @@ class ApiClient:
         
         # Store the latest mother wallet address to avoid creating new ones
         self._latest_mother_wallet = None
+        
+        # Health check caching
+        self._health_check_cache = None
+        self._health_check_timestamp = 0
+        self._health_check_cache_ttl = 300  # Cache health check results for 5 minutes
     
     def set_run_id(self, run_id: str):
         """Set the run ID for tracing purposes."""
@@ -130,7 +141,7 @@ class ApiClient:
                     extra={"status_code": response.status_code, "response_text": response.text}
                 )
                 raise ApiBadResponseError(f"API returned {response.status_code}: {response.text}")
-            
+                
             # Parse JSON response safely
             try:
                 # First try standard JSON parsing
@@ -142,8 +153,6 @@ class ApiClient:
                 # As a fallback, try to extract structured data manually
                 try:
                     # If response contains key-value patterns, extract them
-                    import re
-                    
                     # First check if it looks like JSON (starts with { and ends with })
                     if response.text.strip().startswith('{') and response.text.strip().endswith('}'):
                         # Try to manually extract key-value pairs
@@ -227,15 +236,25 @@ class ApiClient:
             try:
                 response = self._make_request(method, endpoint, **kwargs)
                 
-                # If 'message' is the only field causing issues, ignore it for testing
+                # Check if the response contains an error message
                 if isinstance(response, dict) and 'message' in response:
-                    # Log the message but don't cause errors if it's a success message
-                    logger.info(f"API message: {response['message']}")
-                    
-                    # Keep the message field but make sure it doesn't interfere with testing
-                    if 'error' in response['message'].lower() and 'motherWalletPublicKey' not in response:
-                        # This is likely an error message
-                        raise ApiClientError(response['message'])
+                    message = response['message']
+                    # Check if the message indicates an error
+                    if ('error' in message.lower() or 
+                        'missing' in message.lower() or 
+                        'invalid' in message.lower() or 
+                        'must' in message.lower()):
+                        
+                        logger.warning(f"API returned warning message: {message}")
+                        
+                        # For client-side parameter errors, don't retry
+                        if ('missing required parameter' in message.lower() or 
+                            'invalid parameter' in message.lower() or
+                            'each child wallet must' in message.lower()):
+                            raise ApiClientError(f"Parameter error: {message}")
+                    else:
+                        # Just a normal message, log it
+                        logger.info(f"API message: {message}")
                 
                 return response
                 
@@ -256,7 +275,29 @@ class ApiClient:
                 # Wait before retrying with exponential backoff
                 time.sleep(backoff)
                 backoff *= 2  # Exponential backoff
-                
+    
+    async def _make_request_with_retry_async(self, method: str, endpoint: str, max_retries: int = 3, initial_backoff: float = 1.0, **kwargs) -> Dict[str, Any]:
+        """
+        Async version of _make_request_with_retry.
+        
+        Args:
+            method: HTTP method (get, post, etc)
+            endpoint: API endpoint
+            max_retries: Maximum number of retries
+            initial_backoff: Initial backoff time in seconds (will be multiplied by 2^retry_count)
+            **kwargs: Additional arguments for the request
+            
+        Returns:
+            Response data
+            
+        Raises:
+            ApiClientError: If the request fails after all retries
+        """
+        # This is an async wrapper for the synchronous method
+        # In a full async implementation, the actual request mechanism would be async too
+        # But for compatibility, we're just calling the sync method here
+        return self._make_request_with_retry(method, endpoint, max_retries, initial_backoff, **kwargs)
+    
     def check_api_health(self, mother_wallet_address: str = None) -> Dict[str, Any]:
         """
         Check if the API is responsive and functioning.
@@ -270,11 +311,18 @@ class ApiClient:
         Raises:
             ApiClientError: If the API health check fails
         """
+        # Check if we have a cached health check result that's still valid
+        current_time = time.time()
+        if (self._health_check_cache is not None and 
+            current_time - self._health_check_timestamp < self._health_check_cache_ttl):
+            logger.debug("Using cached health check result")
+            return self._health_check_cache
+            
         # Use provided mother wallet address or the stored one
         mother_wallet_address = mother_wallet_address or self._latest_mother_wallet
         
         if self.use_mock:
-            return {
+            mock_result = {
                 "status": "healthy",
                 "tokens": {
                     "SOL": "So11111111111111111111111111111111111111112",
@@ -282,6 +330,10 @@ class ApiClient:
                     "BTC": "8bMMF9R8xgfXzwZo8SpzqHitas7J3QQtmTRwrKSiJTQa"
                 }
             }
+            # Cache the result
+            self._health_check_cache = mock_result
+            self._health_check_timestamp = current_time
+            return mock_result
         
         # Try endpoints in order until one succeeds
         endpoints = [
@@ -294,7 +346,7 @@ class ApiClient:
         
         for endpoint in endpoints:
             try:
-                logger.info(f"Trying health check with endpoint: {endpoint}")
+                logger.debug(f"Trying health check with endpoint: {endpoint}")
                 response = self._make_request('get', endpoint)
                 
                 # If we get here, the endpoint worked - check if it has useful data
@@ -310,34 +362,46 @@ class ApiClient:
                         }
                         
                     logger.info(f"API health check succeeded using {endpoint}")
+                    
+                    # Cache the successful health check
+                    self._health_check_cache = response
+                    self._health_check_timestamp = current_time
+                    
                     return response
             except Exception as e:
-                logger.warning(f"Health check failed with {endpoint}: {str(e)}")
+                logger.debug(f"Health check failed with {endpoint}: {str(e)}")
                 continue  # Try next endpoint
                 
         # If mother wallet address is provided, check its balance instead of creating a new wallet
         if mother_wallet_address:
             try:
-                logger.info(f"Checking mother wallet balance for health check: {mother_wallet_address}")
+                logger.debug(f"Checking mother wallet balance for health check: {mother_wallet_address}")
                 balance_response = self._make_request_with_retry('get', f'/api/wallets/mother/{mother_wallet_address}')
                 
                 # If we can successfully get the balance, the API is healthy
                 if isinstance(balance_response, dict) and 'publicKey' in balance_response:
                     logger.info("API health check succeeded by checking existing wallet balance")
-                    return {
+                    
+                    health_result = {
                         "status": "healthy",
                         "message": "Health verified via wallet balance check",
                         "tokens": {
                             "SOL": "So11111111111111111111111111111111111111112"
                         }
                     }
+                    
+                    # Cache the successful health check
+                    self._health_check_cache = health_result
+                    self._health_check_timestamp = current_time
+                    
+                    return health_result
             except Exception as e:
-                logger.warning(f"Balance check failed for mother wallet: {str(e)}")
+                logger.debug(f"Balance check failed for mother wallet: {str(e)}")
         
         # Only create a new wallet as a last resort and only if no mother wallet was provided
         if not mother_wallet_address:
             try:
-                logger.info("Trying to create a mother wallet to check API health")
+                logger.debug("Trying to create a mother wallet to check API health")
                 wallet_response = self._make_request('post', '/api/wallets/mother')
                 
                 # If wallet creation works, the API is healthy
@@ -346,25 +410,40 @@ class ApiClient:
                     'error' not in wallet_response
                 ):
                     logger.info("API health check succeeded by creating a wallet")
-                    return {
+                    
+                    health_result = {
                         "status": "healthy",
                         "message": "Health verified via wallet creation",
                         "tokens": {
                             "SOL": "So11111111111111111111111111111111111111112"
                         }
                     }
+                    
+                    # Cache the successful health check
+                    self._health_check_cache = health_result
+                    self._health_check_timestamp = current_time
+                    
+                    return health_result
             except Exception as e:
-                logger.error(f"Final health check attempt failed: {str(e)}")
+                logger.warning(f"Final health check attempt failed: {str(e)}")
         
         # If all checks fail, return a fallback response for testing
         logger.warning("All health checks failed, using fallback response")
-        return {
+        
+        fallback_result = {
             "status": "error",
             "message": "Could not verify API health",
             "tokens": {
                 "SOL": "So11111111111111111111111111111111111111112"
             }
         }
+        
+        # Cache the fallback result but with a shorter TTL
+        self._health_check_cache = fallback_result
+        self._health_check_timestamp = current_time
+        self._health_check_cache_ttl = 60  # Shorter TTL for error results (1 minute)
+        
+        return fallback_result
             
     def direct_call(self, method: str, endpoint: str, **kwargs):
         """
@@ -435,10 +514,13 @@ class ApiClient:
             Wallet information including address
         """
         if self.use_mock:
-            return {
+            mock_wallet = {
                 "address": "5XYzRxaKLTJeH3fMMD5Xyc9umzmFXmgHYVnxnhx6hzwY",
                 "created_at": time.time()
             }
+            # Save mock wallet data
+            self.save_wallet_data('mother', mock_wallet)
+            return mock_wallet
             
         try:
             # Try direct API call via _make_request_with_retry first
@@ -453,11 +535,18 @@ class ApiClient:
                     logger.info(f"Successfully created mother wallet: {public_key}")
                     # Store the mother wallet address for future health checks
                     self._latest_mother_wallet = public_key
-                    return {
+                    
+                    # Create wallet info dict
+                    wallet_info = {
                         'address': public_key,
                         'private_key': private_key,
                         'created_at': time.time()
                     }
+                    
+                    # Save wallet data to JSON file
+                    self.save_wallet_data('mother', wallet_info)
+                    
+                    return wallet_info
             except Exception as api_error:
                 logger.warning(f"Standard API call failed, trying direct call: {str(api_error)}")
                 
@@ -465,11 +554,12 @@ class ApiClient:
             response = self.direct_call('post', '/api/wallets/mother')
             if not response:
                 logger.error("Failed to create wallet - null response")
-                return {
+                fallback_wallet = {
                     'address': "5XYzRxaKLTJeH3fMMD5Xyc9umzmFXmgHYVnxnhx6hzwY",  # Fallback for tests
                     'created_at': time.time(),
                     'error': "API call failed"
                 }
+                return fallback_wallet
             
             # Extract wallet address directly from response text using regex
             try:
@@ -481,29 +571,38 @@ class ApiClient:
                     private_key = private_key_match.group(1) if private_key_match else ''
                     
                     logger.info(f"Successfully extracted mother wallet address: {public_key}")
-                    return {
+                    
+                    # Create wallet info dict
+                    wallet_info = {
                         'address': public_key,
                         'private_key': private_key,
                         'created_at': time.time()
                     }
+                    
+                    # Save wallet data to JSON file
+                    self.save_wallet_data('mother', wallet_info)
+                    
+                    return wallet_info
             except Exception as e:
                 logger.error(f"Failed to extract wallet address: {str(e)}")
             
             # If we reach here, extraction failed - use fallback
             logger.warning("Could not extract wallet address, using fallback")
-            return {
+            fallback_wallet = {
                 'address': "5XYzRxaKLTJeH3fMMD5Xyc9umzmFXmgHYVnxnhx6hzwY",  # Fallback for tests
                 'created_at': time.time(),
                 'error': "Failed to extract address"
             }
+            return fallback_wallet
             
         except Exception as e:
             logger.error(f"Error in create_wallet: {str(e)}")
-            return {
+            fallback_wallet = {
                 'address': "5XYzRxaKLTJeH3fMMD5Xyc9umzmFXmgHYVnxnhx6hzwY",
                 'created_at': time.time(),
                 'error_details': str(e)
             }
+            return fallback_wallet
     
     def import_wallet(self, private_key: str) -> Dict[str, Any]:
         """
@@ -516,11 +615,16 @@ class ApiClient:
             Wallet information including address
         """
         if self.use_mock:
-            return {
+            mock_wallet = {
                 "address": "7xB1sGUFR2hjyVw8SVdTXSCYQodÜ8RJx3xTkzwUwPc",
-                "imported": True
+                "private_key": private_key,
+                "imported": True,
+                "created_at": time.time()
             }
-        
+            # Save mock wallet data
+            self.save_wallet_data('mother', mock_wallet)
+            return mock_wallet
+            
         try:
             # Make direct API call
             response = self.direct_call(
@@ -531,12 +635,14 @@ class ApiClient:
             
             if not response:
                 logger.error("Failed to import wallet - null response")
-                return {
+                fallback_wallet = {
                     'address': f"ImportedWallet{private_key[:8]}",
+                    'private_key': private_key,
                     'created_at': time.time(),
                     'imported': True,
                     'error': "API call failed"
                 }
+                return fallback_wallet
             
             # Extract wallet address directly from response text
             try:
@@ -547,12 +653,19 @@ class ApiClient:
                     logger.info(f"Successfully extracted imported wallet address: {public_key}")
                     # Store the mother wallet address for future health checks
                     self._latest_mother_wallet = public_key
-                    return {
+                    
+                    # Create wallet info dict
+                    wallet_info = {
                         'address': public_key,
                         'private_key': private_key,
                         'created_at': time.time(),
                         'imported': True
                     }
+                    
+                    # Save wallet data to JSON file
+                    self.save_wallet_data('mother', wallet_info)
+                    
+                    return wallet_info
             except Exception as e:
                 logger.error(f"Failed to extract imported wallet address: {str(e)}")
             
@@ -561,13 +674,16 @@ class ApiClient:
             fallback_address = f"ImportedWallet{hashlib.md5(private_key.encode()).hexdigest()[:8]}"
             logger.warning(f"Using fallback imported wallet address: {fallback_address}")
             
-            return {
+            # Create fallback wallet info
+            fallback_wallet = {
                 'address': fallback_address,
                 'private_key': private_key,
                 'created_at': time.time(),
                 'imported': True,
                 'error': "Failed to extract address"
             }
+            
+            return fallback_wallet
             
         except Exception as e:
             logger.error(f"Error importing wallet: {str(e)}")
@@ -585,15 +701,29 @@ class ApiClient:
             List of child wallet information
         """
         if self.use_mock:
-            return [
-                {"address": f"Child{i}Wallet{int(time.time())%10000}", "index": i}
+            # Create mock child wallets
+            child_wallets = [
+                {"address": f"Child{i}Wallet{int(time.time())%10000}", "index": i, "private_key": f"mock_private_key_{i}"}
                 for i in range(n)
             ]
+            
+            # Save child wallets data
+            self.save_wallet_data('children', {
+                'mother_address': mother_wallet,
+                'wallets': child_wallets,
+                'created_at': time.time()
+            })
+            
+            return child_wallets
             
         try:
             # Try standard API call first
             try:
-                payload = {"motherWalletPublicKey": mother_wallet, "count": n}
+                payload = {
+                    "motherWalletPublicKey": mother_wallet, 
+                    "count": n,
+                    "includePrivateKeys": True  # Request private keys for child wallets
+                }
                 response_data = self._make_request_with_retry('post', '/api/wallets/children', json=payload)
                 
                 # Check if response contains childWallets array
@@ -603,11 +733,20 @@ class ApiClient:
                         if isinstance(child, dict) and 'publicKey' in child:
                             child_wallets.append({
                                 'address': child['publicKey'],
+                                'private_key': child.get('privateKey', ''),  # Store private key if available
                                 'index': i
                             })
                     
                     if child_wallets:
                         logger.info(f"Successfully derived {len(child_wallets)} child wallets")
+                        
+                        # Save child wallets data
+                        self.save_wallet_data('children', {
+                            'mother_address': mother_wallet,
+                            'wallets': child_wallets,
+                            'created_at': time.time()
+                        })
+                        
                         return child_wallets
             except Exception as api_error:
                 logger.warning(f"Standard API call failed for child wallets, trying direct call: {str(api_error)}")
@@ -616,7 +755,11 @@ class ApiClient:
             response = self.direct_call(
                 'post', 
                 '/api/wallets/children', 
-                json={"motherWalletPublicKey": mother_wallet, "count": n}
+                json={
+                    "motherWalletPublicKey": mother_wallet, 
+                    "count": n,
+                    "includePrivateKeys": True  # Request private keys
+                }
             )
             
             if not response:
@@ -626,31 +769,45 @@ class ApiClient:
                     for i in range(n)
                 ]
             
-            # Extract wallet addresses using regex to avoid JSON parsing issues
+            # Extract wallet addresses and private keys using regex to avoid JSON parsing issues
             try:
-                import re
-                # Find all public keys in the response
-                matches = re.findall(r'"publicKey"\s*:\s*"([^"]+)"', response.text)
+                # Find all public keys and private keys in the response
+                public_key_matches = re.findall(r'"publicKey"\s*:\s*"([^"]+)"', response.text)
+                private_key_matches = re.findall(r'"privateKey"\s*:\s*"([^"]+)"', response.text)
                 
-                if matches and len(matches) == n:
+                if public_key_matches and len(public_key_matches) == n:
                     child_wallets = []
-                    for i, addr in enumerate(matches):
+                    for i, addr in enumerate(public_key_matches):
+                        # Try to get corresponding private key if available
+                        private_key = private_key_matches[i] if i < len(private_key_matches) else ''
+                        
                         child_wallets.append({
                             'address': addr,
+                            'private_key': private_key,
                             'index': i
                         })
                     
                     logger.info(f"Successfully extracted {len(child_wallets)} child wallet addresses")
+                    
+                    # Save child wallets data
+                    self.save_wallet_data('children', {
+                        'mother_address': mother_wallet,
+                        'wallets': child_wallets,
+                        'created_at': time.time()
+                    })
+                    
                     return child_wallets
             except Exception as e:
                 logger.error(f"Failed to extract child wallet addresses: {str(e)}")
             
             # If extraction fails, generate fallback addresses for testing
             logger.warning(f"Using fallback child wallet addresses")
-            return [
-                {"address": f"child_{i}_{int(time.time())}", "index": i}
+            fallback_wallets = [
+                {"address": f"child_{i}_{int(time.time())}", "index": i, "private_key": ""}
                 for i in range(n)
             ]
+            
+            return fallback_wallets
             
         except Exception as e:
             logger.error(f"Error deriving child wallets: {str(e)}")
@@ -748,7 +905,7 @@ class ApiClient:
                 "transfers": transfers,
                 "created_at": now
             }
-        
+            
         # If there's a dedicated schedule endpoint on the API, use it
         # Otherwise keep local schedule generation
         try:
@@ -777,7 +934,26 @@ class ApiClient:
                 # For other errors, propagate them
                 raise
     
-    def fund_child_wallets(self, mother_wallet: str, child_wallets: List[str], token_address: str, amount_per_wallet: float) -> Dict[str, Any]:
+    def generate_operation_id(self, mother_wallet: str, child_wallet: str, amount: float) -> str:
+        """
+        Generate a deterministic operation ID to track transfer attempts.
+        
+        Args:
+            mother_wallet: Mother wallet address
+            child_wallet: Child wallet address
+            amount: Amount to transfer
+            
+        Returns:
+            Unique operation ID
+        """
+        # Create a deterministic ID based on the transfer parameters
+        # Include more specificity to avoid collisions
+        transfer_data = f"{mother_wallet}:{child_wallet}:{amount}:{int(time.time() / 3600)}"  # Hourly uniqueness
+        return hashlib.md5(transfer_data.encode()).hexdigest()
+        
+    def fund_child_wallets(self, mother_wallet: str, child_wallets: List[str], token_address: str, amount_per_wallet: float, 
+                      mother_private_key: str = None, priority_fee: int = 25000, batch_id: str = None,
+                      idempotency_key: str = None) -> Dict[str, Any]:
         """
         Fund child wallets from mother wallet.
         
@@ -786,6 +962,10 @@ class ApiClient:
             child_wallets: List of child wallet addresses to fund
             token_address: Token contract address
             amount_per_wallet: Amount to fund each wallet with
+            mother_private_key: Mother wallet private key for signing transactions
+            priority_fee: Priority fee in microLamports to accelerate transactions (default: 25000)
+            batch_id: Optional batch ID for tracking grouped transactions
+            idempotency_key: Optional idempotency key to prevent duplicate transactions
             
         Returns:
             Status of funding operations
@@ -800,17 +980,93 @@ class ApiClient:
                     for i in range(len(child_wallets))
                 ]
             }
+        
+        # Generate a batch ID if not provided
+        if not batch_id:
+            batch_id = self.generate_batch_id()
+        
+        # Check for duplicate requests - store already processed wallets
+        processed_wallets = set()
+        
+        # Format child wallets exactly as in test_specific_transfers.py
+        formatted_child_wallets = []
+        for i, child_wallet in enumerate(child_wallets):
+            # Skip if wallet already in the processed set (duplicate)
+            if child_wallet in processed_wallets:
+                logger.warning(f"Skipping duplicate wallet: {child_wallet}")
+                continue
+                
+            # Add to processed set
+            processed_wallets.add(child_wallet)
             
-        return self._make_request_with_retry(
-            'post', 
-            '/api/wallets/fund-children', 
-            json={
-                "motherAddress": mother_wallet,
-                "childAddresses": child_wallets,
-                "tokenAddress": token_address,
-                "amountPerWallet": amount_per_wallet
+            # Generate a deterministic operation ID if none provided
+            operation_id = None
+            if not idempotency_key:
+                operation_id = self.generate_operation_id(mother_wallet, child_wallet, amount_per_wallet)
+            else:
+                # If an idempotency key was provided, make it unique for each wallet
+                operation_id = f"{idempotency_key}_{i}"
+                
+            formatted_child_wallets.append({
+                "publicKey": child_wallet,
+                "amountSol": amount_per_wallet,
+                "operationId": operation_id
+            })
+        
+        # If no valid wallets after deduplication, return early
+        if not formatted_child_wallets:
+            logger.warning(f"No valid child wallets to fund after deduplication")
+            return {
+                "status": "skipped",
+                "message": "No valid child wallets to fund after deduplication"
             }
-        )
+            
+        # Prepare the funding payload exactly matching test_specific_transfers.py format
+        funding_payload = {
+            "motherAddress": mother_wallet,
+            "childWallets": formatted_child_wallets,
+            "tokenAddress": token_address or "So11111111111111111111111111111111111111112",  # Default to SOL token address
+            "batchId": batch_id,
+            "priorityFee": priority_fee
+        }
+        
+        # Add mother wallet private key if provided (for signing transactions)
+        if mother_private_key:
+            funding_payload["motherWalletPrivateKeyBase58"] = mother_private_key
+            
+        # Add idempotency key if provided - use a single key for all transfers
+        if idempotency_key:
+            funding_payload["idempotencyKey"] = idempotency_key
+            
+        # IMPORTANT: Remove childAddresses to avoid confusion with childWallets
+        if "childAddresses" in funding_payload:
+            del funding_payload["childAddresses"]
+            
+        logger.info(f"Funding {len(formatted_child_wallets)} child wallets with batch ID: {batch_id} and priority fee: {priority_fee}")
+        
+        # Use a higher timeout for blockchain operations
+        original_timeout = self.timeout
+        self.timeout = max(self.timeout, 45)  # Use at least 45 seconds for blockchain operations
+        
+        try:
+            result = self._make_request_with_retry(
+                'post', 
+                '/api/wallets/fund-children', 
+                json=funding_payload
+            )
+            return result
+        except ApiTimeoutError as e:
+            # If API times out but transaction might have gone through
+            logger.warning(f"API timeout during funding operation (batch: {batch_id}): {str(e)}")
+            return {
+                "status": "timeout",
+                "message": f"API request timed out after {self.timeout}s, but transactions may have completed on-chain",
+                "batch_id": batch_id,
+                "error": str(e)
+            }
+        finally:
+            # Restore original timeout
+            self.timeout = original_timeout
     
     def check_balance(self, wallet_address: str, token_address: str = None) -> Dict[str, Any]:
         """
@@ -1020,7 +1276,7 @@ class ApiClient:
         # Set the run_id for tracing
         self.set_run_id(run_id)
         
-        # Try first with a dedicated execute endpoint if available
+        # Try the execute endpoint if available
         try:
             return self._make_request_with_retry(
                 'post', 
@@ -1028,18 +1284,26 @@ class ApiClient:
                 json={"runId": run_id}
             )
         except ApiBadResponseError as e:
-            # If 404, the endpoint doesn't exist, try the Jupiter swap endpoint
+            # If 404, the endpoint doesn't exist, use direct fund transfer approach
             if "404" in str(e):
-                logger.warning("Execute endpoint not found, using Jupiter swap endpoint")
+                logger.warning("Execute endpoint not found, using direct funding approach from test_specific_transfers.py")
                 
-                # We need to get the schedule first to know what transfers to execute
-                # This would be a real implementation
-                raise NotImplementedError(
-                    "Direct Jupiter swap execution not implemented. API needs an /execute endpoint."
-                )
+                # Since we don't have access to the specifics at this level,
+                # we'll need to return a response that tells the caller
+                # to handle the funding directly, following test_specific_transfers.py approach
+                
+                return {
+                    "status": "execute_endpoint_not_found",
+                    "message": "The '/api/execute' endpoint was not found. The caller should handle direct funding using the fund_child_wallets method, following the approach in test_specific_transfers.py",
+                    "run_id": run_id
+                }
             else:
                 # For other errors, propagate them
                 raise
+        except Exception as e:
+            # Handle general errors
+            logger.error(f"Error in start_execution: {str(e)}")
+            raise ApiClientError(f"Failed to start execution: {str(e)}")
     
     def get_run_report(self, run_id: str) -> Dict[str, Any]:
         """
@@ -1181,6 +1445,162 @@ class ApiClient:
                 'token_symbol': 'tokens',
                 'error': str(e)
             }
+
+    def generate_batch_id(self) -> str:
+        """
+        Generate a unique batch ID for a group of transfers.
+        
+        Returns:
+            Unique batch ID string
+        """
+        return f"batch_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        
+    def save_wallet_data(self, wallet_type: str, wallet_data: Dict[str, Any]) -> bool:
+        """
+        Save wallet data to JSON file.
+        
+        Args:
+            wallet_type: Type of wallet ('mother' or 'child')
+            wallet_data: Wallet data dictionary to save
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Create data directory if it doesn't exist
+            os.makedirs('data', exist_ok=True)
+            
+            # Define file path based on wallet type
+            file_path = f"data/{wallet_type}_wallets.json"
+            
+            # Load existing data if file exists
+            existing_data = {}
+            if os.path.exists(file_path):
+                with open(file_path, 'r') as f:
+                    existing_data = json.load(f)
+            
+            # Update with new data
+            if wallet_type == 'mother':
+                # Use wallet address as key for mother wallet
+                existing_data[wallet_data['address']] = wallet_data
+            elif wallet_type == 'children':
+                # Use mother wallet address as key for child wallets
+                mother_address = wallet_data.get('mother_address')
+                if mother_address:
+                    existing_data[mother_address] = wallet_data
+            
+            # Save updated data
+            with open(file_path, 'w') as f:
+                json.dump(existing_data, f, indent=2)
+                
+            logger.info(f"Saved {wallet_type} wallet data to {file_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error saving {wallet_type} wallet data: {str(e)}")
+            return False
+    
+    def load_wallet_data(self, wallet_type: str, address: str = None) -> Dict[str, Any]:
+        """
+        Load wallet data from JSON file.
+        
+        Args:
+            wallet_type: Type of wallet ('mother' or 'child')
+            address: Optional wallet address to load specific wallet data
+            
+        Returns:
+            Dictionary containing wallet data, or empty dict if not found
+        """
+        try:
+            # Define file path based on wallet type
+            file_path = f"data/{wallet_type}_wallets.json"
+            
+            # Check if file exists
+            if not os.path.exists(file_path):
+                logger.warning(f"Wallet data file {file_path} does not exist")
+                return {}
+            
+            # Load data from file
+            with open(file_path, 'r') as f:
+                wallet_data = json.load(f)
+            
+            # Return specific wallet data if address provided
+            if address and address in wallet_data:
+                logger.info(f"Loaded {wallet_type} wallet data for address {address}")
+                return wallet_data[address]
+            
+            # Return all wallet data if no address provided
+            logger.info(f"Loaded all {wallet_type} wallet data ({len(wallet_data)} wallets)")
+            return wallet_data
+            
+        except Exception as e:
+            logger.error(f"Error loading {wallet_type} wallet data: {str(e)}")
+            return {}
+            
+    def list_saved_wallets(self, wallet_type: str) -> List[Dict[str, Any]]:
+        """
+        List all saved wallets of a specific type.
+        
+        Args:
+            wallet_type: Type of wallet ('mother' or 'child')
+            
+        Returns:
+            List of wallet information dictionaries
+        """
+        try:
+            # Load all wallet data
+            wallet_data = self.load_wallet_data(wallet_type)
+            
+            # Format for display
+            result = []
+            for address, data in wallet_data.items():
+                if wallet_type == 'mother':
+                    result.append({
+                        'address': address,
+                        'created_at': data.get('created_at', 0),
+                        'has_private_key': bool(data.get('private_key'))
+                    })
+                elif wallet_type == 'children':
+                    # For child wallets, return the mother address and child list
+                    children = data.get('wallets', [])
+                    result.append({
+                        'mother_address': address,
+                        'child_count': len(children),
+                        'created_at': data.get('created_at', 0)
+                    })
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error listing {wallet_type} wallets: {str(e)}")
+            return []
+
+    def load_child_wallets(self, mother_wallet: str) -> List[Dict[str, Any]]:
+        """
+        Load existing child wallets for a specific mother wallet.
+        
+        Args:
+            mother_wallet: Mother wallet address
+            
+        Returns:
+            List of child wallet information or empty list if none found
+        """
+        try:
+            # Load child wallets data from file
+            children_data = self.load_wallet_data('children', mother_wallet)
+            
+            if not children_data:
+                logger.info(f"No saved child wallets found for mother wallet: {mother_wallet}")
+                return []
+            
+            # Return wallet list
+            wallets = children_data.get('wallets', [])
+            logger.info(f"Loaded {len(wallets)} child wallets for mother wallet: {mother_wallet}")
+            return wallets
+            
+        except Exception as e:
+            logger.error(f"Error loading child wallets for mother wallet {mother_wallet}: {str(e)}")
+            return []
 
 # Create a singleton instance
 api_client = ApiClient() 

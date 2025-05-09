@@ -13,7 +13,7 @@ from telegram.ext import (
 )
 from loguru import logger
 
-from bot.config import ConversationState, MIN_CHILD_WALLETS, SERVICE_FEE_RATE
+from bot.config import ConversationState, MIN_CHILD_WALLETS, SERVICE_FEE_RATE, CONVERSATION_TIMEOUT
 from bot.utils.keyboard_utils import build_button, build_keyboard, build_menu
 from bot.utils.validation_utils import (
     validate_child_wallets_input, 
@@ -61,11 +61,18 @@ async def start(update: Update, context: CallbackContext) -> int:
     # Clear any existing session data
     session_manager.clear_session(user.id)
     
+    # Check if there are any saved mother wallets
+    saved_wallets = api_client.list_saved_wallets('mother')
+    
     # Build keyboard with wallet options
     keyboard = [
         [build_button("Create New Wallet", "create_wallet")],
         [build_button("Use My Wallet", "import_wallet")]
     ]
+    
+    # Add option to use existing wallets if available
+    if saved_wallets:
+        keyboard.append([build_button("Use Saved Wallet", "use_saved_wallet")])
     
     # Send welcome message with keyboard
     await update.message.reply_text(
@@ -102,6 +109,7 @@ async def wallet_choice(update: Update, context: CallbackContext) -> int:
             
             # Store in session
             session_manager.update_session_value(user.id, "mother_wallet", address)
+            session_manager.update_session_value(user.id, "mother_private_key", wallet_info.get("private_key", ""))
             
             logger.info(
                 f"Created wallet for user {user.id}",
@@ -140,7 +148,148 @@ async def wallet_choice(update: Update, context: CallbackContext) -> int:
         
         return ConversationState.IMPORT_WALLET
     
+    elif choice == "use_saved_wallet":
+        # Show list of saved wallets to choose from
+        saved_wallets = api_client.list_saved_wallets('mother')
+        
+        if not saved_wallets:
+            # No saved wallets found
+            logger.warning(f"No saved wallets found for user {user.id}")
+            
+            keyboard = [
+                [build_button("Create New Wallet", "create_wallet")],
+                [build_button("Use My Wallet", "import_wallet")]
+            ]
+            
+            await query.edit_message_text(
+                "No saved wallets found. Please create a new wallet or import an existing one.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            
+            return ConversationState.WALLET_CHOICE
+        
+        # Store the wallet data in user's session for reference by index
+        wallet_mapping = {}
+        for i, wallet in enumerate(saved_wallets):
+            # Use simple numeric index as key to avoid long callback data
+            wallet_mapping[i] = wallet['address']
+        
+        # Save the mapping to session for later reference
+        session_manager.update_session_value(user.id, "wallet_mapping", wallet_mapping)
+        
+        # Build keyboard with saved wallet options
+        keyboard = []
+        for i, wallet in enumerate(saved_wallets):
+            # Format wallet address for display (first 8 chars + ... + last 8 chars)
+            address = wallet['address']
+            short_address = f"{address[:8]}...{address[-8:]}" if len(address) > 16 else address
+            
+            # Use simple numeric index as callback data to avoid Telegram limits
+            keyboard.append([build_button(
+                f"Wallet {i+1}: {short_address}",
+                f"wallet_{i}"
+            )])
+        
+        # Add back button
+        keyboard.append([build_button("« Back", "back_to_wallet_choice")])
+        
+        await query.edit_message_text(
+            "Select a saved wallet:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+        return ConversationState.SAVED_WALLET_CHOICE
+    
+    elif choice == "back_to_wallet_choice":
+        # Go back to wallet choice
+        return await start(update, context)
+    
     else:
+        # Check if this is a saved wallet selection
+        if choice.startswith("wallet_"):
+            # Extract wallet index from callback data
+            try:
+                wallet_index = int(choice.replace("wallet_", ""))
+                
+                # Get the wallet mapping from session
+                wallet_mapping = session_manager.get_session_value(user.id, "wallet_mapping", {})
+                
+                # Get the full wallet address using the index
+                wallet_address = wallet_mapping.get(wallet_index)
+                
+                if not wallet_address:
+                    logger.error(
+                        f"Could not find wallet address for index {wallet_index} in user {user.id}'s session",
+                        extra={"user_id": user.id, "wallet_index": wallet_index}
+                    )
+                    
+                    # Send error message and go back to wallet choice
+                    await query.edit_message_text(
+                        format_error_message(f"Could not find wallet. Please try again."),
+                        reply_markup=InlineKeyboardMarkup([[build_button("Try Again", "use_saved_wallet")]])
+                    )
+                    
+                    return ConversationState.WALLET_CHOICE
+                
+                # Load wallet data
+                wallet_data = api_client.load_wallet_data('mother', wallet_address)
+                
+                if not wallet_data:
+                    logger.error(
+                        f"Could not load saved wallet {wallet_address} for user {user.id}",
+                        extra={"user_id": user.id, "wallet": wallet_address}
+                    )
+                    
+                    # Send error message and go back to wallet choice
+                    await query.edit_message_text(
+                        format_error_message(f"Could not load saved wallet."),
+                        reply_markup=InlineKeyboardMarkup([[build_button("Try Again", "use_saved_wallet")]])
+                    )
+                    
+                    return ConversationState.WALLET_CHOICE
+                
+                # Store wallet data in session
+                session_manager.update_session_value(user.id, "mother_wallet", wallet_address)
+                session_manager.update_session_value(user.id, "mother_private_key", wallet_data.get("private_key", ""))
+                
+                logger.info(
+                    f"Using saved wallet {wallet_address} for user {user.id}",
+                    extra={"user_id": user.id, "wallet": wallet_address}
+                )
+                
+                # Check if there are saved child wallets for this mother wallet
+                child_wallets = api_client.load_child_wallets(wallet_address)
+                
+                # Build keyboard with options
+                keyboard = []
+                
+                if child_wallets:
+                    # Option to use existing child wallets
+                    keyboard.append([build_button("Use Existing Child Wallets", f"use_existing_children_{wallet_index}")])
+                
+                # Option to create new child wallets
+                keyboard.append([build_button("Create New Child Wallets", f"create_new_children_{wallet_index}")])
+                
+                # Send confirmation and ask about child wallets
+                await query.edit_message_text(
+                    f"✅ Using saved wallet: `{wallet_address}`\n\nWhat would you like to do with child wallets?",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                
+                return ConversationState.CHILD_WALLET_CHOICE
+                
+            except (ValueError, TypeError) as e:
+                logger.error(f"Error parsing wallet index: {str(e)}", extra={"user_id": user.id, "choice": choice})
+                
+                # Send error message and go back to wallet choice
+                await query.edit_message_text(
+                    format_error_message(f"Invalid wallet selection. Please try again."),
+                    reply_markup=InlineKeyboardMarkup([[build_button("Try Again", "use_saved_wallet")]])
+                )
+                
+                return ConversationState.WALLET_CHOICE
+        
         # Invalid choice
         logger.warning(
             f"Invalid wallet choice: {choice}",
@@ -182,6 +331,7 @@ async def import_wallet(update: Update, context: CallbackContext) -> int:
         
         # Store in session
         session_manager.update_session_value(user.id, "mother_wallet", address)
+        session_manager.update_session_value(user.id, "mother_private_key", private_key)
         
         logger.info(
             f"Imported wallet for user {user.id}",
@@ -587,6 +737,18 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
         return ConversationState.START
     
     try:
+        # Show checking message first to provide immediate feedback
+        try:
+            await query.edit_message_text(
+                f"Checking balance for wallet: `{mother_wallet[:8]}...{mother_wallet[-8:]}`...",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as edit_error:
+            logger.warning(
+                f"Could not update 'checking' message: {str(edit_error)}",
+                extra={"user_id": user.id}
+            )
+        
         # Check balance
         balance_info = api_client.check_balance(mother_wallet, token_address)
         
@@ -615,29 +777,68 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
         # Check if sufficient
         if current_balance >= total_volume:
             # Sufficient balance
-            await query.edit_message_text(
-                format_sufficient_balance_message(
-                    balance=current_balance,
-                    token_symbol=token_symbol
-                ),
-                reply_markup=InlineKeyboardMarkup([[
-                    build_button("Begin Transfers", "start_execution")
-                ]])
-            )
+            try:
+                await query.edit_message_text(
+                    format_sufficient_balance_message(
+                        balance=current_balance,
+                        token_symbol=token_symbol
+                    ),
+                    reply_markup=InlineKeyboardMarkup([[
+                        build_button("Begin Transfers", "start_execution")
+                    ]]),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as edit_error:
+                logger.warning(
+                    f"Could not update sufficient balance message: {str(edit_error)}",
+                    extra={"user_id": user.id, "error": str(edit_error)}
+                )
+                # If edit fails, send a new message
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=format_sufficient_balance_message(
+                        balance=current_balance,
+                        token_symbol=token_symbol
+                    ),
+                    reply_markup=InlineKeyboardMarkup([[
+                        build_button("Begin Transfers", "start_execution")
+                    ]]),
+                    parse_mode=ParseMode.MARKDOWN
+                )
             
             return ConversationState.AWAIT_FUNDING
         else:
             # Insufficient balance
-            await query.edit_message_text(
-                format_insufficient_balance_message(
-                    current_balance=current_balance,
-                    required_balance=total_volume,
-                    token_symbol=token_symbol
-                ),
-                reply_markup=InlineKeyboardMarkup([[
-                    build_button("Check Again", "check_balance")
-                ]])
-            )
+            try:
+                await query.edit_message_text(
+                    format_insufficient_balance_message(
+                        current_balance=current_balance,
+                        required_balance=total_volume,
+                        token_symbol=token_symbol
+                    ),
+                    reply_markup=InlineKeyboardMarkup([[
+                        build_button("Check Again", "check_balance")
+                    ]]),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as edit_error:
+                logger.warning(
+                    f"Could not update insufficient balance message: {str(edit_error)}",
+                    extra={"user_id": user.id, "error": str(edit_error)}
+                )
+                # If edit fails, send a new message
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=format_insufficient_balance_message(
+                        current_balance=current_balance,
+                        required_balance=total_volume,
+                        token_symbol=token_symbol
+                    ),
+                    reply_markup=InlineKeyboardMarkup([[
+                        build_button("Check Again", "check_balance")
+                    ]]),
+                    parse_mode=ParseMode.MARKDOWN
+                )
             
             return ConversationState.AWAIT_FUNDING
             
@@ -648,12 +849,24 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
         )
         
         # Send error message with retry button
-        await query.edit_message_text(
-            format_error_message(f"Could not check balance: {str(e)}"),
-            reply_markup=InlineKeyboardMarkup([[
-                build_button("Try Again", "check_balance")
-            ]])
-        )
+        try:
+            await query.edit_message_text(
+                format_error_message(f"Could not check balance: {str(e)}"),
+                reply_markup=InlineKeyboardMarkup([[
+                    build_button("Try Again", "check_balance")
+                ]]),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as edit_error:
+            # If edit fails, send a new message
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=format_error_message(f"Could not check balance: {str(e)}"),
+                reply_markup=InlineKeyboardMarkup([[
+                    build_button("Try Again", "check_balance")
+                ]]),
+                parse_mode=ParseMode.MARKDOWN
+            )
         
         return ConversationState.AWAIT_FUNDING
 
@@ -697,13 +910,124 @@ async def start_execution(update: Update, context: CallbackContext) -> int:
     )
     
     try:
-        # Start execution
-        api_client.start_execution(run_id)
+        # Retrieve necessary wallet data for direct funding approach
+        mother_wallet = session_manager.get_session_value(user.id, "mother_wallet")
+        mother_private_key = session_manager.get_session_value(user.id, "mother_private_key")
+        child_wallets = session_manager.get_session_value(user.id, "child_wallets")
+        token_address = session_manager.get_session_value(user.id, "token_address", "So11111111111111111111111111111111111111112")  # Default to SOL
         
-        logger.info(
-            f"Started execution for user {user.id}",
-            extra={"user_id": user.id, "run_id": run_id}
-        )
+        # Calculate amount per wallet from total_volume divided by number of child wallets
+        total_volume = session_manager.get_session_value(user.id, "total_volume", 0)
+        num_child_wallets = len(child_wallets) if child_wallets else 0
+        amount_per_wallet = total_volume / num_child_wallets if num_child_wallets > 0 else 0
+        
+        # Priority fee for faster transactions (microLamports)
+        priority_fee = 25000  # Default priority fee
+        
+        # Start execution
+        result = api_client.start_execution(run_id)
+        
+        # Check if we need to handle direct funding (API endpoint not available)
+        if result.get("status") == "execute_endpoint_not_found":
+            logger.info(
+                f"Using direct funding approach for user {user.id}",
+                extra={"user_id": user.id, "run_id": run_id}
+            )
+            
+            # Check if transfers have already been initiated for this session
+            if session_manager.get_session_value(user.id, "transfers_initiated"):
+                logger.warning(f"Transfers already initiated for user {user.id} - preventing duplicate execution")
+                
+                # Send message about duplicate execution attempt
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text="⚠️ Transfers have already been initiated. Please wait for them to complete."
+                )
+                
+                return ConversationState.EXECUTION
+            
+            # Verify we have all required data for direct funding
+            if not all([mother_wallet, child_wallets, amount_per_wallet > 0]):
+                error_msg = "Missing required data for direct wallet funding"
+                logger.error(
+                    f"{error_msg} for user {user.id}",
+                    extra={
+                        "user_id": user.id, 
+                        "mother_wallet_exists": bool(mother_wallet),
+                        "child_wallets_count": len(child_wallets) if child_wallets else 0,
+                        "amount_per_wallet": amount_per_wallet
+                    }
+                )
+                
+                # Send error message with restart button
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=format_error_message(f"{error_msg}. Please restart with /start."),
+                    reply_markup=None
+                )
+                
+                return ConversationState.START
+            
+            # Check if we have the private key for signing transactions
+            if not mother_private_key:
+                logger.error(
+                    f"Missing mother wallet private key for user {user.id}",
+                    extra={"user_id": user.id, "mother_wallet": mother_wallet}
+                )
+                
+                # Send error message about missing private key
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=format_error_message("Missing mother wallet private key. Please restart with /start and create a new wallet."),
+                    reply_markup=None
+                )
+                
+                return ConversationState.START
+            
+            # Generate a batch ID for this execution
+            batch_id = api_client.generate_batch_id()
+            
+            # Log direct funding attempt
+            logger.info(
+                f"Starting direct funding with batch ID: {batch_id}",
+                extra={
+                    "user_id": user.id,
+                    "batch_id": batch_id,
+                    "mother_wallet": mother_wallet,
+                    "child_wallets_count": len(child_wallets),
+                    "amount_per_wallet": amount_per_wallet,
+                    "has_private_key": bool(mother_private_key),
+                    "private_key_length": len(mother_private_key) if mother_private_key else 0
+                }
+            )
+            
+            # Implement direct funding approach like in test_specific_transfers.py
+            funding_result = api_client.fund_child_wallets(
+                mother_wallet=mother_wallet,
+                child_wallets=child_wallets,
+                token_address=token_address,
+                amount_per_wallet=amount_per_wallet,
+                mother_private_key=mother_private_key,
+                priority_fee=priority_fee,
+                batch_id=batch_id
+            )
+            
+            # Update session with batch ID
+            session_manager.update_session_value(user.id, "batch_id", batch_id)
+            
+            # Mark transfers as initiated to prevent duplicates
+            session_manager.update_session_value(user.id, "transfers_initiated", True)
+            
+            # Log the funding result
+            logger.info(
+                f"Direct funding result for user {user.id}",
+                extra={"user_id": user.id, "batch_id": batch_id, "result": funding_result}
+            )
+        else:
+            logger.info(
+                f"Started execution using API endpoint for user {user.id}",
+                extra={"user_id": user.id, "run_id": run_id, "result": result}
+            )
         
         # Register event handler for transaction events
         await setup_transaction_event_handlers(user.id, context)
@@ -717,9 +1041,6 @@ async def start_execution(update: Update, context: CallbackContext) -> int:
                 "This may take some time depending on the number of transfers."
             )
         )
-        
-        # For testing/demo, simulate events
-        asyncio.create_task(event_system.simulate_events_for_run(run_id, schedule))
         
         return ConversationState.EXECUTION
         
@@ -885,25 +1206,201 @@ async def regenerate_preview(update: Update, context: CallbackContext) -> int:
     return ConversationState.PREVIEW_SCHEDULE
 
 
-def register_start_handler(application):
+async def child_wallet_choice(update: Update, context: CallbackContext) -> int:
     """
-    Register the conversation handler for the /start command.
+    Handle the choice of using existing child wallets or creating new ones.
     
     Args:
-        application: The Telegram application
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
     """
-    # Define conversation handler with states
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+    
+    choice = query.data
+    
+    # Get mother wallet from session
+    mother_wallet = session_manager.get_session_value(user.id, "mother_wallet")
+    
+    if not mother_wallet:
+        logger.error(
+            f"No mother wallet found in session for user {user.id}",
+            extra={"user_id": user.id}
+        )
+        
+        # Send error message and go back to wallet choice
+        await query.edit_message_text(
+            format_error_message("Session data lost. Please start again."),
+            reply_markup=InlineKeyboardMarkup([[build_button("Start Over", "back_to_wallet_choice")]])
+        )
+        
+        return ConversationState.WALLET_CHOICE
+    
+    if choice.startswith("use_existing_children_"):
+        try:
+            # Extract wallet index from callback data
+            wallet_index = int(choice.replace("use_existing_children_", ""))
+            
+            # Get wallet mapping from session to verify the mother wallet
+            wallet_mapping = session_manager.get_session_value(user.id, "wallet_mapping", {})
+            selected_mother_wallet = wallet_mapping.get(wallet_index)
+            
+            # Verify the mother address matches the one in session
+            if selected_mother_wallet != mother_wallet:
+                logger.error(
+                    f"Mother wallet mismatch for user {user.id}: {selected_mother_wallet} vs {mother_wallet}",
+                    extra={"user_id": user.id}
+                )
+                
+                # Send error message and go back to wallet choice
+                await query.edit_message_text(
+                    format_error_message("Mother wallet mismatch. Please start again."),
+                    reply_markup=InlineKeyboardMarkup([[build_button("Start Over", "back_to_wallet_choice")]])
+                )
+                
+                return ConversationState.WALLET_CHOICE
+            
+            # Load existing child wallets for this mother wallet
+            child_wallets = api_client.load_child_wallets(mother_wallet)
+            
+            if not child_wallets:
+                logger.error(
+                    f"No child wallets found for mother wallet {mother_wallet}",
+                    extra={"user_id": user.id, "mother_wallet": mother_wallet}
+                )
+                
+                # Send error message and offer to create new child wallets
+                await query.edit_message_text(
+                    format_error_message("No child wallets found for this mother wallet."),
+                    reply_markup=InlineKeyboardMarkup([
+                        [build_button("Create New Child Wallets", f"create_new_children_{wallet_index}")]
+                    ])
+                )
+                
+                return ConversationState.CHILD_WALLET_CHOICE
+            
+            # Store child wallets in session
+            child_addresses = [wallet.get('address') for wallet in child_wallets if wallet.get('address')]
+            session_manager.update_session_value(user.id, "child_wallets", child_addresses)
+            
+            # Set number of child wallets
+            num_wallets = len(child_addresses)
+            session_manager.update_session_value(user.id, "num_child_wallets", num_wallets)
+            
+            logger.info(
+                f"Using {num_wallets} existing child wallets for user {user.id}",
+                extra={"user_id": user.id, "mother_wallet": mother_wallet, "num_wallets": num_wallets}
+            )
+            
+            # Confirm and ask for volume
+            await query.edit_message_text(
+                format_child_wallets_message(num_wallets, child_addresses)
+            )
+            
+            return ConversationState.VOLUME_AMOUNT
+        except (ValueError, TypeError) as e:
+            logger.error(
+                f"Error parsing wallet index in child wallet choice: {str(e)}",
+                extra={"user_id": user.id, "choice": choice}
+            )
+            
+            # Send error message and go back to wallet choice
+            await query.edit_message_text(
+                format_error_message("Invalid selection. Please start again."),
+                reply_markup=InlineKeyboardMarkup([[build_button("Start Over", "back_to_wallet_choice")]])
+            )
+            
+            return ConversationState.WALLET_CHOICE
+    
+    elif choice.startswith("create_new_children_"):
+        try:
+            # Extract wallet index from callback data
+            wallet_index = int(choice.replace("create_new_children_", ""))
+            
+            # Get wallet mapping from session to verify the mother wallet
+            wallet_mapping = session_manager.get_session_value(user.id, "wallet_mapping", {})
+            selected_mother_wallet = wallet_mapping.get(wallet_index)
+            
+            # Verify the mother address matches the one in session
+            if selected_mother_wallet != mother_wallet:
+                logger.error(
+                    f"Mother wallet mismatch for user {user.id}: {selected_mother_wallet} vs {mother_wallet}",
+                    extra={"user_id": user.id}
+                )
+                
+                # Send error message and go back to wallet choice
+                await query.edit_message_text(
+                    format_error_message("Mother wallet mismatch. Please start again."),
+                    reply_markup=InlineKeyboardMarkup([[build_button("Start Over", "back_to_wallet_choice")]])
+                )
+                
+                return ConversationState.WALLET_CHOICE
+            
+            # Ask for number of child wallets
+            await query.edit_message_text(
+                f"How many child wallets would you like to create? (min: {MIN_CHILD_WALLETS})\n\n"
+                f"Each child wallet will be used for transfers to simulate trading volume."
+            )
+            
+            return ConversationState.NUM_CHILD_WALLETS
+        except (ValueError, TypeError) as e:
+            logger.error(
+                f"Error parsing wallet index in child wallet choice: {str(e)}",
+                extra={"user_id": user.id, "choice": choice}
+            )
+            
+            # Send error message and go back to wallet choice
+            await query.edit_message_text(
+                format_error_message("Invalid selection. Please start again."),
+                reply_markup=InlineKeyboardMarkup([[build_button("Start Over", "back_to_wallet_choice")]])
+            )
+            
+            return ConversationState.WALLET_CHOICE
+    
+    else:
+        # Invalid choice
+        logger.warning(
+            f"Invalid child wallet choice: {choice}",
+            extra={"user_id": user.id}
+        )
+        
+        # Go back to child wallet choice
+        await query.edit_message_text(
+            "Invalid selection. Please choose an option:",
+            reply_markup=InlineKeyboardMarkup([
+                [build_button("Create New Child Wallets", f"create_new_children_0")]
+            ])
+        )
+        
+        return ConversationState.CHILD_WALLET_CHOICE
+
+
+def register_start_handler(application):
+    """
+    Register the start command handler.
+    
+    Args:
+        application: The application to register the handler to
+    """
+    # Create conversation handler
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            ConversationState.START: [
-                CommandHandler("start", start)
-            ],
             ConversationState.WALLET_CHOICE: [
                 CallbackQueryHandler(wallet_choice)
             ],
             ConversationState.IMPORT_WALLET: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, import_wallet)
+            ],
+            ConversationState.SAVED_WALLET_CHOICE: [
+                CallbackQueryHandler(wallet_choice)
+            ],
+            ConversationState.CHILD_WALLET_CHOICE: [
+                CallbackQueryHandler(child_wallet_choice)
             ],
             ConversationState.NUM_CHILD_WALLETS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, num_child_wallets),
@@ -916,22 +1413,22 @@ def register_start_handler(application):
                 MessageHandler(filters.TEXT & ~filters.COMMAND, token_address)
             ],
             ConversationState.PREVIEW_SCHEDULE: [
-                CallbackQueryHandler(regenerate_preview, pattern=r"^regenerate_preview$"),
-                CallbackQueryHandler(check_balance, pattern=r"^check_balance$")
+                CallbackQueryHandler(check_balance, pattern=r"^check_balance$"),
+                CallbackQueryHandler(regenerate_preview, pattern=r"^regenerate$")
             ],
             ConversationState.AWAIT_FUNDING: [
                 CallbackQueryHandler(check_balance, pattern=r"^check_balance$"),
                 CallbackQueryHandler(start_execution, pattern=r"^start_execution$")
             ],
             ConversationState.EXECUTION: [
-                # No handlers needed, just event subscribers
+                CallbackQueryHandler(cancel, pattern=r"^cancel$")
             ]
         },
         fallbacks=[
             CommandHandler("cancel", cancel)
         ],
-        # Set conversation timeout
-        conversation_timeout=1800  # 30 minutes
+        name="start_conversation",
+        persistent=False
     )
     
     # Register the conversation handler

@@ -33,6 +33,36 @@ logs/
 
 # Project specific
 *.yaml
+!example.yaml
+!default_config.yaml
+*.txt
+!requirements.txt
+!README.txt
+
+# Wallet data files
+data/mother_wallets.json
+data/children_wallets.json
+data/*.json
+
+# Test files
+test_*.py
+*_test.py
+run_tests.py
+*_tests.py
+README_TESTS.md
+API_INTEGRATION.md
+cause_debugging.yaml
+code_expansion.yaml
+slow_planning.yaml
+new_code.yaml
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+.~*
 
 # IDE specific
 .idea/
@@ -45,3 +75,8 @@ logs/
 .coverage
 htmlcov/
 .pytest_cache/
+
+# Other
+.env.local
+setup_env.py
+run_test.bat

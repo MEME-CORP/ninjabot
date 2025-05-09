@@ -135,11 +135,15 @@ def format_insufficient_balance_message(
     Returns:
         Formatted insufficient balance message
     """
+    # Add timestamp to ensure message is different each time
+    current_time = datetime.now().strftime("%H:%M:%S")
+    
     return (
         f"⚠️ **Insufficient Balance**\n\n"
         f"Current balance: {current_balance:.3f} {token_symbol}\n"
         f"Required balance: {required_balance:,} {token_symbol}\n\n"
-        f"Please fund your wallet with the required amount and then click 'Check Again'."
+        f"Please fund your wallet with the required amount and then click 'Check Again'.\n"
+        f"Last checked: {current_time}"
     )
 
 def format_sufficient_balance_message(
@@ -156,10 +160,14 @@ def format_sufficient_balance_message(
     Returns:
         Formatted sufficient balance message
     """
+    # Add timestamp to ensure message is different each time
+    current_time = datetime.now().strftime("%H:%M:%S")
+    
     return (
         f"✅ **Sufficient Balance Detected**\n\n"
         f"Current balance: {balance:.3f} {token_symbol}\n\n"
-        f"Ready to begin transfer execution. Click 'Begin Transfers' to start."
+        f"Ready to begin transfer execution. Click 'Begin Transfers' to start.\n"
+        f"Last checked: {current_time}"
     )
 
 def format_transaction_status_message(
