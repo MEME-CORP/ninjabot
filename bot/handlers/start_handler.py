@@ -32,7 +32,10 @@ from bot.utils.message_utils import (
     format_insufficient_balance_message,
     format_sufficient_balance_message,
     format_transaction_status_message,
-    format_error_message
+    format_error_message,
+    format_child_balances_overview,
+    format_return_funds_summary,
+    format_child_wallets_funding_status
 )
 from bot.api.api_client import api_client, ApiClientError
 from bot.events.event_system import event_system
@@ -277,6 +280,17 @@ async def wallet_choice(update: Update, context: CallbackContext) -> int:
                     parse_mode=ParseMode.MARKDOWN
                 )
                 
+                # Store child wallets in session
+                child_addresses = [wallet.get('address') for wallet in child_wallets if wallet.get('address')]
+                session_manager.update_session_value(user.id, "child_wallets", child_addresses)
+                
+                # Also store the full child wallets data (with private keys) for return funds functionality
+                session_manager.update_session_value(user.id, "child_wallets_data", child_wallets)
+                
+                # Set number of child wallets
+                num_wallets = len(child_addresses)
+                session_manager.update_session_value(user.id, "num_child_wallets", num_wallets)
+                
                 return ConversationState.CHILD_WALLET_CHOICE
                 
             except (ValueError, TypeError) as e:
@@ -428,7 +442,7 @@ async def num_child_wallets(update: Update, context: CallbackContext) -> int:
         # that always have an 'address' property
         child_wallets_response = api_client.derive_child_wallets(num_wallets, mother_wallet)
         
-        # Extract child wallet addresses - should be simpler now with improved api_client
+        # Extract child wallet addresses and store full wallet data
         child_addresses = []
         
         # Process the normalized response from api_client
@@ -443,6 +457,10 @@ async def num_child_wallets(update: Update, context: CallbackContext) -> int:
                 extra={"user_id": user.id}
             )
         
+        # Store both the full wallet data (with private keys) and just the addresses
+        # Full data is needed for fund return functionality
+        session_manager.update_session_value(user.id, "child_wallets_data", child_wallets_response)
+        # Addresses list for backward compatibility with existing code
         session_manager.update_session_value(user.id, "child_wallets", child_addresses)
         
         logger.info(
@@ -579,7 +597,7 @@ async def generate_preview(update: Update, context: CallbackContext) -> None:
         chat_id=user.id,
         text="Generating transfer schedule..."
     )
-    
+
     try:
         # Generate schedule
         schedule = api_client.generate_schedule(
@@ -616,10 +634,102 @@ async def generate_preview(update: Update, context: CallbackContext) -> None:
             parse_mode=ParseMode.MARKDOWN
         )
         
+        # BEFORE starting mother wallet balance polling, check if child wallets are already funded
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="🔍 Checking if child wallets are already funded..."
+        )
+        
+        # Calculate amount per child wallet
+        amount_per_wallet = total_volume / len(child_wallets) if child_wallets else 0
+        
+        # Check child wallet funding status
+        funding_status = await check_child_wallets_funding_status(user.id, amount_per_wallet)
+        
+        if funding_status.get("error"):
+            # Error checking funding status, inform user but continue with mother wallet check as fallback
+            logger.warning(f"Error checking child wallet funding status for user {user.id}: {funding_status['error']}")
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=(
+                    "⚠️ Could not verify child wallet balances.\n\n"
+                    "Proceeding with mother wallet funding check as a safety measure. "
+                    "This ensures all wallets will have sufficient funds."
+                )
+            )
+            # Set funding needed as fallback
+            session_manager.update_session_value(user.id, "child_wallets_need_funding", True)
+        elif funding_status.get("all_funded", False):
+            # All child wallets are already funded - show this information to the user
+            logger.info(f"All child wallets already sufficiently funded for user {user.id}")
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=(
+                    f"✅ Child wallets are already funded!\n\n"
+                    f"Found {funding_status['funded_wallets']}/{funding_status['total_wallets']} "
+                    f"wallets with sufficient balance ({amount_per_wallet:.4f} SOL each).\n\n"
+                    f"You can proceed directly to volume generation without additional funding."
+                )
+            )
+            
+            # Mark that funding is not needed
+            session_manager.update_session_value(user.id, "child_wallets_need_funding", False)
+        else:
+            # Some or all wallets need funding
+            funded_count = funding_status.get("funded_wallets", 0)
+            total_count = funding_status.get("total_wallets", 0)
+            
+            if funded_count > 0:
+                logger.info(f"Partial funding needed for user {user.id}: {funded_count}/{total_count} wallets already funded")
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=(
+                        f"📊 Child Wallet Status: {funded_count}/{total_count} already funded\n\n"
+                        f"Some child wallets need funding ({amount_per_wallet:.4f} SOL each).\n"
+                        f"Please fund the mother wallet to transfer to remaining child wallets."
+                    )
+                )
+            else:
+                logger.info(f"All child wallets need funding for user {user.id}")
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=(
+                        f"📊 Child Wallet Status: 0/{total_count} funded\n\n"
+                        f"Child wallets need funding ({amount_per_wallet:.4f} SOL each).\n"
+                        f"Please fund the mother wallet to transfer to child wallets."
+                    )
+                )
+            
+            # Mark that funding is needed
+            session_manager.update_session_value(user.id, "child_wallets_need_funding", True)
+        
+        # Store the funding status for later use
+        session_manager.update_session_value(user.id, "child_funding_status", funding_status)
+        
+        # Decision point: Skip mother wallet check if child wallets are already funded
+        if funding_status.get("all_funded", False):
+            # Child wallets are fully funded - skip mother wallet balance check entirely
+            logger.info(f"Child wallets fully funded for user {user.id} - skipping mother wallet balance check")
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=(
+                    "🚀 Ready to start volume generation!\n\n"
+                    "Since your child wallets already have sufficient balance, "
+                    "you can proceed directly to volume generation."
+                ),
+                reply_markup=InlineKeyboardMarkup([[
+                    build_button("🚀 Start Volume Generation", "start_execution")
+                ]])
+            )
+            return  # Exit early - no need for mother wallet balance polling
+        
+        # Child wallets need funding - proceed with mother wallet balance check
+        logger.info(f"Child wallets need funding for user {user.id} - checking mother wallet balance")
+        
         # Add "wait for funding" message
         await context.bot.send_message(
             chat_id=user.id,
-            text="Please fund the wallet now. I'll check the balance every few seconds.",
+            text="Please fund the mother wallet now. I'll check the balance every few seconds.",
             reply_markup=InlineKeyboardMarkup([[
                 build_button("Check Balance Now", "check_balance")
             ]])
@@ -796,7 +906,7 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
                 )
                 # If edit fails, send a new message
                 await context.bot.send_message(
-                    chat_id=user.id,
+                    chat_id=user_id,
                     text=format_sufficient_balance_message(
                         balance=current_balance,
                         token_symbol=token_symbol
@@ -829,7 +939,7 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
                 )
                 # If edit fails, send a new message
                 await context.bot.send_message(
-                    chat_id=user.id,
+                    chat_id=user_id,
                     text=format_insufficient_balance_message(
                         current_balance=current_balance,
                         required_balance=total_volume,
@@ -861,7 +971,7 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
         except Exception as edit_error:
             # If edit fails, send a new message
             await context.bot.send_message(
-                chat_id=user.id,
+                chat_id=user_id,
                 text=format_error_message(f"Could not check balance: {str(e)}"),
                 reply_markup=InlineKeyboardMarkup([[
                     build_button("Try Again", "check_balance")
@@ -911,7 +1021,7 @@ async def start_execution(update: Update, context: CallbackContext) -> int:
     )
     
     try:
-        # Retrieve necessary wallet data for direct funding approach
+        # Retrieve necessary wallet data for funding check and potential funding
         mother_wallet = session_manager.get_session_value(user.id, "mother_wallet")
         mother_private_key = session_manager.get_session_value(user.id, "mother_private_key")
         child_wallets = session_manager.get_session_value(user.id, "child_wallets")
@@ -922,190 +1032,250 @@ async def start_execution(update: Update, context: CallbackContext) -> int:
         num_child_wallets = len(child_wallets) if child_wallets else 0
         amount_per_wallet = total_volume / num_child_wallets if num_child_wallets > 0 else 0
         
-        # Priority fee for faster transactions (microLamports)
-        priority_fee = 25000  # Default priority fee
+        # Use pre-computed child wallet funding status from generate_preview
+        child_wallets_need_funding = session_manager.get_session_value(user.id, "child_wallets_need_funding", True)  # Default to True for safety
+        funding_status = session_manager.get_session_value(user.id, "child_funding_status", {})
         
-        # Start execution
-        result = api_client.start_execution(run_id)
-        
-        # Check if we need to handle direct funding (API endpoint not available)
-        if result.get("status") == "execute_endpoint_not_found":
-            logger.info(
-                f"Using direct funding approach for user {user.id}",
-                extra={"user_id": user.id, "run_id": run_id}
-            )
-            
-            # Check if transfers have already been initiated for this session
-            if session_manager.get_session_value(user.id, "transfers_initiated"):
-                logger.warning(f"Transfers already initiated for user {user.id} - preventing duplicate execution")
-                
-                # Send message about duplicate execution attempt
-                await context.bot.send_message(
-                    chat_id=user.id,
-                    text="⚠️ Transfers have already been initiated. Please wait for them to complete."
-                )
-                
-                return ConversationState.EXECUTION
-            
-            # Verify we have all required data for direct funding
-            if not all([mother_wallet, child_wallets, amount_per_wallet > 0]):
-                error_msg = "Missing required data for direct wallet funding"
-                logger.error(
-                    f"{error_msg} for user {user.id}",
-                    extra={
-                        "user_id": user.id, 
-                        "mother_wallet_exists": bool(mother_wallet),
-                        "child_wallets_count": len(child_wallets) if child_wallets else 0,
-                        "amount_per_wallet": amount_per_wallet
-                    }
-                )
-                
-                # Send error message with restart button
-                await context.bot.send_message(
-                    chat_id=user.id,
-                    text=format_error_message(f"{error_msg}. Please restart with /start."),
-                    reply_markup=None
-                )
-                
-                return ConversationState.START
-            
-            # Check if we have the private key for signing transactions
-            if not mother_private_key:
-                logger.error(
-                    f"Missing mother wallet private key for user {user.id}",
-                    extra={"user_id": user.id, "mother_wallet": mother_wallet}
-                )
-                
-                # Send error message about missing private key
-                await context.bot.send_message(
-                    chat_id=user.id,
-                    text=format_error_message("Missing mother wallet private key. Please restart with /start and create a new wallet."),
-                    reply_markup=None
-                )
-                
-                return ConversationState.START
-            
-            # Generate a batch ID for this execution
-            batch_id = api_client.generate_batch_id()
-            
-            # Log direct funding attempt
-            logger.info(
-                f"Starting direct funding with batch ID: {batch_id}",
-                extra={
-                    "user_id": user.id,
-                    "batch_id": batch_id,
-                    "mother_wallet": mother_wallet,
-                    "child_wallets_count": len(child_wallets),
-                    "amount_per_wallet": amount_per_wallet,
-                    "has_private_key": bool(mother_private_key),
-                    "private_key_length": len(mother_private_key) if mother_private_key else 0
-                }
-            )
-            
-            # Implement direct funding approach like in test_specific_transfers.py
-            funding_result = api_client.fund_child_wallets(
-                mother_wallet=mother_wallet,
-                child_wallets=child_wallets,
-                token_address=token_address,
-                amount_per_wallet=amount_per_wallet,
-                mother_private_key=mother_private_key,
-                priority_fee=priority_fee,
-                batch_id=batch_id,
-                verify_transfers=True  # Enable verification to check if transfers were successful
-            )
-            
-            # Update session with batch ID
-            session_manager.update_session_value(user.id, "batch_id", batch_id)
-            
-            # Mark transfers as initiated to prevent duplicates
-            session_manager.update_session_value(user.id, "transfers_initiated", True)
-            
-            # Store the verification results for later reference
-            session_manager.update_session_value(user.id, "verification_results", funding_result.get("verification_results", []))
-            
-            # Process verification results to trigger transaction events
-            if "verification_results" in funding_result and isinstance(funding_result["verification_results"], list):
-                for verification in funding_result["verification_results"]:
-                    child_wallet = verification.get("wallet_address")
-                    is_verified = verification.get("verified", False)
-                    initial_balance = verification.get("initial_balance", 0)
-                    final_balance = verification.get("final_balance", 0)
-                    difference = verification.get("difference", 0)
-                    
-                    # Generate a mock transaction hash for event tracking
-                    tx_hash = f"tx_{batch_id}_{child_wallet[-6:]}"
-                    
-                    # Emit appropriate event based on verification result
-                    if is_verified:
-                        # Emit transaction confirmed event
-                        await event_system.emit("transaction_confirmed", {
-                            "tx_hash": tx_hash,
-                            "from": mother_wallet,
-                            "to": child_wallet,
-                            "amount": amount_per_wallet,
-                            "token_symbol": "SOL",
-                            "difference": difference
-                        })
-                    else:
-                        # Emit transaction failed event with error info
-                        await event_system.emit("transaction_failed", {
-                            "tx_hash": tx_hash,
-                            "from": mother_wallet,
-                            "to": child_wallet,
-                            "amount": amount_per_wallet,
-                            "token_symbol": "SOL",
-                            "error": f"Verification failed. Balance changed from {initial_balance} to {final_balance} SOL."
-                        })
-            
-            # Provide summary of transfer results
-            successful_transfers = funding_result.get("successful_transfers", 0)
-            failed_transfers = funding_result.get("failed_transfers", 0)
-            total_transfers = successful_transfers + failed_transfers
-            
-            # Log the funding result
-            logger.info(
-                f"Direct funding result for user {user.id}",
-                extra={
-                    "user_id": user.id, 
-                    "batch_id": batch_id, 
-                    "result": funding_result,
-                    "successful_transfers": successful_transfers,
-                    "failed_transfers": failed_transfers
-                }
-            )
-            
-            # Send a summary message
+        # Inform user about child wallet funding status
+        if not child_wallets_need_funding:
+            logger.info(f"Child wallets already sufficiently funded for user {user.id} - skipping funding")
             await context.bot.send_message(
                 chat_id=user.id,
                 text=(
-                    f"📊 Transfer Summary\n\n"
-                    f"✅ Successful: {successful_transfers}/{total_transfers}\n"
-                    f"❌ Failed: {failed_transfers}/{total_transfers}\n\n"
-                    f"Batch ID: {batch_id}\n"
-                    f"Status: {funding_result.get('status', 'unknown')}"
+                    f"✅ Child wallets already have sufficient balance!\n\n"
+                    f"Skipping child wallet funding and proceeding directly to volume generation..."
                 )
             )
-            
+            wallets_already_funded = True
         else:
-            logger.info(
-                f"Started execution using API endpoint for user {user.id}",
-                extra={"user_id": user.id, "run_id": run_id, "result": result}
+            funded_count = funding_status.get("funded_wallets", 0)
+            total_count = funding_status.get("total_wallets", 0)
+            if funded_count > 0:
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=(
+                        f"🔄 Funding {total_count - funded_count} remaining child wallets...\n\n"
+                        f"({funded_count}/{total_count} wallets already funded)"
+                    )
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=f"🔄 Funding {total_count} child wallets..."
+                )
+            wallets_already_funded = False
+        
+        # Skip funding if wallets are already sufficiently funded
+        if not wallets_already_funded:
+            # Priority fee for faster transactions (microLamports)
+            priority_fee = 25000  # Default priority fee
+            
+            # Start execution
+            result = api_client.start_execution(run_id)
+            
+            # Check if we need to handle direct funding (API endpoint not available)
+            if result.get("status") == "execute_endpoint_not_found":
+                logger.info(
+                    f"Using direct funding approach for user {user.id}",
+                    extra={"user_id": user.id, "run_id": run_id}
+                )
+                
+                # Check if transfers have already been initiated for this session
+                if session_manager.get_session_value(user.id, "transfers_initiated"):
+                    logger.warning(f"Transfers already initiated for user {user.id} - preventing duplicate execution")
+                    
+                    # Send message about duplicate execution attempt
+                    await context.bot.send_message(
+                        chat_id=user.id,
+                        text="⚠️ Transfers have already been initiated. Please wait for them to complete."
+                    )
+                    
+                    return ConversationState.EXECUTION
+                
+                # Verify we have all required data for direct funding
+                if not all([mother_wallet, child_wallets, amount_per_wallet > 0]):
+                    error_msg = "Missing required data for direct wallet funding"
+                    logger.error(
+                        f"{error_msg} for user {user.id}",
+                        extra={
+                            "user_id": user.id, 
+                            "mother_wallet_exists": bool(mother_wallet),
+                            "child_wallets_count": len(child_wallets) if child_wallets else 0,
+                            "amount_per_wallet": amount_per_wallet
+                        }
+                    )
+                    
+                    # Send error message with restart button
+                    await context.bot.send_message(
+                        chat_id=user.id,
+                        text=format_error_message(f"{error_msg}. Please restart with /start."),
+                        reply_markup=None
+                    )
+                    
+                    return ConversationState.START
+                
+                # Check if we have the private key for signing transactions
+                if not mother_private_key:
+                    logger.error(
+                        f"Missing mother wallet private key for user {user.id}",
+                        extra={"user_id": user.id, "mother_wallet": mother_wallet}
+                    )
+                    
+                    # Send error message about missing private key
+                    await context.bot.send_message(
+                        chat_id=user.id,
+                        text=format_error_message("Missing mother wallet private key. Please restart with /start and create a new wallet."),
+                        reply_markup=None
+                    )
+                    
+                    return ConversationState.START
+                
+                # Generate a batch ID for this execution
+                batch_id = api_client.generate_batch_id()
+                
+                # Log direct funding attempt
+                logger.info(
+                    f"Starting direct funding with batch ID: {batch_id}",
+                    extra={
+                        "user_id": user.id,
+                        "batch_id": batch_id,
+                        "mother_wallet": mother_wallet,
+                        "child_wallets_count": len(child_wallets),
+                        "amount_per_wallet": amount_per_wallet,
+                        "has_private_key": bool(mother_private_key),
+                        "private_key_length": len(mother_private_key) if mother_private_key else 0
+                    }
+                )
+                
+                # Implement direct funding approach like in test_specific_transfers.py
+                funding_result = api_client.fund_child_wallets(
+                    mother_wallet=mother_wallet,
+                    child_wallets=child_wallets,
+                    token_address=token_address,
+                    amount_per_wallet=amount_per_wallet,
+                    mother_private_key=mother_private_key,
+                    priority_fee=priority_fee,
+                    batch_id=batch_id,
+                    verify_transfers=True  # Enable verification to check if transfers were successful
+                )
+                
+                # Update session with batch ID
+                session_manager.update_session_value(user.id, "batch_id", batch_id)
+                
+                # Mark transfers as initiated to prevent duplicates
+                session_manager.update_session_value(user.id, "transfers_initiated", True)
+                
+                # Store the verification results for later reference
+                session_manager.update_session_value(user.id, "verification_results", funding_result.get("verification_results", []))
+                
+                # Process verification results to trigger transaction events
+                if "verification_results" in funding_result and isinstance(funding_result["verification_results"], list):
+                    for verification in funding_result["verification_results"]:
+                        child_wallet = verification.get("wallet_address")
+                        is_verified = verification.get("verified", False)
+                        initial_balance = verification.get("initial_balance", 0)
+                        final_balance = verification.get("final_balance", 0)
+                        difference = verification.get("difference", 0)
+                        
+                        # Generate a mock transaction hash for event tracking
+                        tx_hash = f"tx_{batch_id}_{child_wallet[-6:]}"
+                        
+                        # Emit appropriate event based on verification result
+                        if is_verified:
+                            # Emit transaction confirmed event
+                            await event_system.emit("transaction_confirmed", {
+                                "tx_hash": tx_hash,
+                                "from": mother_wallet,
+                                "to": child_wallet,
+                                "amount": amount_per_wallet,
+                                "token_symbol": "SOL",
+                                "difference": difference
+                            })
+                        else:
+                            # Emit transaction failed event with error info
+                            await event_system.emit("transaction_failed", {
+                                "tx_hash": tx_hash,
+                                "from": mother_wallet,
+                                "to": child_wallet,
+                                "amount": amount_per_wallet,
+                                "token_symbol": "SOL",
+                                "error": f"Verification failed. Balance changed from {initial_balance} to {final_balance} SOL."
+                            })
+                
+                # Provide summary of transfer results
+                successful_transfers = funding_result.get("successful_transfers", 0)
+                failed_transfers = funding_result.get("failed_transfers", 0)
+                total_transfers = successful_transfers + failed_transfers
+                
+                # Log the funding result
+                logger.info(
+                    f"Direct funding result for user {user.id}",
+                    extra={
+                        "user_id": user.id, 
+                        "batch_id": batch_id, 
+                        "result": funding_result,
+                        "successful_transfers": successful_transfers,
+                        "failed_transfers": failed_transfers
+                    }
+                )
+                
+                # Send a summary message
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=(
+                        f"📊 Transfer Summary\n\n"
+                        f"✅ Successful: {successful_transfers}/{total_transfers}\n"
+                        f"❌ Failed: {failed_transfers}/{total_transfers}\n\n"
+                        f"Batch ID: {batch_id}\n"
+                        f"Status: {funding_result.get('status', 'unknown')}"
+                    )
+                )
+            
+            else:
+                logger.info(
+                    f"Started execution using API endpoint for user {user.id}",
+                    extra={"user_id": user.id, "run_id": run_id, "result": result}
+                )
+                
+                # Also transition to child balances overview for API endpoint case
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=(
+                        "✅ Execution started via API endpoint!\n\n"
+                        "Now fetching child wallet balances to show you an overview..."
+                    )
+                )
+                
+                return ConversationState.CHILD_BALANCES_OVERVIEW
+        
+        else:
+            # Wallets are already funded, skip funding step entirely
+            logger.info(f"Skipping funding step for user {user.id} - wallets already sufficiently funded")
+            
+            # Mark transfers as already completed to prevent duplicate execution attempts
+            session_manager.update_session_value(user.id, "transfers_initiated", True)
+            
+            # Send confirmation message
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=(
+                    "✅ Child wallets already have sufficient balance!\n\n"
+                    "Proceeding directly to balance overview..."
+                )
             )
         
-        # Register event handler for transaction events
-        await setup_transaction_event_handlers(user.id, context)
-        
-        # Send status message
+        # Both funded and already-funded paths transition to child balances overview
+        # Instead of immediately starting volume generation, transition to child balances overview
+        # This allows users to see their child wallet balances and choose what to do next
         await context.bot.send_message(
             chat_id=user.id,
             text=(
-                "💫 Volume generation has begun!\n\n"
-                "You'll receive updates as transfers are processed.\n"
-                "This may take some time depending on the number of transfers."
+                "✅ Ready for volume generation!\n\n"
+                "Now fetching current balances to show you an overview..."
             )
         )
         
-        return ConversationState.EXECUTION
+        return ConversationState.CHILD_BALANCES_OVERVIEW
         
     except ApiClientError as e:
         logger.error(
@@ -1249,6 +1419,100 @@ async def timeout(update: Update, context: CallbackContext) -> int:
     return ConversationHandler.END
 
 
+async def check_child_wallets_funding_status(user_id: int, required_amount_per_wallet: float, tolerance: float = 0.001) -> Dict[str, Any]:
+    """
+    Check if child wallets already have sufficient balance for volume generation.
+    
+    Args:
+        user_id: Telegram user ID
+        required_amount_per_wallet: Required SOL amount per child wallet
+        tolerance: Tolerance for balance checking (default: 0.001 SOL for gas fees)
+        
+    Returns:
+        Dictionary containing funding status information
+    """
+    try:
+        child_wallets = session_manager.get_session_value(user_id, "child_wallets")
+        if not child_wallets:
+            return {
+                "all_funded": False,
+                "error": "No child wallets found in session"
+            }
+        
+        logger.info(f"Checking funding status for {len(child_wallets)} child wallets (required: {required_amount_per_wallet} SOL each)")
+        
+        funded_wallets = []
+        unfunded_wallets = []
+        check_errors = []
+        
+        for wallet_address in child_wallets:
+            try:
+                balance_info = api_client.check_balance(wallet_address)
+                current_balance = 0
+                
+                # Extract SOL balance
+                if isinstance(balance_info, dict) and 'balances' in balance_info:
+                    for token_balance in balance_info['balances']:
+                        if token_balance.get('symbol') == 'SOL' or token_balance.get('token') == "So11111111111111111111111111111111111111112":
+                            current_balance = token_balance.get('amount', 0)
+                            break
+                
+                # Check if wallet has sufficient balance (with tolerance for gas fees)
+                if current_balance >= (required_amount_per_wallet - tolerance):
+                    funded_wallets.append({
+                        "address": wallet_address,
+                        "balance": current_balance,
+                        "status": "sufficient"
+                    })
+                    logger.debug(f"Wallet {wallet_address}: {current_balance} SOL (sufficient)")
+                else:
+                    unfunded_wallets.append({
+                        "address": wallet_address,
+                        "balance": current_balance,
+                        "required": required_amount_per_wallet,
+                        "status": "insufficient"
+                    })
+                    logger.debug(f"Wallet {wallet_address}: {current_balance} SOL (needs {required_amount_per_wallet})")
+                    
+            except Exception as e:
+                logger.warning(f"Error checking balance for wallet {wallet_address}: {str(e)}")
+                check_errors.append({
+                    "address": wallet_address,
+                    "error": str(e)
+                })
+                unfunded_wallets.append({
+                    "address": wallet_address,
+                    "balance": 0,
+                    "required": required_amount_per_wallet,
+                    "status": "check_failed"
+                })
+        
+        all_funded = len(unfunded_wallets) == 0 and len(check_errors) == 0
+        
+        result = {
+            "all_funded": all_funded,
+            "total_wallets": len(child_wallets),
+            "funded_wallets": len(funded_wallets),
+            "unfunded_wallets": len(unfunded_wallets),
+            "check_errors": len(check_errors),
+            "required_per_wallet": required_amount_per_wallet,
+            "tolerance": tolerance,
+            "funded_wallet_details": funded_wallets,
+            "unfunded_wallet_details": unfunded_wallets,
+            "error_details": check_errors
+        }
+        
+        logger.info(f"Funding status check complete: {len(funded_wallets)}/{len(child_wallets)} wallets sufficiently funded")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error checking child wallets funding status: {str(e)}")
+        return {
+            "all_funded": False,
+            "error": f"Failed to check funding status: {str(e)}"
+        }
+
+
 async def regenerate_preview(update: Update, context: CallbackContext) -> int:
     """
     Regenerate schedule preview.
@@ -1350,6 +1614,9 @@ async def child_wallet_choice(update: Update, context: CallbackContext) -> int:
             child_addresses = [wallet.get('address') for wallet in child_wallets if wallet.get('address')]
             session_manager.update_session_value(user.id, "child_wallets", child_addresses)
             
+            # Also store the full child wallets data (with private keys) for return funds functionality
+            session_manager.update_session_value(user.id, "child_wallets_data", child_wallets)
+            
             # Set number of child wallets
             num_wallets = len(child_addresses)
             session_manager.update_session_value(user.id, "num_child_wallets", num_wallets)
@@ -1442,6 +1709,244 @@ async def child_wallet_choice(update: Update, context: CallbackContext) -> int:
         return ConversationState.CHILD_WALLET_CHOICE
 
 
+async def child_balances_overview_handler(update: Update, context: CallbackContext) -> int:
+    """
+    Handle the child balances overview state - fetch balances and show options.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.effective_user if update.message else update.callback_query.from_user
+    query = update.callback_query  # Might be None if transitioned directly
+
+    if query:
+        await query.answer()
+        action = query.data
+        if action == "trigger_volume_generation":
+            return await trigger_volume_generation(update, context)
+        elif action == "trigger_return_all_funds":
+            return await trigger_return_all_funds(update, context)
+        elif action == "retry_fetch_child_balances":
+            pass  # Fall through to fetch balances again
+
+    # This part runs on initial entry to the state or if retry button was pressed
+    loading_message = await context.bot.send_message(
+        chat_id=user.id,
+        text="🔍 Fetching child wallet balances, please wait..."
+    )
+
+    child_wallets_data = session_manager.get_session_value(user.id, "child_wallets_data")
+    if not child_wallets_data:
+        logger.error(f"Child wallets data not found in session for user {user.id}")
+        await loading_message.edit_text(format_error_message("Critical error: Child wallet data missing. Please /start again."))
+        return ConversationHandler.END
+
+    child_balances_info = []
+    has_errors = False
+    for child_data in child_wallets_data:
+        child_address = child_data.get('address')
+        if not child_address:
+            continue
+        try:
+            balance_response = api_client.check_balance(child_address)  # This returns SOL balance primarily
+            sol_balance = 0
+            if balance_response and 'balances' in balance_response:
+                for bal_entry in balance_response['balances']:
+                    if bal_entry.get('symbol') == 'SOL' or bal_entry.get('token') == "So11111111111111111111111111111111111111112":
+                        sol_balance = bal_entry.get('amount', 0)
+                        break
+            child_balances_info.append({'address': child_address, 'balance_sol': sol_balance})
+        except ApiClientError as e:
+            logger.warning(f"Failed to fetch balance for child {child_address} for user {user.id}: {e}")
+            child_balances_info.append({'address': child_address, 'balance_sol': 'Error'})
+            has_errors = True
+
+    overview_message_text = format_child_balances_overview(child_balances_info)
+
+    keyboard_buttons = [
+        [build_button("🚀 Start Volume Generation", "trigger_volume_generation")],
+        [build_button("💸 Return All Funds to Mother", "trigger_return_all_funds")]
+    ]
+    if has_errors:
+        keyboard_buttons.insert(0, [build_button("🔄 Retry Fetch Balances", "retry_fetch_child_balances")])
+
+    await loading_message.edit_text(
+        text=overview_message_text,
+        reply_markup=InlineKeyboardMarkup(keyboard_buttons),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return ConversationState.CHILD_BALANCES_OVERVIEW  # Stay in this state to handle button presses
+
+
+async def trigger_volume_generation(update: Update, context: CallbackContext) -> int:
+    """
+    Trigger the volume generation process.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+
+    run_id = session_manager.get_session_value(user.id, "run_id")
+
+    if not run_id:
+        logger.error(f"Missing run_id for execution for user {user.id}")
+        await query.edit_message_text(format_error_message("Session data missing for execution. Please /start again."))
+        return ConversationHandler.END
+
+    await query.edit_message_text("🚀 Initiating volume generation sequence...")
+
+    try:
+        # Set up event handlers for transaction updates
+        await setup_transaction_event_handlers(user.id, context)
+        
+        logger.info(f"User {user.id} triggered volume generation for run_id {run_id}.")
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="💫 Volume generation process has been initiated!\n\nYou'll receive updates as transfers are processed between child wallets."
+        )
+        
+        return ConversationState.EXECUTION
+
+    except Exception as e:
+        logger.error(f"Error starting volume generation for user {user.id}: {e}")
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=format_error_message(f"Could not start volume generation: {e}")
+        )
+        return ConversationState.CHILD_BALANCES_OVERVIEW  # Stay to allow retry or return funds
+
+
+async def trigger_return_all_funds(update: Update, context: CallbackContext) -> int:
+    """
+    Return all funds from child wallets to the mother wallet.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+
+    await query.edit_message_text("💸 Processing fund returns to mother wallet. This may take a moment...")
+
+    mother_wallet_address = session_manager.get_session_value(user.id, "mother_wallet")
+    child_wallets_data = session_manager.get_session_value(user.id, "child_wallets_data")  # List of {'address': ..., 'private_key': ...}
+
+    if not mother_wallet_address or not child_wallets_data:
+        logger.error(f"Missing mother or child wallet data for fund return for user {user.id}")
+        await context.bot.send_message(user.id, format_error_message("Critical data missing. Please /start again."))
+        return ConversationHandler.END
+
+    return_results = []
+    for child_data in child_wallets_data:
+        child_address = child_data.get('address')
+        child_pk = child_data.get('private_key')
+
+        if not child_address or not child_pk:
+            logger.warning(f"Skipping child wallet due to missing address or PK: {child_address} for user {user.id}")
+            return_results.append({
+                'child_address': child_address or 'Unknown',
+                'status': 'skipped',
+                'error': 'Missing address or private key in session data.'
+            })
+            continue
+
+        try:
+            # Check current balance first
+            balance_response = api_client.check_balance(child_address)
+            current_balance = 0
+            if balance_response and 'balances' in balance_response:
+                for bal_entry in balance_response['balances']:
+                    if bal_entry.get('symbol') == 'SOL' or bal_entry.get('token') == "So11111111111111111111111111111111111111112":
+                        current_balance = bal_entry.get('amount', 0)
+                        break
+            
+            # Skip if balance is too low (less than typical gas fee)
+            if current_balance < 0.001:
+                return_results.append({
+                    'child_address': child_address,
+                    'status': 'skipped',
+                    'error': f'Balance too low ({current_balance:.6f} SOL) to cover gas fees.'
+                })
+                continue
+
+            # Use the transfer_child_to_mother method from api_client
+            # Calculate amount to return (leave small amount for gas)
+            amount_to_return = max(0, current_balance - 0.0005)  # Leave 0.0005 SOL for gas
+            
+            if amount_to_return <= 0:
+                return_results.append({
+                    'child_address': child_address,
+                    'status': 'skipped',
+                    'error': 'Insufficient balance after reserving gas fees.'
+                })
+                continue
+
+            # Call the API to return funds
+            transfer_result = api_client.transfer_child_to_mother(
+                child_wallet=child_address,
+                child_private_key=child_pk,
+                mother_wallet=mother_wallet_address,
+                amount=amount_to_return,
+                token_address="So11111111111111111111111111111111111111112",  # SOL
+                verify_transfer=False  # Skip verification for speed
+            )
+
+            if transfer_result and transfer_result.get("status") == "success":
+                return_results.append({
+                    'child_address': child_address,
+                    'status': 'success',
+                    'amount_returned_sol': amount_to_return,
+                    'tx_id': transfer_result.get('transactionId', 'N/A')
+                })
+            else:
+                return_results.append({
+                    'child_address': child_address,
+                    'status': 'failed',
+                    'error': transfer_result.get('error', transfer_result.get('message', 'Unknown API error'))
+                })
+
+        except ApiClientError as e:
+            logger.error(f"API Error returning funds from {child_address} for user {user.id}: {e}")
+            return_results.append({
+                'child_address': child_address,
+                'status': 'failed',
+                'error': str(e)
+            })
+        except Exception as e_outer:
+            logger.error(f"Unexpected error returning funds from {child_address} for user {user.id}: {e_outer}")
+            return_results.append({
+                'child_address': child_address,
+                'status': 'failed',
+                'error': f"Unexpected: {str(e_outer)}"
+            })
+        
+        await asyncio.sleep(0.5)  # Small delay between API calls
+
+    summary_message = format_return_funds_summary(return_results, mother_wallet_address)
+    await context.bot.send_message(chat_id=user.id, text=summary_message, parse_mode=ParseMode.MARKDOWN)
+
+    # Clean up session and end
+    session_manager.clear_session(user.id)
+    await context.bot.send_message(user.id, "Operations complete. Type /start to begin a new session.")
+    return ConversationHandler.END
+
+
 def register_start_handler(application):
     """
     Register the start command handler.
@@ -1482,6 +1987,9 @@ def register_start_handler(application):
             ConversationState.AWAIT_FUNDING: [
                 CallbackQueryHandler(check_balance, pattern=r"^check_balance$"),
                 CallbackQueryHandler(start_execution, pattern=r"^start_execution$")
+            ],
+            ConversationState.CHILD_BALANCES_OVERVIEW: [
+                CallbackQueryHandler(child_balances_overview_handler)
             ],
             ConversationState.EXECUTION: [
                 CallbackQueryHandler(cancel, pattern=r"^cancel$")

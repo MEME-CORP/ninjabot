@@ -220,4 +220,146 @@ def format_error_message(error_message: str) -> str:
     Returns:
         Formatted error message
     """
-    return f"❌ Error: {error_message}\n\nPlease try again." 
+    return f"❌ Error: {error_message}\n\nPlease try again."
+
+def format_child_balances_overview(child_balances_info: List[Dict[str, Any]]) -> str:
+    """
+    Format the message displaying child wallet balances and options.
+
+    Args:
+        child_balances_info: A list of dicts, each with 'address' and 'balance_sol'.
+                            Example: [{'address': 'Addr1...', 'balance_sol': 0.005}, ...]
+
+    Returns:
+        Formatted message string.
+    """
+    if not child_balances_info:
+        return "Could not retrieve child wallet balances."
+
+    message_lines = ["📊 **Child Wallet Balances:**\n"]
+    total_balance = 0
+    
+    for i, child_info in enumerate(child_balances_info):
+        addr = child_info.get('address', 'N/A')
+        bal = child_info.get('balance_sol', 'N/A')
+        short_addr = f"{addr[:6]}...{addr[-4:]}" if len(addr) > 10 else addr
+        
+        if isinstance(bal, (int, float)):
+            message_lines.append(f"{i+1}. `{short_addr}`: {bal:.5f} SOL")
+            total_balance += bal
+        else:
+            message_lines.append(f"{i+1}. `{short_addr}`: {bal}")
+    
+    # Add total if we have numeric balances
+    if total_balance > 0:
+        message_lines.append(f"\n**Total Balance:** {total_balance:.5f} SOL")
+
+    message_lines.append("\n**What would you like to do next?**")
+    return "\n".join(message_lines)
+
+def format_return_funds_summary(results: List[Dict[str, Any]], mother_wallet: str) -> str:
+    """
+    Format the summary message after attempting to return funds.
+
+    Args:
+        results: List of results from each return attempt.
+                 Example: [{'child_address': 'Addr1...', 'status': 'success', 'amount_returned_sol': 0.0049}, ...]
+        mother_wallet: The address of the mother wallet.
+
+    Returns:
+        Formatted summary message.
+    """
+    if not results:
+        return "No fund return operations were attempted."
+
+    mother_short = f"{mother_wallet[:6]}...{mother_wallet[-4:]}"
+    message_lines = [f"💸 **Fund Return Summary**\n(to Mother Wallet: `{mother_short}`)\n"]
+    success_count = 0
+    fail_count = 0
+    total_returned = 0
+
+    for res in results:
+        child_addr = res.get('child_address', 'N/A')
+        child_short = f"{child_addr[:6]}...{child_addr[-4:]}" if len(child_addr) > 10 else child_addr
+        status = res.get('status', 'unknown')
+
+        if status == 'success':
+            amount = res.get('amount_returned_sol', 0)
+            if isinstance(amount, (int, float)):
+                message_lines.append(f"✅ From `{child_short}`: {amount:.5f} SOL returned")
+                total_returned += amount
+            else:
+                message_lines.append(f"✅ From `{child_short}`: Returned successfully")
+            success_count += 1
+        elif status == 'skipped':
+            reason = res.get('error', 'Unknown reason')
+            message_lines.append(f"⏭️ From `{child_short}`: Skipped - {reason}")
+        else:
+            error = res.get('error', 'Unknown error')
+            message_lines.append(f"❌ From `{child_short}`: Failed - {error}")
+            fail_count += 1
+
+    message_lines.append(f"\n**Summary:**")
+    message_lines.append(f"✅ Successful: {success_count}")
+    if fail_count > 0:
+        message_lines.append(f"❌ Failed: {fail_count}")
+    if total_returned > 0:
+        message_lines.append(f"💰 Total Returned: {total_returned:.5f} SOL")
+    
+    return "\n".join(message_lines)
+
+def format_child_wallets_funding_status(funding_status: Dict[str, Any]) -> str:
+    """
+    Format the child wallets funding status check results.
+
+    Args:
+        funding_status: Dictionary containing funding status information from check_child_wallets_funding_status
+
+    Returns:
+        Formatted funding status message.
+    """
+    if funding_status.get("error"):
+        return f"❌ Error checking funding status: {funding_status['error']}"
+
+    if not funding_status:
+        return "❌ No funding status information available."
+
+    all_funded = funding_status.get("all_funded", False)
+    total_wallets = funding_status.get("total_wallets", 0)
+    funded_wallets = funding_status.get("funded_wallets", 0)
+    unfunded_wallets = funding_status.get("unfunded_wallets", 0)
+    check_errors = funding_status.get("check_errors", 0)
+    required_per_wallet = funding_status.get("required_per_wallet", 0)
+
+    if all_funded:
+        return (
+            f"✅ **All Child Wallets Sufficiently Funded**\n\n"
+            f"📊 Status: {funded_wallets}/{total_wallets} wallets ready\n"
+            f"💰 Required: {required_per_wallet:.4f} SOL each\n\n"
+            f"Ready to proceed with volume generation!"
+        )
+    else:
+        message_lines = [f"📊 **Child Wallets Funding Status**\n"]
+        
+        if funded_wallets > 0:
+            message_lines.append(f"✅ Funded: {funded_wallets}/{total_wallets} wallets")
+        
+        if unfunded_wallets > 0:
+            message_lines.append(f"❌ Need funding: {unfunded_wallets}/{total_wallets} wallets")
+        
+        if check_errors > 0:
+            message_lines.append(f"⚠️ Check errors: {check_errors}/{total_wallets} wallets")
+        
+        message_lines.append(f"\n💰 Required per wallet: {required_per_wallet:.4f} SOL")
+        
+        # Add details for unfunded wallets if available
+        unfunded_details = funding_status.get("unfunded_wallet_details", [])
+        if unfunded_details and len(unfunded_details) <= 5:  # Show details only for small numbers
+            message_lines.append(f"\n**Wallets needing funding:**")
+            for wallet_info in unfunded_details[:5]:
+                addr = wallet_info.get("address", "N/A")
+                balance = wallet_info.get("balance", 0)
+                short_addr = f"{addr[:6]}...{addr[-4:]}" if len(addr) > 10 else addr
+                message_lines.append(f"• `{short_addr}`: {balance:.4f} SOL")
+        
+        return "\n".join(message_lines) 

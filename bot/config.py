@@ -47,18 +47,19 @@ class ConversationState:
     TOKEN_ADDRESS = 5
     PREVIEW_SCHEDULE = 6
     AWAIT_FUNDING = 7
-    EXECUTION = 8
-    COMPLETION = 9
-    SAVED_WALLET_CHOICE = 10
-    CHILD_WALLET_CHOICE = 11
+    CHILD_BALANCES_OVERVIEW = 8  # New state for child wallet balances overview
+    EXECUTION = 9
+    COMPLETION = 10
+    SAVED_WALLET_CHOICE = 11
+    CHILD_WALLET_CHOICE = 12
 
     # New states for volume generation strategies
-    STRATEGY_CHOICE = 12
-    PROFIT_TOKEN_A = 13
-    PROFIT_TOKEN_B = 14
-    MAX_TRADE_SIZE = 15
-    MIN_PROFIT_THRESHOLD = 16
-    PREVIEW_PROFIT_STRATEGY = 17
+    STRATEGY_CHOICE = 13
+    PROFIT_TOKEN_A = 14
+    PROFIT_TOKEN_B = 15
+    MAX_TRADE_SIZE = 16
+    MIN_PROFIT_THRESHOLD = 17
+    PREVIEW_PROFIT_STRATEGY = 18
 
 # Volume generation strategies
 class VolumeStrategy:
