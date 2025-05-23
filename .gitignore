@@ -80,3 +80,7 @@ htmlcov/
 .env.local
 setup_env.py
 run_test.bat
+
+
+.json
+*.json

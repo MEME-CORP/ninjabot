@@ -1009,7 +1009,8 @@ async def start_execution(update: Update, context: CallbackContext) -> int:
                 amount_per_wallet=amount_per_wallet,
                 mother_private_key=mother_private_key,
                 priority_fee=priority_fee,
-                batch_id=batch_id
+                batch_id=batch_id,
+                verify_transfers=True  # Enable verification to check if transfers were successful
             )
             
             # Update session with batch ID
@@ -1018,11 +1019,72 @@ async def start_execution(update: Update, context: CallbackContext) -> int:
             # Mark transfers as initiated to prevent duplicates
             session_manager.update_session_value(user.id, "transfers_initiated", True)
             
+            # Store the verification results for later reference
+            session_manager.update_session_value(user.id, "verification_results", funding_result.get("verification_results", []))
+            
+            # Process verification results to trigger transaction events
+            if "verification_results" in funding_result and isinstance(funding_result["verification_results"], list):
+                for verification in funding_result["verification_results"]:
+                    child_wallet = verification.get("wallet_address")
+                    is_verified = verification.get("verified", False)
+                    initial_balance = verification.get("initial_balance", 0)
+                    final_balance = verification.get("final_balance", 0)
+                    difference = verification.get("difference", 0)
+                    
+                    # Generate a mock transaction hash for event tracking
+                    tx_hash = f"tx_{batch_id}_{child_wallet[-6:]}"
+                    
+                    # Emit appropriate event based on verification result
+                    if is_verified:
+                        # Emit transaction confirmed event
+                        await event_system.emit("transaction_confirmed", {
+                            "tx_hash": tx_hash,
+                            "from": mother_wallet,
+                            "to": child_wallet,
+                            "amount": amount_per_wallet,
+                            "token_symbol": "SOL",
+                            "difference": difference
+                        })
+                    else:
+                        # Emit transaction failed event with error info
+                        await event_system.emit("transaction_failed", {
+                            "tx_hash": tx_hash,
+                            "from": mother_wallet,
+                            "to": child_wallet,
+                            "amount": amount_per_wallet,
+                            "token_symbol": "SOL",
+                            "error": f"Verification failed. Balance changed from {initial_balance} to {final_balance} SOL."
+                        })
+            
+            # Provide summary of transfer results
+            successful_transfers = funding_result.get("successful_transfers", 0)
+            failed_transfers = funding_result.get("failed_transfers", 0)
+            total_transfers = successful_transfers + failed_transfers
+            
             # Log the funding result
             logger.info(
                 f"Direct funding result for user {user.id}",
-                extra={"user_id": user.id, "batch_id": batch_id, "result": funding_result}
+                extra={
+                    "user_id": user.id, 
+                    "batch_id": batch_id, 
+                    "result": funding_result,
+                    "successful_transfers": successful_transfers,
+                    "failed_transfers": failed_transfers
+                }
             )
+            
+            # Send a summary message
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=(
+                    f"📊 Transfer Summary\n\n"
+                    f"✅ Successful: {successful_transfers}/{total_transfers}\n"
+                    f"❌ Failed: {failed_transfers}/{total_transfers}\n\n"
+                    f"Batch ID: {batch_id}\n"
+                    f"Status: {funding_result.get('status', 'unknown')}"
+                )
+            )
+            
         else:
             logger.info(
                 f"Started execution using API endpoint for user {user.id}",
