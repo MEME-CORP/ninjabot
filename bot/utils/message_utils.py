@@ -362,4 +362,36 @@ def format_child_wallets_funding_status(funding_status: Dict[str, Any]) -> str:
                 short_addr = f"{addr[:6]}...{addr[-4:]}" if len(addr) > 10 else addr
                 message_lines.append(f"• `{short_addr}`: {balance:.4f} SOL")
         
-        return "\n".join(message_lines) 
+        return "\n".join(message_lines)
+
+def format_return_funds_progress(processed: int, total: int, successful: int, skipped: int, failed: int, current_wallet: Optional[str]) -> str:
+    """
+    Format the message displaying the progress of returning funds.
+    (Placeholder implementation)
+    
+    Args:
+        processed: Number of wallets processed
+        total: Total number of wallets
+        successful: Number of successful returns
+        skipped: Number of skipped returns
+        failed: Number of failed returns
+        current_wallet: The address of the wallet currently being processed
+        
+    Returns:
+        Formatted progress message string.
+    """
+    progress_bar_length = 10
+    filled_length = int(progress_bar_length * processed // total) if total > 0 else 0
+    bar = '█' * filled_length + '-' * (progress_bar_length - filled_length)
+
+    message = (
+        f"💸 **Returning Funds to Mother Wallet**\\n\\n"
+        f"Progress: [{bar}] {processed}/{total} wallets processed\\n"
+        f"✅ Success: {successful} | ⏭️ Skipped: {skipped} | ❌ Failed: {failed}\\n"
+    )
+    if current_wallet and processed < total:
+        message += f"Current: `{current_wallet[:6]}...{current_wallet[-4:]}`"
+    elif processed == total:
+        message += "All wallets processed."
+        
+    return message 

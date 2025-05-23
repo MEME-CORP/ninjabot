@@ -35,7 +35,8 @@ from bot.utils.message_utils import (
     format_error_message,
     format_child_balances_overview,
     format_return_funds_summary,
-    format_child_wallets_funding_status
+    format_child_wallets_funding_status,
+    format_return_funds_progress
 )
 from bot.api.api_client import api_client, ApiClientError
 from bot.events.event_system import event_system
@@ -710,6 +711,7 @@ async def generate_preview(update: Update, context: CallbackContext) -> None:
         if funding_status.get("all_funded", False):
             # Child wallets are fully funded - skip mother wallet balance check entirely
             logger.info(f"Child wallets fully funded for user {user.id} - skipping mother wallet balance check")
+            logger.info(f"User {user.id} will be in PREVIEW_SCHEDULE state when Return All Funds button is shown")
             await context.bot.send_message(
                 chat_id=user.id,
                 text=(
@@ -717,9 +719,10 @@ async def generate_preview(update: Update, context: CallbackContext) -> None:
                     "Since your child wallets already have sufficient balance, "
                     "you can proceed directly to volume generation."
                 ),
-                reply_markup=InlineKeyboardMarkup([[
-                    build_button("🚀 Start Volume Generation", "start_execution")
-                ]])
+                reply_markup=InlineKeyboardMarkup([
+                    [build_button("🚀 Start Volume Generation", "start_execution")],
+                    [build_button("💸 Return All Funds to Mother", "trigger_return_all_funds")]
+                ])
             )
             return  # Exit early - no need for mother wallet balance polling
         
@@ -795,9 +798,11 @@ async def start_balance_polling(user_id: int, context: CallbackContext) -> None:
                 balance=current_balance, 
                 token_symbol=token_symbol
             ),
-            reply_markup=InlineKeyboardMarkup([[
-                build_button("Begin Transfers", "start_execution")
-            ]])
+            reply_markup=InlineKeyboardMarkup([
+                [build_button("Begin Transfers", "start_execution")],
+                [build_button("💸 Return All Funds to Mother", "trigger_return_all_funds")]
+            ]),
+            parse_mode=ParseMode.MARKDOWN
         )
     
     # Start polling
@@ -894,9 +899,10 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
                         balance=current_balance,
                         token_symbol=token_symbol
                     ),
-                    reply_markup=InlineKeyboardMarkup([[
-                        build_button("Begin Transfers", "start_execution")
-                    ]]),
+                    reply_markup=InlineKeyboardMarkup([
+                        [build_button("Begin Transfers", "start_execution")],
+                        [build_button("💸 Return All Funds to Mother", "trigger_return_all_funds")]
+                    ]),
                     parse_mode=ParseMode.MARKDOWN
                 )
             except Exception as edit_error:
@@ -911,9 +917,10 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
                         balance=current_balance,
                         token_symbol=token_symbol
                     ),
-                    reply_markup=InlineKeyboardMarkup([[
-                        build_button("Begin Transfers", "start_execution")
-                    ]]),
+                    reply_markup=InlineKeyboardMarkup([
+                        [build_button("Begin Transfers", "start_execution")],
+                        [build_button("💸 Return All Funds to Mother", "trigger_return_all_funds")]
+                    ]),
                     parse_mode=ParseMode.MARKDOWN
                 )
             
@@ -927,9 +934,10 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
                         required_balance=total_volume,
                         token_symbol=token_symbol
                     ),
-                    reply_markup=InlineKeyboardMarkup([[
-                        build_button("Check Again", "check_balance")
-                    ]]),
+                    reply_markup=InlineKeyboardMarkup([
+                        [build_button("Check Again", "check_balance")],
+                        [build_button("💸 Return All Funds to Mother", "trigger_return_all_funds")]
+                    ]),
                     parse_mode=ParseMode.MARKDOWN
                 )
             except Exception as edit_error:
@@ -945,9 +953,10 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
                         required_balance=total_volume,
                         token_symbol=token_symbol
                     ),
-                    reply_markup=InlineKeyboardMarkup([[
-                        build_button("Check Again", "check_balance")
-                    ]]),
+                    reply_markup=InlineKeyboardMarkup([
+                        [build_button("Check Again", "check_balance")],
+                        [build_button("💸 Return All Funds to Mother", "trigger_return_all_funds")]
+                    ]),
                     parse_mode=ParseMode.MARKDOWN
                 )
             
@@ -1439,11 +1448,15 @@ async def check_child_wallets_funding_status(user_id: int, required_amount_per_w
                 "error": "No child wallets found in session"
             }
         
-        logger.info(f"Checking funding status for {len(child_wallets)} child wallets (required: {required_amount_per_wallet} SOL each)")
+        logger.info(f"Checking funding status for {len(child_wallets)} child wallets (required: {required_amount_per_wallet} SOL each + {tolerance} SOL tolerance = {required_amount_per_wallet + tolerance} SOL minimum per wallet)")
         
         funded_wallets = []
         unfunded_wallets = []
         check_errors = []
+        
+        # Pre-calculate the minimum required balance including tolerance
+        minimum_required_balance = required_amount_per_wallet + tolerance
+        logger.info(f"Each wallet must have at least {minimum_required_balance} SOL to be considered funded")
         
         for wallet_address in child_wallets:
             try:
@@ -1457,22 +1470,25 @@ async def check_child_wallets_funding_status(user_id: int, required_amount_per_w
                             current_balance = token_balance.get('amount', 0)
                             break
                 
-                # Check if wallet has sufficient balance (with tolerance for gas fees)
-                if current_balance >= (required_amount_per_wallet - tolerance):
+                # Check if wallet has sufficient balance (accounting for gas fees)
+                # Wallet needs: required_amount + tolerance (for gas fees)
+                minimum_required_balance = required_amount_per_wallet + tolerance
+                
+                if current_balance >= minimum_required_balance:
                     funded_wallets.append({
                         "address": wallet_address,
                         "balance": current_balance,
                         "status": "sufficient"
                     })
-                    logger.debug(f"Wallet {wallet_address}: {current_balance} SOL (sufficient)")
+                    logger.debug(f"Wallet {wallet_address}: {current_balance} SOL (sufficient - needs {minimum_required_balance} SOL)")
                 else:
                     unfunded_wallets.append({
                         "address": wallet_address,
                         "balance": current_balance,
-                        "required": required_amount_per_wallet,
+                        "required": minimum_required_balance,
                         "status": "insufficient"
                     })
-                    logger.debug(f"Wallet {wallet_address}: {current_balance} SOL (needs {required_amount_per_wallet})")
+                    logger.debug(f"Wallet {wallet_address}: {current_balance} SOL (insufficient - needs {minimum_required_balance} SOL)")
                     
             except Exception as e:
                 logger.warning(f"Error checking balance for wallet {wallet_address}: {str(e)}")
@@ -1813,7 +1829,11 @@ async def trigger_volume_generation(update: Update, context: CallbackContext) ->
         logger.info(f"User {user.id} triggered volume generation for run_id {run_id}.")
         await context.bot.send_message(
             chat_id=user.id,
-            text="💫 Volume generation process has been initiated!\n\nYou'll receive updates as transfers are processed between child wallets."
+            text="💫 Volume generation process has been initiated!\n\nYou'll receive updates as transfers are processed between child wallets.",
+            reply_markup=InlineKeyboardMarkup([
+                [build_button("💸 Return All Funds to Mother", "trigger_return_all_funds")],
+                [build_button("❌ Cancel", "cancel")]
+            ])
         )
         
         return ConversationState.EXECUTION
@@ -1842,17 +1862,45 @@ async def trigger_return_all_funds(update: Update, context: CallbackContext) -> 
     query = update.callback_query
     await query.answer()
 
-    await query.edit_message_text("💸 Processing fund returns to mother wallet. This may take a moment...")
+    logger.info(f"User {user.id} triggered return all funds operation")
+
+    # Send initial progress message
+    progress_message = await query.edit_message_text(
+        "💸 **Fund Return Process Started**\n\n"
+        "🔍 Checking child wallet balances...",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
     mother_wallet_address = session_manager.get_session_value(user.id, "mother_wallet")
     child_wallets_data = session_manager.get_session_value(user.id, "child_wallets_data")  # List of {'address': ..., 'private_key': ...}
 
     if not mother_wallet_address or not child_wallets_data:
         logger.error(f"Missing mother or child wallet data for fund return for user {user.id}")
-        await context.bot.send_message(user.id, format_error_message("Critical data missing. Please /start again."))
+        await query.edit_message_text(
+            format_error_message("Critical data missing. Please /start again."),
+            parse_mode=ParseMode.MARKDOWN
+        )
         return ConversationHandler.END
 
+    logger.info(f"Starting fund return for user {user.id}: {len(child_wallets_data)} child wallets -> mother wallet {mother_wallet_address}")
+
     return_results = []
+    total_wallets = len(child_wallets_data)
+    processed_count = 0
+
+    # Update the progress message instead of creating a new one
+    await progress_message.edit_text(
+        format_return_funds_progress(
+            processed=processed_count,
+            total=total_wallets,
+            successful=0,
+            skipped=0,
+            failed=0,
+            current_wallet=None
+        ),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
     for child_data in child_wallets_data:
         child_address = child_data.get('address')
         child_pk = child_data.get('private_key')
@@ -1867,6 +1915,8 @@ async def trigger_return_all_funds(update: Update, context: CallbackContext) -> 
             continue
 
         try:
+            logger.info(f"Processing fund return from child wallet {child_address} for user {user.id}")
+            
             # Check current balance first
             balance_response = api_client.check_balance(child_address)
             current_balance = 0
@@ -1876,8 +1926,11 @@ async def trigger_return_all_funds(update: Update, context: CallbackContext) -> 
                         current_balance = bal_entry.get('amount', 0)
                         break
             
+            logger.info(f"Child wallet {child_address} has balance: {current_balance} SOL")
+            
             # Skip if balance is too low (less than typical gas fee)
             if current_balance < 0.001:
+                logger.info(f"Skipping child wallet {child_address} due to low balance: {current_balance} SOL")
                 return_results.append({
                     'child_address': child_address,
                     'status': 'skipped',
@@ -1890,6 +1943,7 @@ async def trigger_return_all_funds(update: Update, context: CallbackContext) -> 
             amount_to_return = max(0, current_balance - 0.0005)  # Leave 0.0005 SOL for gas
             
             if amount_to_return <= 0:
+                logger.info(f"Skipping child wallet {child_address} - insufficient balance after gas reservation")
                 return_results.append({
                     'child_address': child_address,
                     'status': 'skipped',
@@ -1897,8 +1951,10 @@ async def trigger_return_all_funds(update: Update, context: CallbackContext) -> 
                 })
                 continue
 
+            logger.info(f"Attempting to transfer {amount_to_return} SOL from {child_address} to mother wallet {mother_wallet_address}")
+
             # Call the API to return funds
-            transfer_result = api_client.transfer_child_to_mother(
+            transfer_result = await api_client.transfer_child_to_mother(
                 child_wallet=child_address,
                 child_private_key=child_pk,
                 mother_wallet=mother_wallet_address,
@@ -1907,7 +1963,10 @@ async def trigger_return_all_funds(update: Update, context: CallbackContext) -> 
                 verify_transfer=False  # Skip verification for speed
             )
 
+            logger.info(f"Transfer result for {child_address}: {transfer_result}")
+
             if transfer_result and transfer_result.get("status") == "success":
+                logger.info(f"Successfully transferred {amount_to_return} SOL from {child_address} to mother wallet")
                 return_results.append({
                     'child_address': child_address,
                     'status': 'success',
@@ -1915,10 +1974,12 @@ async def trigger_return_all_funds(update: Update, context: CallbackContext) -> 
                     'tx_id': transfer_result.get('transactionId', 'N/A')
                 })
             else:
+                error_msg = transfer_result.get('error', transfer_result.get('message', 'Unknown API error'))
+                logger.warning(f"Failed to transfer from {child_address}: {error_msg}")
                 return_results.append({
                     'child_address': child_address,
                     'status': 'failed',
-                    'error': transfer_result.get('error', transfer_result.get('message', 'Unknown API error'))
+                    'error': error_msg
                 })
 
         except ApiClientError as e:
@@ -1936,6 +1997,28 @@ async def trigger_return_all_funds(update: Update, context: CallbackContext) -> 
                 'error': f"Unexpected: {str(e_outer)}"
             })
         
+        processed_count += 1
+        # Update progress every few wallets
+        if processed_count % 3 == 0 or processed_count == total_wallets:
+            try:
+                success_count = len([r for r in return_results if r.get('status') == 'success'])
+                skip_count = len([r for r in return_results if r.get('status') == 'skipped'])
+                fail_count = len([r for r in return_results if r.get('status') == 'failed'])
+                
+                await progress_message.edit_text(
+                    format_return_funds_progress(
+                        processed=processed_count,
+                        total=total_wallets,
+                        successful=success_count,
+                        skipped=skip_count,
+                        failed=fail_count,
+                        current_wallet=child_address if processed_count < total_wallets else None
+                    ),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception:
+                pass  # Continue if progress update fails
+
         await asyncio.sleep(0.5)  # Small delay between API calls
 
     summary_message = format_return_funds_summary(return_results, mother_wallet_address)
@@ -1982,17 +2065,23 @@ def register_start_handler(application):
             ],
             ConversationState.PREVIEW_SCHEDULE: [
                 CallbackQueryHandler(check_balance, pattern=r"^check_balance$"),
+                CallbackQueryHandler(start_execution, pattern=r"^start_execution$"),
+                CallbackQueryHandler(trigger_return_all_funds, pattern=r"^trigger_return_all_funds$"),
                 CallbackQueryHandler(regenerate_preview, pattern=r"^regenerate$")
             ],
             ConversationState.AWAIT_FUNDING: [
                 CallbackQueryHandler(check_balance, pattern=r"^check_balance$"),
-                CallbackQueryHandler(start_execution, pattern=r"^start_execution$")
+                CallbackQueryHandler(start_execution, pattern=r"^start_execution$"),
+                CallbackQueryHandler(trigger_return_all_funds, pattern=r"^trigger_return_all_funds$")
             ],
             ConversationState.CHILD_BALANCES_OVERVIEW: [
-                CallbackQueryHandler(child_balances_overview_handler)
+                CallbackQueryHandler(trigger_volume_generation, pattern=r"^trigger_volume_generation$"),
+                CallbackQueryHandler(trigger_return_all_funds, pattern=r"^trigger_return_all_funds$"),
+                CallbackQueryHandler(regenerate_preview, pattern=r"^regenerate_preview$")
             ],
             ConversationState.EXECUTION: [
-                CallbackQueryHandler(cancel, pattern=r"^cancel$")
+                CallbackQueryHandler(cancel, pattern=r"^cancel$"),
+                CallbackQueryHandler(trigger_return_all_funds, pattern=r"^trigger_return_all_funds$")
             ]
         },
         fallbacks=[

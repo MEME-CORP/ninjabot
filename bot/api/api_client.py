@@ -2279,44 +2279,10 @@ class ApiClient:
             
             wallets = []
             
-            # Check for combined wallet file (e.g., mother_wallets.json)
-            combined_file_path = os.path.join(wallet_dir, f"{wallet_type}_wallets.json")
-            if os.path.exists(combined_file_path):
-                try:
-                    with open(combined_file_path, 'r') as f:
-                        combined_data = json.load(f)
-                    
-                    # If the file has wallet addresses as keys (old format)
-                    if isinstance(combined_data, dict) and not combined_data.get('wallets'):
-                        for address, wallet_data in combined_data.items():
-                            # Ensure the wallet data has the address field
-                            if isinstance(wallet_data, dict):
-                                if 'address' not in wallet_data and address:
-                                    wallet_data['address'] = address
-                                wallets.append(wallet_data)
-                    # If it's already a list of wallets
-                    elif isinstance(combined_data, list):
-                        wallets.extend(combined_data)
-                    # If it has a 'wallets' field containing the list
-                    elif isinstance(combined_data, dict) and isinstance(combined_data.get('wallets'), list):
-                        wallets.extend(combined_data['wallets'])
-                        
-                    logger.info(f"Loaded {len(wallets)} wallets from combined file {combined_file_path}")
-                    
-                    # If we found wallets in the combined file, return them
-                    if wallets:
-                        return wallets
-                except Exception as e:
-                    logger.warning(f"Error loading combined wallet file {combined_file_path}: {str(e)}")
-            
-            # If no combined file or it was empty, list individual JSON files
+            # PRIORITY 1: Check individual JSON files first (most complete and up-to-date data)
             wallet_files = [f for f in os.listdir(wallet_dir) if f.endswith('.json') and f != f"{wallet_type}_wallets.json"]
             
-            if not wallet_files:
-                logger.info(f"No saved {wallet_type} wallets found")
-                return []
-                
-            # Load each wallet file
+            # Load each individual wallet file
             for filename in wallet_files:
                 try:
                     file_path = os.path.join(wallet_dir, filename)
@@ -2328,12 +2294,50 @@ class ApiClient:
                         # If this is a wallet container with a 'wallets' array (for child wallets)
                         if 'wallets' in wallet_data and isinstance(wallet_data['wallets'], list):
                             wallets.extend(wallet_data['wallets'])
-                        # Otherwise it's a single wallet
+                        # Otherwise it's a single wallet (typical for mother wallets)
                         else:
                             wallets.append(wallet_data)
                 except Exception as e:
                     logger.warning(f"Error loading wallet file {filename}: {str(e)}")
                     continue
+            
+            # PRIORITY 2: Check combined file for any additional wallets not found in individual files
+            combined_file_path = os.path.join(wallet_dir, f"{wallet_type}_wallets.json")
+            if os.path.exists(combined_file_path):
+                try:
+                    with open(combined_file_path, 'r') as f:
+                        combined_data = json.load(f)
+                    
+                    combined_wallets = []
+                    # If the file has wallet addresses as keys (old format)
+                    if isinstance(combined_data, dict) and not combined_data.get('wallets'):
+                        for address, wallet_data in combined_data.items():
+                            # Ensure the wallet data has the address field
+                            if isinstance(wallet_data, dict):
+                                if 'address' not in wallet_data and address:
+                                    wallet_data['address'] = address
+                                combined_wallets.append(wallet_data)
+                    # If it's already a list of wallets
+                    elif isinstance(combined_data, list):
+                        combined_wallets.extend(combined_data)
+                    # If it has a 'wallets' field containing the list
+                    elif isinstance(combined_data, dict) and isinstance(combined_data.get('wallets'), list):
+                        combined_wallets.extend(combined_data['wallets'])
+                    
+                    # Only add wallets from combined file that aren't already in individual files
+                    existing_addresses = {w.get('address') for w in wallets}
+                    for combined_wallet in combined_wallets:
+                        combined_address = combined_wallet.get('address')
+                        if combined_address and combined_address not in existing_addresses:
+                            wallets.append(combined_wallet)
+                            logger.info(f"Added additional {wallet_type} wallet from combined file: {combined_address}")
+                        
+                except Exception as e:
+                    logger.warning(f"Error loading combined wallet file {combined_file_path}: {str(e)}")
+            
+            if not wallets:
+                logger.info(f"No saved {wallet_type} wallets found")
+                return []
                     
             logger.info(f"Found {len(wallets)} saved {wallet_type} wallets")
             return wallets
@@ -2359,31 +2363,26 @@ class ApiClient:
             # Create directory if it doesn't exist
             os.makedirs(wallet_dir, exist_ok=True)
             
-            # Check for a combined children file first
-            combined_file_path = os.path.join(wallet_dir, "children_wallets.json")
-            if os.path.exists(combined_file_path):
+            # PRIORITY 1: Check for individual file first (contains complete data with private keys)
+            individual_file_path = os.path.join(wallet_dir, f"{mother_wallet_address}.json")
+            if os.path.exists(individual_file_path):
                 try:
-                    with open(combined_file_path, 'r') as f:
-                        combined_data = json.load(f)
-                    
-                    child_wallets = []
-                    # If it's a dict mapping mother addresses to child wallet arrays
-                    if isinstance(combined_data, dict) and mother_wallet_address in combined_data:
-                        mother_children = combined_data[mother_wallet_address]
-                        if isinstance(mother_children, list):
-                            child_wallets.extend(mother_children)
-                        elif isinstance(mother_children, dict) and 'wallets' in mother_children:
-                            child_wallets.extend(mother_children['wallets'])
-                    
-                    # If we found children, return them
-                    if child_wallets:
-                        logger.info(f"Found {len(child_wallets)} child wallets for mother wallet {mother_wallet_address} in combined file")
-                        return child_wallets
+                    with open(individual_file_path, 'r') as f:
+                        wallet_data = json.load(f)
+                        
+                    # Extract individual child wallets if contained in a 'wallets' array
+                    if 'wallets' in wallet_data and isinstance(wallet_data['wallets'], list):
+                        child_wallets = wallet_data['wallets']
+                        # Verify we have private keys (complete data)
+                        has_private_keys = any(wallet.get('private_key') for wallet in child_wallets if isinstance(wallet, dict))
+                        if has_private_keys or len(child_wallets) > 0:  # Accept if has private keys OR at least has wallets
+                            logger.info(f"Found {len(child_wallets)} child wallets for mother wallet {mother_wallet_address} in individual file (with private keys: {has_private_keys})")
+                            return child_wallets
                 except Exception as e:
-                    logger.warning(f"Error loading from combined children file: {str(e)}")
+                    logger.warning(f"Error loading individual child wallet file {individual_file_path}: {str(e)}")
             
-            # List all JSON files in the directory
-            wallet_files = [f for f in os.listdir(wallet_dir) if f.endswith('.json') and f != "children_wallets.json"]
+            # PRIORITY 2: Check other individual files that match the mother wallet
+            wallet_files = [f for f in os.listdir(wallet_dir) if f.endswith('.json') and f != "children_wallets.json" and f != f"{mother_wallet_address}.json"]
             
             # Find files that contain the mother wallet address
             child_wallets = []
@@ -2402,13 +2401,164 @@ class ApiClient:
                 except Exception as e:
                     logger.warning(f"Error loading child wallet file {filename}: {str(e)}")
                     continue
+            
+            if child_wallets:
+                logger.info(f"Found {len(child_wallets)} child wallets for mother wallet {mother_wallet_address} in other individual files")
+                return child_wallets
+            
+            # PRIORITY 3: Only check combined file as last resort (may have incomplete data)
+            combined_file_path = os.path.join(wallet_dir, "children_wallets.json")
+            if os.path.exists(combined_file_path):
+                try:
+                    with open(combined_file_path, 'r') as f:
+                        combined_data = json.load(f)
                     
-            logger.info(f"Found {len(child_wallets)} child wallets for mother wallet {mother_wallet_address}")
-            return child_wallets
+                    combined_child_wallets = []
+                    # If it's a dict mapping mother addresses to child wallet arrays
+                    if isinstance(combined_data, dict) and mother_wallet_address in combined_data:
+                        mother_children = combined_data[mother_wallet_address]
+                        if isinstance(mother_children, list):
+                            combined_child_wallets.extend(mother_children)
+                        elif isinstance(mother_children, dict) and 'wallets' in mother_children:
+                            combined_child_wallets.extend(mother_children['wallets'])
+                    
+                    # If we found children, return them (but warn about potentially incomplete data)
+                    if combined_child_wallets:
+                        has_private_keys = any(wallet.get('private_key') for wallet in combined_child_wallets if isinstance(wallet, dict))
+                        logger.warning(f"Found {len(combined_child_wallets)} child wallets for mother wallet {mother_wallet_address} in combined file (with private keys: {has_private_keys}). Consider updating to individual file format.")
+                        return combined_child_wallets
+                except Exception as e:
+                    logger.warning(f"Error loading from combined children file: {str(e)}")
+                    
+            logger.info(f"No child wallets found for mother wallet {mother_wallet_address}")
+            return []
             
         except Exception as e:
             logger.error(f"Error loading child wallets: {str(e)}")
             return []
+
+    def classify_transfer_error(self, error_message: str) -> Dict[str, Any]:
+        """
+        Classify transfer errors into categories for better user guidance.
+        
+        Args:
+            error_message: The error message to classify
+            
+        Returns:
+            Dictionary with error classification and guidance
+        """
+        error_lower = error_message.lower()
+        
+        # Network/API errors
+        if any(keyword in error_lower for keyword in ['timeout', 'connection', 'network', 'unreachable']):
+            return {
+                'category': 'network',
+                'severity': 'temporary',
+                'retry_recommended': True,
+                'user_guidance': 'Network connection issue. Will retry automatically.',
+                'technical_details': error_message
+            }
+        
+        # Insufficient balance errors
+        if any(keyword in error_lower for keyword in ['insufficient', 'balance', 'funds', 'lamports']):
+            return {
+                'category': 'balance',
+                'severity': 'skippable',
+                'retry_recommended': False,
+                'user_guidance': 'Wallet has insufficient balance for transfer.',
+                'technical_details': error_message
+            }
+        
+        # Authentication/private key errors
+        if any(keyword in error_lower for keyword in ['private key', 'signature', 'unauthorized', 'invalid key']):
+            return {
+                'category': 'authentication',
+                'severity': 'critical',
+                'retry_recommended': False,
+                'user_guidance': 'Authentication issue with wallet private key.',
+                'technical_details': error_message
+            }
+        
+        # Rate limiting errors
+        if any(keyword in error_lower for keyword in ['rate limit', 'too many requests', 'throttle']):
+            return {
+                'category': 'rate_limit',
+                'severity': 'temporary',
+                'retry_recommended': True,
+                'user_guidance': 'API rate limit reached. Will retry with delay.',
+                'technical_details': error_message
+            }
+        
+        # Blockchain/transaction errors
+        if any(keyword in error_lower for keyword in ['transaction', 'gas', 'fee', 'simulation', 'blockhash']):
+            return {
+                'category': 'blockchain',
+                'severity': 'temporary',
+                'retry_recommended': True,
+                'user_guidance': 'Blockchain transaction issue. Will retry.',
+                'technical_details': error_message
+            }
+        
+        # Default classification
+        return {
+            'category': 'unknown',
+            'severity': 'unknown',
+            'retry_recommended': True,
+            'user_guidance': 'An unexpected error occurred. Will attempt retry.',
+            'technical_details': error_message
+        }
+    
+    def get_retry_strategy(self, error_classification: Dict[str, Any], attempt_number: int) -> Dict[str, Any]:
+        """
+        Get retry strategy based on error classification and attempt number.
+        
+        Args:
+            error_classification: Result from classify_transfer_error()
+            attempt_number: Current attempt number (0-based)
+            
+        Returns:
+            Dictionary with retry strategy
+        """
+        category = error_classification.get('category', 'unknown')
+        severity = error_classification.get('severity', 'unknown')
+        
+        # Don't retry critical errors or non-retryable errors
+        if severity == 'critical' or not error_classification.get('retry_recommended', True):
+            return {
+                'should_retry': False,
+                'delay_seconds': 0,
+                'max_attempts': 1
+            }
+        
+        # Different retry strategies by category
+        if category == 'network':
+            # Aggressive retry for network issues
+            return {
+                'should_retry': attempt_number < 3,
+                'delay_seconds': min(2 ** attempt_number, 10),  # Exponential backoff, max 10s
+                'max_attempts': 4
+            }
+        elif category == 'rate_limit':
+            # Longer delays for rate limiting
+            return {
+                'should_retry': attempt_number < 2,
+                'delay_seconds': min(5 * (attempt_number + 1), 15),  # Linear backoff, max 15s
+                'max_attempts': 3
+            }
+        elif category == 'blockchain':
+            # Moderate retry for blockchain issues
+            return {
+                'should_retry': attempt_number < 2,
+                'delay_seconds': min(3 * (attempt_number + 1), 8),  # Linear backoff, max 8s
+                'max_attempts': 3
+            }
+        else:
+            # Default strategy
+            return {
+                'should_retry': attempt_number < 1,
+                'delay_seconds': 2,
+                'max_attempts': 2
+            }
 
 # Create a singleton instance
 api_client = ApiClient() 

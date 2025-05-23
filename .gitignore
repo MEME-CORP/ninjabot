@@ -84,3 +84,5 @@ run_test.bat
 
 .json
 *.json
+
+summaries/
