@@ -94,7 +94,8 @@ def format_schedule_preview(
     schedule: List[Dict[str, Any]], 
     total_volume: float,
     token_address: str,
-    num_child_wallets: int
+    num_child_wallets: int,
+    mother_wallet_address: str
 ) -> str:
     """
     Format the schedule preview message.
@@ -104,6 +105,7 @@ def format_schedule_preview(
         total_volume: The total volume amount
         token_address: The token contract address
         num_child_wallets: Number of child wallets
+        mother_wallet_address: The mother wallet address
         
     Returns:
         Formatted schedule preview
@@ -113,7 +115,8 @@ def format_schedule_preview(
         f"📋 Overview\n\n"
         f"Total volume to be generated: {total_volume:,.2f} SOL\n"
         f"CA: {token_address[:6]}...{token_address[-4:]}\n\n"
-        f"To proceed, please fund the mother wallet with sufficient SOL for gas "
+        f"To proceed, please fund the mother wallet:\n`{mother_wallet_address}`\n\n"
+        f"Fund it with sufficient SOL for gas "
         f"and the required token amount ({total_volume:,.2f} SOL)."
     )
     

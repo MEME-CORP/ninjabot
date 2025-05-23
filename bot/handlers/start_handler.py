@@ -607,7 +607,8 @@ async def generate_preview(update: Update, context: CallbackContext) -> None:
             schedule=schedule.get("transfers", []),
             total_volume=total_volume,
             token_address=token_address,
-            num_child_wallets=num_child_wallets
+            num_child_wallets=num_child_wallets,
+            mother_wallet_address=mother_wallet
         )
         
         await message.edit_text(
