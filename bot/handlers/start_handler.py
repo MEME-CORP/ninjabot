@@ -71,7 +71,7 @@ async def start(update: Update, context: CallbackContext) -> int:
     # Build keyboard with wallet options
     keyboard = [
         [build_button("Create New Wallet", "create_wallet")],
-        [build_button("Use My Wallet", "import_wallet")]
+        [build_button("Use External Wallet", "import_wallet")]
     ]
     
     # Add option to use existing wallets if available
