@@ -1428,14 +1428,14 @@ async def timeout(update: Update, context: CallbackContext) -> int:
     return ConversationHandler.END
 
 
-async def check_child_wallets_funding_status(user_id: int, required_amount_per_wallet: float, tolerance: float = 0.001) -> Dict[str, Any]:
+async def check_child_wallets_funding_status(user_id: int, required_amount_per_wallet: float, tolerance: float = 0.0) -> Dict[str, Any]:
     """
     Check if child wallets already have sufficient balance for volume generation.
     
     Args:
         user_id: Telegram user ID
         required_amount_per_wallet: Required SOL amount per child wallet
-        tolerance: Tolerance for balance checking (default: 0.001 SOL for gas fees)
+        tolerance: Tolerance for balance checking (default: 0.0 SOL - no tolerance)
         
     Returns:
         Dictionary containing funding status information
@@ -1448,7 +1448,7 @@ async def check_child_wallets_funding_status(user_id: int, required_amount_per_w
                 "error": "No child wallets found in session"
             }
         
-        logger.info(f"Checking funding status for {len(child_wallets)} child wallets (required: {required_amount_per_wallet} SOL each + {tolerance} SOL tolerance = {required_amount_per_wallet + tolerance} SOL minimum per wallet)")
+        logger.info(f"Checking funding status for {len(child_wallets)} child wallets (required: {required_amount_per_wallet} SOL each, tolerance: {tolerance} SOL, minimum required: {required_amount_per_wallet + tolerance} SOL per wallet)")
         
         funded_wallets = []
         unfunded_wallets = []
@@ -1456,7 +1456,7 @@ async def check_child_wallets_funding_status(user_id: int, required_amount_per_w
         
         # Pre-calculate the minimum required balance including tolerance
         minimum_required_balance = required_amount_per_wallet + tolerance
-        logger.info(f"Each wallet must have at least {minimum_required_balance} SOL to be considered funded")
+        logger.info(f"Each wallet must have at least {minimum_required_balance} SOL to be considered funded (required: {required_amount_per_wallet}, tolerance: {tolerance})")
         
         for wallet_address in child_wallets:
             try:

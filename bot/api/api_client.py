@@ -1397,15 +1397,20 @@ class ApiClient:
                 
                 # Transform API response into expected format
                 # The API response appears to have a format like:
-                # {"publicKey": "...", "balanceSol": 0, "balanceLamports": 0}
+                # {"publicKey": "...", "balanceSol": 0.001, "balanceLamports": 1000000}
                 if 'publicKey' in response:
-                    # Check for various possible balance fields
+                    # Check for various possible balance fields with priority order
                     sol_balance = 0
-                    if 'balanceSol' in response:
+                    if 'balanceSol' in response and response['balanceSol'] is not None:
                         sol_balance = float(response['balanceSol'])
-                    elif 'balanceLamports' in response:
+                        logger.info(f"Using balanceSol field: {sol_balance}")
+                    elif 'balanceLamports' in response and response['balanceLamports'] is not None:
                         # Convert lamports to SOL (1 SOL = 1,000,000,000 lamports)
                         sol_balance = float(response['balanceLamports']) / 1000000000
+                        logger.info(f"Using balanceLamports field: {response['balanceLamports']} lamports = {sol_balance} SOL")
+                    elif 'balance' in response and response['balance'] is not None:
+                        sol_balance = float(response['balance'])
+                        logger.info(f"Using balance field: {sol_balance}")
                     
                     logger.info(f"Extracted SOL balance from API response: {sol_balance}")
                     
