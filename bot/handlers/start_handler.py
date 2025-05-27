@@ -1939,26 +1939,15 @@ async def trigger_return_all_funds(update: Update, context: CallbackContext) -> 
                 continue
 
             # Use the transfer_child_to_mother method from api_client
-            # Calculate amount to return (leave small amount for gas)
-            amount_to_return = max(0, current_balance - 0.0005)  # Leave 0.0005 SOL for gas
-            
-            if amount_to_return <= 0:
-                logger.info(f"Skipping child wallet {child_address} - insufficient balance after gas reservation")
-                return_results.append({
-                    'child_address': child_address,
-                    'status': 'skipped',
-                    'error': 'Insufficient balance after reserving gas fees.'
-                })
-                continue
+            # Return ALL funds - let the API handle gas fee calculation automatically
+            logger.info(f"Attempting to return ALL funds from {child_address} to mother wallet {mother_wallet_address}")
 
-            logger.info(f"Attempting to transfer {amount_to_return} SOL from {child_address} to mother wallet {mother_wallet_address}")
-
-            # Call the API to return funds
+            # Call the API to return ALL funds (API will automatically handle gas fees)
             transfer_result = await api_client.transfer_child_to_mother(
                 child_wallet=child_address,
                 child_private_key=child_pk,
                 mother_wallet=mother_wallet_address,
-                amount=amount_to_return,
+                amount=None,  # Use None to trigger returnAllFunds=true
                 token_address="So11111111111111111111111111111111111111112",  # SOL
                 verify_transfer=False  # Skip verification for speed
             )
@@ -1966,12 +1955,17 @@ async def trigger_return_all_funds(update: Update, context: CallbackContext) -> 
             logger.info(f"Transfer result for {child_address}: {transfer_result}")
 
             if transfer_result and transfer_result.get("status") == "success":
-                logger.info(f"Successfully transferred {amount_to_return} SOL from {child_address} to mother wallet")
+                # Get the actual amount returned from the API response
+                actual_amount_returned = transfer_result.get('amount', 0)
+                if transfer_result.get('api_response'):
+                    actual_amount_returned = transfer_result['api_response'].get('amountReturnedSol', actual_amount_returned)
+                
+                logger.info(f"Successfully returned {actual_amount_returned} SOL from {child_address} to mother wallet")
                 return_results.append({
                     'child_address': child_address,
                     'status': 'success',
-                    'amount_returned_sol': amount_to_return,
-                    'tx_id': transfer_result.get('transactionId', 'N/A')
+                    'amount_returned_sol': actual_amount_returned,
+                    'tx_id': transfer_result.get('tx_id', transfer_result.get('transactionId', 'N/A'))
                 })
             else:
                 error_msg = transfer_result.get('error', transfer_result.get('message', 'Unknown API error'))
