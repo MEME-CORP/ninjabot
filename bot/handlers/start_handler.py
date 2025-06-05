@@ -39,7 +39,7 @@ from bot.utils.message_utils import (
     format_return_funds_progress
 )
 from bot.api.api_client import api_client, ApiClientError
-from bot.events.event_system import event_system
+from bot.events.event_system import event_system, TransactionConfirmedEvent, TransactionFailedEvent
 from bot.utils.balance_poller import balance_poller
 from bot.state.session_manager import session_manager
 
@@ -1192,24 +1192,23 @@ async def start_execution(update: Update, context: CallbackContext) -> int:
                         # Emit appropriate event based on verification result
                         if is_verified:
                             # Emit transaction confirmed event
-                            await event_system.emit("transaction_confirmed", {
-                                "tx_hash": tx_hash,
-                                "from": mother_wallet,
-                                "to": child_wallet,
-                                "amount": amount_per_wallet,
-                                "token_symbol": "SOL",
-                                "difference": difference
-                            })
+                            await event_system.publish(TransactionConfirmedEvent(
+                                tx_hash=tx_hash,
+                                from_address=mother_wallet,
+                                to_address=child_wallet,
+                                amount=amount_per_wallet,
+                                token_symbol="SOL"
+                            ))
                         else:
                             # Emit transaction failed event with error info
-                            await event_system.emit("transaction_failed", {
-                                "tx_hash": tx_hash,
-                                "from": mother_wallet,
-                                "to": child_wallet,
-                                "amount": amount_per_wallet,
-                                "token_symbol": "SOL",
-                                "error": f"Verification failed. Balance changed from {initial_balance} to {final_balance} SOL."
-                            })
+                            await event_system.publish(TransactionFailedEvent(
+                                tx_hash=tx_hash,
+                                from_address=mother_wallet,
+                                to_address=child_wallet,
+                                amount=amount_per_wallet,
+                                error=f"Verification failed. Balance changed from {initial_balance} to {final_balance} SOL.",
+                                token_symbol="SOL"
+                            ))
                 
                 # Provide summary of transfer results
                 successful_transfers = funding_result.get("successful_transfers", 0)
