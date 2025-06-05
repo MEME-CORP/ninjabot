@@ -10,7 +10,7 @@ if not BOT_TOKEN:
     raise ValueError("No BOT_TOKEN found in environment variables")
 
 # API configuration
-API_BASE_URL = os.getenv("API_BASE_URL", "https://solanaapivolume.onrender.com")
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:3000")
 
 # Logging configuration
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -73,4 +73,14 @@ class CallbackPrefix:
     PROFIT = "profit"
     APPROVE_SPIKE = "approve_spike_"
     REJECT_SPIKE = "reject_spike_"
-    ABORT_RUN = "abort_run_" 
+    ABORT_RUN = "abort_run_"
+
+"""
+Configuration settings for the bot.
+"""
+
+# API Configuration
+API_BASE_URL = "http://localhost:3000"  # Default API base URL
+
+# Service Configuration  
+SERVICE_FEE_RATE = 0.001  # 0.1% service fee rate 
