@@ -1,3 +1,8 @@
+"""
+Configuration package for the Telegram bot.
+Core configuration classes and constants.
+"""
+
 import os
 from dotenv import load_dotenv
 
@@ -61,6 +66,14 @@ class ConversationState:
     MIN_PROFIT_THRESHOLD = 17
     PREVIEW_PROFIT_STRATEGY = 18
 
+    # SPL Token Trading States
+    SPL_OPERATION_CHOICE = 20
+    SPL_TOKEN_PAIR = 21
+    SPL_AMOUNT_STRATEGY = 22
+    SPL_EXECUTION_MODE = 23
+    SPL_PREVIEW = 24
+    SPL_EXECUTION = 25
+
 # Volume generation strategies
 class VolumeStrategy:
     MAX_VOLUME = "MAX_VOLUME"
@@ -74,13 +87,30 @@ class CallbackPrefix:
     APPROVE_SPIKE = "approve_spike_"
     REJECT_SPIKE = "reject_spike_"
     ABORT_RUN = "abort_run_"
+    
+    # SPL Trading prefixes
+    SPL_OPERATION = "spl_op_"
+    SPL_TOKEN_PAIR = "spl_pair_"
+    SPL_AMOUNT_STRATEGY = "spl_amt_"
+    SPL_EXECUTION_MODE = "spl_exec_"
+    SPL_CONFIRM = "spl_confirm_"
 
-"""
-Configuration settings for the bot.
-"""
-
-# API Configuration - REMOVED: This was overriding the correct API URL above
-# API_BASE_URL = "http://localhost:3000"  # Default API base URL
-
-# Service Configuration  
-SERVICE_FEE_RATE = 0.001  # 0.1% service fee rate 
+# Make everything available at package level
+__all__ = [
+    'ConversationState',
+    'CallbackPrefix', 
+    'VolumeStrategy',
+    'API_BASE_URL',
+    'BOT_TOKEN',
+    'SERVICE_FEE_RATE',
+    'MIN_CHILD_WALLETS',
+    'MAX_CHILD_WALLETS',
+    'MIN_VOLUME',
+    'SOLANA_ADDRESS_LENGTH',
+    'MIN_INTERVAL_SEC',
+    'MAX_INTERVAL_SEC',
+    'DEFAULT_GAS_SPIKE_THRESHOLD',
+    'BALANCE_POLL_INTERVAL',
+    'CONVERSATION_TIMEOUT',
+    'LOG_LEVEL'
+] 

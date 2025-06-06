@@ -4376,5 +4376,471 @@ class ApiClient:
             logger.error(f"Unexpected error in Jupiter tokens: {str(e)}")
             raise ApiClientError(f"Jupiter tokens request failed: {str(e)}")
 
+    # SPL Token Trading Methods
+    
+    def execute_spl_buy_operation(self, config_dict: Dict[str, Any], 
+                                 mother_wallet: str, child_wallets: List[str], 
+                                 child_private_keys: List[str]) -> Dict[str, Any]:
+        """
+        Execute SPL buy operation across multiple wallets.
+        
+        Args:
+            config_dict: SPL swap configuration as dictionary
+            mother_wallet: Mother wallet address
+            child_wallets: List of child wallet addresses
+            child_private_keys: List of child wallet private keys
+            
+        Returns:
+            Dictionary with operation result
+        """
+        try:
+            logger.info(f"Starting SPL buy operation for {len(child_wallets)} wallets")
+            
+            # Convert config dict to proper format for API
+            operation_data = {
+                "operation": "buy", 
+                "config": config_dict,
+                "mother_wallet": mother_wallet,
+                "child_wallets": child_wallets,
+                "child_private_keys": child_private_keys,
+                "timestamp": time.time()
+            }
+            
+            response = self._make_request_with_retry(
+                "POST", 
+                "/api/spl/execute_buy", 
+                json=operation_data,
+                timeout=300  # 5 minute timeout for execution
+            )
+            
+            if response.get("success"):
+                logger.info("SPL buy operation initiated successfully")
+                return response
+            else:
+                logger.error(f"SPL buy operation failed: {response.get('error', 'Unknown error')}")
+                return response
+                
+        except Exception as e:
+            logger.error(f"Error executing SPL buy operation: {str(e)}")
+            return {"success": False, "error": str(e)}
+    
+    def execute_spl_sell_operation(self, config_dict: Dict[str, Any],
+                                  mother_wallet: str, child_wallets: List[str],
+                                  child_private_keys: List[str]) -> Dict[str, Any]:
+        """
+        Execute SPL sell operation across multiple wallets.
+        
+        Args:
+            config_dict: SPL swap configuration as dictionary
+            mother_wallet: Mother wallet address
+            child_wallets: List of child wallet addresses
+            child_private_keys: List of child wallet private keys
+            
+        Returns:
+            Dictionary with operation result
+        """
+        try:
+            logger.info(f"Starting SPL sell operation for {len(child_wallets)} wallets")
+            
+            # Convert config dict to proper format for API
+            operation_data = {
+                "operation": "sell",
+                "config": config_dict,
+                "mother_wallet": mother_wallet,
+                "child_wallets": child_wallets,
+                "child_private_keys": child_private_keys,
+                "timestamp": time.time()
+            }
+            
+            response = self._make_request_with_retry(
+                "POST",
+                "/api/spl/execute_sell",
+                json=operation_data,
+                timeout=300  # 5 minute timeout for execution
+            )
+            
+            if response.get("success"):
+                logger.info("SPL sell operation initiated successfully")
+                return response
+            else:
+                logger.error(f"SPL sell operation failed: {response.get('error', 'Unknown error')}")
+                return response
+                
+        except Exception as e:
+            logger.error(f"Error executing SPL sell operation: {str(e)}")
+            return {"success": False, "error": str(e)}
+    
+    def get_spl_operation_quote(self, config_dict: Dict[str, Any], wallet_count: int) -> Dict[str, Any]:
+        """
+        Get quote for SPL operation to estimate costs and amounts.
+        
+        Args:
+            config_dict: SPL swap configuration as dictionary
+            wallet_count: Number of wallets for the operation
+            
+        Returns:
+            Dictionary with quote information
+        """
+        try:
+            logger.debug(f"Requesting SPL operation quote for {wallet_count} wallets")
+            
+            quote_data = {
+                "config": config_dict,
+                "wallet_count": wallet_count,
+                "timestamp": time.time()
+            }
+            
+            response = self._make_request_with_retry(
+                "POST",
+                "/api/spl/quote",
+                json=quote_data,
+                timeout=30
+            )
+            
+            if response.get("success"):
+                logger.info("SPL operation quote received successfully")
+                return response
+            else:
+                logger.error(f"SPL operation quote failed: {response.get('error', 'Unknown error')}")
+                return response
+                
+        except Exception as e:
+            logger.error(f"Error getting SPL operation quote: {str(e)}")
+            return {"success": False, "error": str(e)}
+    
+    def validate_spl_configuration(self, config_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validate SPL configuration before execution.
+        
+        Args:
+            config_dict: SPL swap configuration as dictionary
+            
+        Returns:
+            Dictionary with validation result
+        """
+        try:
+            logger.debug("Validating SPL configuration")
+            
+            validation_data = {
+                "config": config_dict,
+                "timestamp": time.time()
+            }
+            
+            response = self._make_request(
+                "POST",
+                "/api/spl/validate_config",
+                json=validation_data,
+                timeout=10  
+            )
+            
+            if response.get("success"):
+                logger.info("SPL configuration validation successful")
+                return response
+            else:
+                logger.warning(f"SPL configuration validation failed: {response.get('error', 'Unknown error')}")
+                return response
+                
+        except Exception as e:
+            logger.error(f"Error validating SPL configuration: {str(e)}")
+            return {"success": False, "error": str(e)}
+    
+    def get_spl_operation_status(self, operation_id: str) -> Dict[str, Any]:
+        """
+        Get status of running SPL operation.
+        
+        Args:
+            operation_id: ID of the SPL operation
+            
+        Returns:
+            Dictionary with operation status
+        """
+        try:
+            logger.debug(f"Checking status of SPL operation: {operation_id}")
+            
+            response = self._make_request(
+                "GET",
+                f"/api/spl/status/{operation_id}",
+                timeout=10
+            )
+            
+            if response.get("success"):
+                return response
+            else:
+                logger.error(f"Failed to get SPL operation status: {response.get('error', 'Unknown error')}")
+                return response
+                
+        except Exception as e:
+            logger.error(f"Error getting SPL operation status: {str(e)}")
+            return {"success": False, "error": str(e)}
+    
+    def cancel_spl_operation(self, operation_id: str) -> Dict[str, Any]:
+        """
+        Cancel running SPL operation.
+        
+        Args:
+            operation_id: ID of the SPL operation to cancel
+            
+        Returns:
+            Dictionary with cancellation result
+        """
+        try:
+            logger.info(f"Cancelling SPL operation: {operation_id}")
+            
+            response = self._make_request(
+                "POST",
+                f"/api/spl/cancel/{operation_id}",
+                timeout=30
+            )
+            
+            if response.get("success"):
+                logger.info(f"SPL operation {operation_id} cancelled successfully")
+                return response
+            else:
+                logger.error(f"Failed to cancel SPL operation: {response.get('error', 'Unknown error')}")
+                return response
+                
+        except Exception as e:
+            logger.error(f"Error cancelling SPL operation: {str(e)}")
+            return {"success": False, "error": str(e)}
+
+    async def execute_spl_volume_run(
+        self,
+        child_wallets: List[str],
+        child_private_keys: List[str],
+        trades: List[Dict[str, Any]],
+        token_address: str,
+        verify_transfers: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Execute SPL token volume generation by trading SOL for the target token and back.
+        This creates actual trading volume for the specified SPL token.
+
+        Args:
+            child_wallets: List of child wallet addresses
+            child_private_keys: List of corresponding child wallet private keys
+            trades: List of trade instructions (reinterpreted as buy/sell operations)
+            token_address: SPL token mint address to trade
+            verify_transfers: Whether to verify swap completions
+
+        Returns:
+            Dictionary summarizing the SPL volume generation results
+        """
+        logger.info(f"Starting SPL volume generation with {len(trades)} swaps for token {token_address}")
+        
+        # SOL mint address for Jupiter swaps
+        SOL_MINT = "So11111111111111111111111111111111111111112"
+        
+        batch_id = self.generate_batch_id()
+        private_key_map = dict(zip(child_wallets, child_private_keys))
+        
+        results = {
+            "batch_id": batch_id,
+            "status": "in_progress",
+            "token_address": token_address,
+            "total_swaps": len(trades),
+            "swaps_executed": 0,
+            "buys_succeeded": 0,
+            "sells_succeeded": 0,
+            "swaps_failed": 0,
+            "swap_results": [],
+            "start_time": time.time(),
+            "end_time": None,
+            "duration": 0,
+            "total_volume_sol": 0,
+            "verification_enabled": verify_transfers,
+        }
+        
+        for i, trade in enumerate(trades):
+            try:
+                from_wallet = trade.get("from_wallet") or trade.get("from")
+                amount_sol = float(trade.get("amount", 0))
+                
+                if not all([from_wallet, amount_sol > 0]):
+                    logger.warning(f"Skipping invalid trade {i + 1}/{len(trades)}: {trade}")
+                    results["swaps_failed"] += 1
+                    continue
+                
+                wallet_private_key = private_key_map.get(from_wallet)
+                if not wallet_private_key:
+                    logger.error(f"No private key found for wallet {from_wallet}")
+                    results["swaps_failed"] += 1
+                    continue
+                
+                # Step 1: BUY - Swap SOL for target token
+                logger.info(f"Swap {i + 1}/{len(trades)}: BUY {amount_sol:.6f} SOL worth of {token_address[:8]}...")
+                
+                try:
+                    # Convert SOL amount to lamports for Jupiter (1 SOL = 1e9 lamports)
+                    amount_lamports = int(amount_sol * 1_000_000_000)
+                    
+                    # Get quote for SOL -> Token
+                    buy_quote = self.get_jupiter_quote(
+                        input_mint=SOL_MINT,
+                        output_mint=token_address,
+                        amount=amount_lamports,
+                        slippage_bps=100  # 1% slippage
+                    )
+                    
+                    if not buy_quote.get("data"):
+                        logger.error(f"Failed to get buy quote for {token_address}")
+                        results["swaps_failed"] += 1
+                        continue
+                    
+                    # Execute buy swap
+                    buy_result = self.execute_jupiter_swap(
+                        user_wallet_private_key=wallet_private_key,
+                        quote_response=buy_quote,
+                        verify_swap=verify_transfers
+                    )
+                    
+                    if buy_result.get("status") == "success":
+                        results["buys_succeeded"] += 1
+                        results["total_volume_sol"] += amount_sol
+                        logger.info(f"✅ BUY successful: {amount_sol:.6f} SOL -> {token_address[:8]}...")
+                        
+                        # Add delay before sell
+                        await asyncio.sleep(random.uniform(2.0, 4.0))
+                        
+                        # Step 2: SELL - Swap tokens back to SOL  
+                        logger.info(f"Swap {i + 1}/{len(trades)}: SELL {token_address[:8]}... back to SOL")
+                        
+                        # Get token balance to sell everything we just bought
+                        balance_info = self.check_balance(from_wallet, token_address)
+                        token_balance = 0
+                        
+                        for balance in balance_info.get("balances", []):
+                            if balance.get("mint") == token_address:
+                                token_balance = balance.get("amount", 0)
+                                break
+                        
+                        if token_balance > 0:
+                            # Convert to token's smallest unit (depends on decimals)
+                            token_amount_raw = int(token_balance * 1_000_000)  # Assume 6 decimals (typical)
+                            
+                            # Get quote for Token -> SOL
+                            sell_quote = self.get_jupiter_quote(
+                                input_mint=token_address,
+                                output_mint=SOL_MINT,
+                                amount=token_amount_raw,
+                                slippage_bps=100  # 1% slippage
+                            )
+                            
+                            if sell_quote.get("data"):
+                                # Execute sell swap
+                                sell_result = self.execute_jupiter_swap(
+                                    user_wallet_private_key=wallet_private_key,
+                                    quote_response=sell_quote,
+                                    verify_swap=verify_transfers
+                                )
+                                
+                                if sell_result.get("status") == "success":
+                                    results["sells_succeeded"] += 1
+                                    logger.info(f"✅ SELL successful: {token_address[:8]}... -> SOL")
+                                else:
+                                    logger.warning(f"❌ SELL failed for wallet {from_wallet}")
+                                    results["swaps_failed"] += 1
+                            else:
+                                logger.warning(f"❌ Failed to get sell quote for {token_address}")
+                                results["swaps_failed"] += 1
+                        else:
+                            logger.warning(f"❌ No token balance found to sell for wallet {from_wallet}")
+                            results["swaps_failed"] += 1
+                    else:
+                        logger.warning(f"❌ BUY failed for wallet {from_wallet}")
+                        results["swaps_failed"] += 1
+                        
+                except Exception as swap_error:
+                    logger.error(f"Error in swap {i + 1}: {str(swap_error)}")
+                    results["swaps_failed"] += 1
+                
+                results["swaps_executed"] += 1
+                
+                # Random delay between swaps to appear organic
+                await asyncio.sleep(random.uniform(3.0, 6.0))
+                
+            except Exception as e:
+                logger.error(f"Error processing swap {i + 1}/{len(trades)}: {str(e)}")
+                results["swaps_failed"] += 1
+                continue
+        
+        # Update final status
+        results["end_time"] = time.time()
+        results["duration"] = results["end_time"] - results["start_time"]
+        
+        total_successful_operations = results["buys_succeeded"] + results["sells_succeeded"]
+        total_expected_operations = results["total_swaps"] * 2  # Each trade = buy + sell
+        
+        if total_successful_operations == total_expected_operations:
+            results["status"] = "success"
+        elif total_successful_operations > 0:
+            results["status"] = "partial_success"
+        else:
+            results["status"] = "failed"
+        
+        logger.info(
+            f"SPL volume generation completed: "
+            f"{results['buys_succeeded']} buys, {results['sells_succeeded']} sells, "
+            f"{results['swaps_failed']} failures in {results['duration']:.2f} seconds. "
+            f"Total volume: {results['total_volume_sol']:.6f} SOL"
+        )
+        
+        return results
+
+    def get_spl_token_info(self, token_address: str) -> Dict[str, Any]:
+        """
+        Get information about an SPL token.
+        
+        Args:
+            token_address: The SPL token mint address
+            
+        Returns:
+            Token information including symbol, name, decimals, etc.
+        """
+        try:
+            # Try to get token info from Jupiter's token list API first
+            import requests
+            
+            # Jupiter's token list endpoint
+            token_list_response = requests.get(
+                "https://token.jup.ag/strict",
+                timeout=10
+            )
+            
+            if token_list_response.status_code == 200:
+                tokens = token_list_response.json()
+                for token in tokens:
+                    if token.get('address') == token_address:
+                        return {
+                            "success": True,
+                            "symbol": token.get('symbol', 'Unknown'),
+                            "name": token.get('name', 'Unknown Token'),
+                            "decimals": token.get('decimals', 9),
+                            "logoURI": token.get('logoURI'),
+                            "verified": True
+                        }
+            
+            # Fallback: Use basic validation
+            if len(token_address) == 44:  # Standard Solana address length
+                return {
+                    "success": True,
+                    "symbol": "Unknown",
+                    "name": "Unknown SPL Token",
+                    "decimals": 9,
+                    "verified": False
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Invalid token address format"
+                }
+                
+        except Exception as e:
+            logger.error(f"Error getting SPL token info for {token_address}: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "token_address": token_address
+            }
+
 # Create a singleton instance
 api_client = ApiClient()

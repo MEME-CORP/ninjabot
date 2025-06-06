@@ -52,7 +52,8 @@ async def volume_generation_job(context: CallbackContext):
     job_data = context.job.data
     user_id = job_data['user_id']
 
-    logger.info(f"Background job started for volume generation. User: {user_id}, Run ID: {job_data.get('run_id')}")
+    logger.info(f"🔥 VOLUME_GENERATION_JOB STARTED - User: {user_id}, Run ID: {job_data.get('run_id')}")
+    print(f"🔥 VOLUME_GENERATION_JOB STARTED - User: {user_id}, Run ID: {job_data.get('run_id')}")
 
     try:
         # Execute the volume run with enhanced logging and error handling
@@ -67,7 +68,7 @@ async def volume_generation_job(context: CallbackContext):
             }
         )
         
-        run_results = await api_client.execute_volume_run(
+        run_results = await api_client.execute_spl_volume_run(
             child_wallets=job_data['child_wallets'],
             child_private_keys=job_data['child_private_keys'],
             trades=job_data['trades'],
@@ -88,7 +89,7 @@ async def volume_generation_job(context: CallbackContext):
             }
         )
 
-        # Format a comprehensive summary message
+        # Format a comprehensive SPL volume generation summary message
         status_emoji = {
             "success": "✅",
             "partial_success": "⚠️", 
@@ -96,22 +97,27 @@ async def volume_generation_job(context: CallbackContext):
             "in_progress": "🔄"
         }.get(run_results.get("status", "failed"), "ℹ️")
 
+        token_address = job_data.get('token_address', 'Unknown')
         summary_message = (
-            f"{status_emoji} **Volume Generation Complete**\n\n"
+            f"{status_emoji} **SPL Volume Generation Complete**\n\n"
+            f"**Token:** `{token_address[:8]}...{token_address[-8:] if len(token_address) > 16 else token_address}`\n"
             f"**Status:** {run_results.get('status', 'N/A').replace('_', ' ').title()}\n"
             f"**Duration:** {run_results.get('duration', 0):.2f} seconds\n"
             f"**Batch ID:** `{run_results.get('batch_id', 'N/A')}`\n\n"
-            f"📊 **Trade Summary:**\n"
-            f"  - Total Trades Planned: {run_results.get('total_trades', 0)}\n"
-            f"  - Executed: {run_results.get('trades_executed', 0)}\n"
-            f"  - Succeeded: {run_results.get('trades_succeeded', 0)}\n"
-            f"  - Failed: {run_results.get('trades_failed', 0)}\n"
+            f"📊 **SPL Trading Volume Summary:**\n"
+            f"  - Total SOL Volume: {run_results.get('total_volume_sol', 0):.6f} SOL\n"
+            f"  - Buy Operations: {run_results.get('buys_succeeded', 0)} successful\n"
+            f"  - Sell Operations: {run_results.get('sells_succeeded', 0)} successful\n"
+            f"  - Failed Swaps: {run_results.get('swaps_failed', 0)}\n"
+            f"  - Total Swaps Executed: {run_results.get('swaps_executed', 0)}\n"
         )
         
         # Add additional details for partial success or failures
         if run_results.get('status') in ['partial_success', 'failed']:
-            failure_rate = (run_results.get('trades_failed', 0) / max(run_results.get('total_trades', 1), 1)) * 100
-            summary_message += f"  - Failure Rate: {failure_rate:.1f}%\n"
+            total_operations = run_results.get('buys_succeeded', 0) + run_results.get('sells_succeeded', 0) + run_results.get('swaps_failed', 0)
+            if total_operations > 0:
+                failure_rate = (run_results.get('swaps_failed', 0) / total_operations) * 100
+                summary_message += f"  - Failure Rate: {failure_rate:.1f}%\n"
 
         await context.bot.send_message(
             chat_id=user_id,
@@ -144,14 +150,16 @@ async def volume_generation_job(context: CallbackContext):
             exc_info=True
         )
         
-        # Send user-friendly error message
+        # Send user-friendly SPL volume generation error message
+        token_address = job_data.get('token_address', 'Unknown')
         error_details = (
-            f"❌ **Volume Generation Failed**\n\n"
+            f"❌ **SPL Volume Generation Failed**\n\n"
+            f"**Token:** `{token_address[:8]}...{token_address[-8:] if len(token_address) > 16 else token_address}`\n"
             f"**Error:** {type(e).__name__}\n"
             f"**Details:** {str(e)}\n"
             f"**Run ID:** `{job_data.get('run_id', 'N/A')}`\n\n"
-            f"Please try starting a new volume generation run. "
-            f"If the issue persists, check your wallet balances and network connectivity."
+            f"Please try starting a new SPL volume generation run. "
+            f"If the issue persists, check your wallet balances, token availability, and network connectivity."
         )
         
         await context.bot.send_message(
@@ -630,7 +638,7 @@ async def num_child_wallets(update: Update, context: CallbackContext) -> int:
 
 async def volume_amount(update: Update, context: CallbackContext) -> int:
     """
-    Handle the volume amount input.
+    Handle the volume amount input for SPL token volume generation.
 
     Args:
         update: The update object
@@ -656,19 +664,27 @@ async def volume_amount(update: Update, context: CallbackContext) -> int:
     session_manager.update_session_value(user.id, "total_volume", volume)
 
     logger.info(
-        f"User {user.id} set volume to {volume}",
-        extra={"user_id": user.id, "volume": volume}
+        f"User {user.id} set SPL volume generation amount to {volume} SOL",
+        extra={"user_id": user.id, "volume": volume, "operation": "spl_volume_generation"}
     )
 
-    # Ask for token address
-    await update.message.reply_text(format_volume_confirmation_message(volume))
+    # Ask for SPL token contract address with enhanced guidance
+    volume_msg = format_volume_confirmation_message(volume)
+    spl_guidance = (
+        f"\n\n📝 **SPL Token Contract Address**\n"
+        f"Now enter the contract address of the SPL token you want to generate volume for.\n\n"
+        f"This should be a 44-character Solana mint address.\n"
+        f"Example: `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` (USDC)"
+    )
+    
+    await update.message.reply_text(volume_msg + spl_guidance, parse_mode=ParseMode.MARKDOWN)
 
     return ConversationState.TOKEN_ADDRESS
 
 
 async def token_address(update: Update, context: CallbackContext) -> int:
     """
-    Handle the token address input.
+    Handle the SPL token contract address input for volume generation.
 
     Args:
         update: The update object
@@ -682,11 +698,16 @@ async def token_address(update: Update, context: CallbackContext) -> int:
 
     # Validate input
     is_valid, value_or_error = validate_token_address(text)
-    log_validation_result(user.id, "token_address", is_valid, value_or_error)
+    log_validation_result(user.id, "spl_token_address", is_valid, value_or_error)
 
     if not is_valid:
-        # Invalid input, send error and ask again
-        await update.message.reply_text(format_error_message(value_or_error))
+        # Invalid input, send error and ask again with SPL-specific guidance
+        error_msg = format_error_message(
+            f"Invalid SPL token contract address: {value_or_error}\n\n"
+            "Please provide a valid Solana token mint address (44 characters, base58 encoded).\n"
+            "Example: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        )
+        await update.message.reply_text(error_msg)
         return ConversationState.TOKEN_ADDRESS
 
     # Valid input, store and continue
@@ -694,8 +715,8 @@ async def token_address(update: Update, context: CallbackContext) -> int:
     session_manager.update_session_value(user.id, "token_address", token_addr)
 
     logger.info(
-        f"User {user.id} set token address to {token_addr}",
-        extra={"user_id": user.id, "token_address": token_addr}
+        f"User {user.id} set SPL token contract address to {token_addr}",
+        extra={"user_id": user.id, "spl_token_address": token_addr, "operation": "volume_generation"}
     )
 
     # Prepare and show schedule preview
@@ -749,7 +770,7 @@ async def generate_preview(message: telegram.Message, context: CallbackContext) 
             }
         )
 
-        # Format and show preview
+        # Format and show SPL volume generation preview
         preview_text = format_schedule_preview(
             schedule=schedule.get("transfers", []),
             total_volume=total_volume,
@@ -757,6 +778,16 @@ async def generate_preview(message: telegram.Message, context: CallbackContext) 
             num_child_wallets=num_child_wallets,
             mother_wallet_address=mother_wallet
         )
+        
+        # Add SPL-specific context to preview
+        spl_context = (
+            f"\n\n🔄 **SPL Volume Generation Setup**\n"
+            f"This will generate {total_volume} SOL worth of trading volume "
+            f"for the SPL token: `{token_address[:8]}...{token_address[-8:]}`\n\n"
+            f"The volume will be distributed across {num_child_wallets} child wallets "
+            f"through randomized transfers to simulate legitimate trading activity."
+        )
+        preview_text += spl_context
 
         await loading_message.edit_text(
             preview_text,
@@ -954,11 +985,43 @@ async def start_execution(update: Update, context: CallbackContext) -> int:
                 text=f"📊 Funding Complete\n✅ Successful: {successful_transfers}\n❌ Failed: {failed_transfers}"
             )
 
+        # Skip the balance overview and go directly to volume generation
+        logger.info(f"Starting direct volume generation for user {user.id}")
+        
+        # Call child_balances_overview_handler to show balances first  
+        loading_message = await context.bot.send_message(chat_id=user.id, text="🔍 Fetching child wallet balances...")
+        
+        # Get child wallets data for balance display
+        child_wallets_data = session_manager.get_session_value(user.id, "child_wallets_data")
+        if not child_wallets_data:
+            await loading_message.edit_text(format_error_message("Child wallet data missing. Please /start again."))
+            return ConversationHandler.END
+
+        balances_info = []
+        has_errors = False
+        for child in child_wallets_data:
+            addr = child.get('address')
+            if not addr: continue
+            try:
+                balance_info = api_client.check_balance(addr)
+                sol_balance = next((b.get('amount', 0) for b in balance_info.get('balances', []) if b.get('symbol') == 'SOL'), 0)
+                balances_info.append({'address': addr, 'balance_sol': sol_balance})
+            except ApiClientError as e:
+                balances_info.append({'address': addr, 'balance_sol': 'Error'})
+                has_errors = True
+        
+        overview_text = format_child_balances_overview(balances_info)
+        await loading_message.edit_text(overview_text, parse_mode=ParseMode.MARKDOWN)
+        
+        # Now automatically start volume generation inline (no fake objects needed)
         await context.bot.send_message(
             chat_id=user.id,
-            text="✅ Ready for volume generation! Fetching balances for an overview..."
+            text="🚀 **Auto-starting volume generation...**",
+            parse_mode=ParseMode.MARKDOWN
         )
-        return ConversationState.CHILD_BALANCES_OVERVIEW
+        
+        # Start volume generation directly without fake callback objects
+        return await trigger_volume_generation_inline(user.id, context)
 
     except ApiClientError as e:
         logger.error(f"Error starting execution: {str(e)}", extra={"user_id": user.id})
@@ -1098,11 +1161,189 @@ async def child_balances_overview_handler(update: Update, context: CallbackConte
     return ConversationState.CHILD_BALANCES_OVERVIEW
 
 
+async def trigger_volume_generation_inline(user_id: int, context: CallbackContext) -> int:
+    """Inline version of volume generation trigger that doesn't require callback query objects."""
+    logger.info(f"🚀 TRIGGER_VOLUME_GENERATION_INLINE called for user {user_id}")
+    print(f"🚀 TRIGGER_VOLUME_GENERATION_INLINE called for user {user_id}")
+
+    # Enhanced session data retrieval with logging
+    session_data = {
+        "mother_wallet": session_manager.get_session_value(user_id, "mother_wallet"),
+        "child_wallets_data": session_manager.get_session_value(user_id, "child_wallets_data"),
+        "schedule": session_manager.get_session_value(user_id, "schedule"),
+        "token_address": session_manager.get_session_value(user_id, "token_address"),
+        "run_id": session_manager.get_session_value(user_id, "run_id")
+    }
+
+    # Comprehensive validation with detailed error reporting
+    missing_data = [key for key, value in session_data.items() if not value]
+    if missing_data:
+        logger.error(
+            f"Missing critical session data for volume generation",
+            extra={
+                "user_id": user_id,
+                "missing_data": missing_data,
+                "available_data": [key for key, value in session_data.items() if value]
+            }
+        )
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=format_error_message(f"Session data is incomplete. Missing: {', '.join(missing_data)}. Please /start again.")
+        )
+        return ConversationHandler.END
+
+    # Extract and validate data
+    mother_wallet = session_data["mother_wallet"]
+    child_wallets_data = session_data["child_wallets_data"]
+    schedule = session_data["schedule"]
+    token_address = session_data["token_address"]
+    run_id = session_data["run_id"]
+
+    await context.bot.send_message(
+        chat_id=user_id,
+        text="🚀 Initiating volume generation sequence...\n\n⏳ Preparing trade data..."
+    )
+
+    # Enhanced data preparation with validation
+    try:
+        child_wallets = [w.get('address') for w in child_wallets_data if w.get('address')]
+        child_private_keys = [w.get('private_key') for w in child_wallets_data if w.get('private_key')]
+        
+        # Validate wallet data completeness
+        if len(child_wallets) != len(child_private_keys):
+            raise ValueError(f"Wallet data mismatch: {len(child_wallets)} addresses vs {len(child_private_keys)} private keys")
+        
+        if len(child_wallets) == 0:
+            raise ValueError("No valid child wallets found")
+        
+        original_trades = schedule.get('transfers', [])
+        if not original_trades:
+            raise ValueError("No trades found in schedule")
+        
+        # Enhanced trade correction with validation
+        corrected_trades = []
+        invalid_trades = 0
+        
+        for i, trade in enumerate(original_trades):
+            from_wallet = trade.get("from")
+            to_wallet = trade.get("to") 
+            amount = trade.get("amount")
+            
+            if from_wallet and to_wallet and amount and amount > 0:
+                corrected_trades.append({
+                    "from_wallet": from_wallet,
+                    "to_wallet": to_wallet, 
+                    "amount": float(amount)
+                })
+            else:
+                invalid_trades += 1
+                logger.warning(f"Invalid trade {i}: {trade}")
+        
+        if not corrected_trades:
+            raise ValueError(f"No valid trades found. {invalid_trades} invalid trades detected.")
+        
+        logger.info(
+            f"Volume generation data prepared",
+            extra={
+                "user_id": user_id,
+                "run_id": run_id,
+                "child_wallets_count": len(child_wallets),
+                "valid_trades": len(corrected_trades),
+                "invalid_trades": invalid_trades,
+                "token_address": token_address
+            }
+        )
+        
+    except ValueError as e:
+        logger.error(f"Data preparation failed for user {user_id}: {str(e)}")
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=format_error_message(f"Data preparation failed: {str(e)}. Please regenerate the schedule.")
+        )
+        return ConversationState.CHILD_BALANCES_OVERVIEW
+
+    # Prepare job data with comprehensive information
+    job_data = {
+        'user_id': user_id,
+        'mother_wallet': mother_wallet,
+        'child_wallets': child_wallets,
+        'child_private_keys': child_private_keys,
+        'trades': corrected_trades,
+        'token_address': token_address,
+        'run_id': run_id,
+        'job_created_at': time.time()
+    }
+
+    # Schedule the volume generation job
+    try:
+        job_name = f"vol_run_{user_id}_{int(time.time())}"
+        context.job_queue.run_once(volume_generation_job, when=2, data=job_data, name=job_name)
+        
+        logger.info(
+            f"Successfully scheduled volume generation job",
+            extra={
+                "user_id": user_id,
+                "run_id": run_id,
+                "job_name": job_name,
+                "trades_count": len(corrected_trades),
+                "child_wallets_count": len(child_wallets)
+            }
+        )
+        
+        # Send confirmation with progress tracking
+        confirmation_message = (
+            f"🚀 **SPL Volume Generation STARTED**\n\n"
+            f"**Run ID:** `{run_id}`\n"
+            f"**Trades Queued:** {len(corrected_trades)}\n"
+            f"**Child Wallets:** {len(child_wallets)}\n"
+            f"**SPL Token:** `{token_address[:8]}...{token_address[-8:]}`\n"
+            f"**Job Name:** `{job_name}`\n\n"
+            f"⏳ Your SPL volume run is executing in the background.\n"
+            f"Transactions will start processing momentarily.\n"
+            f"You will be notified when it completes."
+        )
+        
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=confirmation_message,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([
+                [build_button("📊 Check Progress (Coming Soon)", "check_progress")],
+                [build_button("❌ Cancel Run (Not Available)", "abort_run")]
+            ])
+        )
+        
+        return ConversationState.EXECUTION
+        
+    except Exception as e:
+        logger.error(
+            f"Failed to schedule volume generation job",
+            extra={
+                "user_id": user_id,
+                "run_id": run_id,
+                "error": str(e)
+            }
+        )
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=format_error_message(f"Failed to start volume generation: {str(e)}")
+        )
+        return ConversationState.CHILD_BALANCES_OVERVIEW
+
+
 async def trigger_volume_generation(update: Update, context: CallbackContext) -> int:
     """Triggers the volume generation process by scheduling a background job with enhanced validation."""
     user = update.callback_query.from_user
     query = update.callback_query
-    await query.answer()
+    
+    # Handle the callback query answer only if it's a real query
+    try:
+        await query.answer()
+    except Exception as e:
+        logger.warning(f"Could not answer callback query: {e}")
+    
+    logger.info(f"🚀 TRIGGER_VOLUME_GENERATION called for user {user.id}")
+    print(f"🚀 TRIGGER_VOLUME_GENERATION called for user {user.id}")  # Console output for immediate visibility
 
     # Enhanced session data retrieval with logging
     session_data = {
@@ -1225,12 +1466,14 @@ async def trigger_volume_generation(update: Update, context: CallbackContext) ->
         
         # Send confirmation with progress tracking
         confirmation_message = (
-            f"🚀 **Volume Generation Started**\n\n"
+            f"🚀 **SPL Volume Generation STARTED**\n\n"
             f"**Run ID:** `{run_id}`\n"
             f"**Trades Queued:** {len(corrected_trades)}\n"
             f"**Child Wallets:** {len(child_wallets)}\n"
-            f"**Token:** {token_address[:8]}...{token_address[-8:]}\n\n"
-            f"⏳ Your volume run is executing in the background.\n"
+            f"**SPL Token:** `{token_address[:8]}...{token_address[-8:]}`\n"
+            f"**Job Name:** `{job_name}`\n\n"
+            f"⏳ Your SPL volume run is executing in the background.\n"
+            f"Transactions will start processing momentarily.\n"
             f"You will be notified when it completes."
         )
         
