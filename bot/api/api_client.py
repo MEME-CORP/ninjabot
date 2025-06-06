@@ -1376,7 +1376,6 @@ class ApiClient:
                     
                 logger.info(f"Attempting {strategy['name']} verification strategy")
                 
-                # Wait for the strategy's specified time
                 strategy_start = time.time()
                 while time.time() - strategy_start < strategy["wait_time"]:
                     try:
@@ -2546,45 +2545,41 @@ class ApiClient:
             # Restore original timeout
             self.timeout = original_timeout
             
-    async def execute_volume_run(self, mother_wallet: str, child_wallets: List[str], 
-                               child_private_keys: List[str], trades: List[Dict[str, Any]], 
-                               token_address: str, verify_transfers: bool = True) -> Dict[str, Any]:
+    async def execute_volume_run(
+        self,
+        child_wallets: List[str],
+        child_private_keys: List[str],
+        trades: List[Dict[str, Any]],
+        token_address: str,
+        verify_transfers: bool = True,
+    ) -> Dict[str, Any]:
         """
         Execute a complete volume generation run with transaction verification.
-        
+        This method handles child-to-child transfers based on a provided schedule.
+
         Args:
-            mother_wallet: Mother wallet address
-            child_wallets: List of child wallet addresses
-            child_private_keys: List of child wallet private keys
-            trades: List of trade instructions with from_wallet, to_wallet, and amount
-            token_address: Token contract address
-            verify_transfers: Whether to verify transfers by checking balance changes
-            
+            child_wallets: List of child wallet addresses.
+            child_private_keys: List of corresponding child wallet private keys.
+            trades: List of trade instructions with 'from', 'to', and 'amount'.
+            token_address: Token contract address for the transfers.
+            verify_transfers: Whether to verify transfers by checking balance changes.
+
         Returns:
-            Status of volume generation operations
+            A dictionary summarizing the status of the volume generation run.
         """
         if self.use_mock:
             return {
                 "status": "success",
                 "trades_executed": len(trades),
                 "trades_succeeded": len(trades),
-                "trades_failed": 0
+                "trades_failed": 0,
             }
-        
+
         logger.info(f"Starting volume run with {len(trades)} trades for token {token_address}")
-        
-        # Generate a batch ID for this volume run
+
         batch_id = self.generate_batch_id()
-        
-        # Create a wallet map for easy lookup
-        wallet_map = {}
-        for i, wallet in enumerate(child_wallets):
-            wallet_map[wallet] = {
-                "private_key": child_private_keys[i] if i < len(child_private_keys) else None,
-                "index": i
-            }
-        
-        # Track results
+        private_key_map = dict(zip(child_wallets, child_private_keys))
+
         results = {
             "batch_id": batch_id,
             "status": "in_progress",
@@ -2597,111 +2592,70 @@ class ApiClient:
             "start_time": time.time(),
             "end_time": None,
             "duration": 0,
-            "verification_enabled": verify_transfers
+            "verification_enabled": verify_transfers,
         }
-        
-        # Execute each trade
+
         for i, trade in enumerate(trades):
+            trade_result = None
             try:
-                from_wallet = trade.get("from_wallet")
-                to_wallet = trade.get("to_wallet")
-                amount = trade.get("amount")
-                
-                # Skip invalid trades
-                if not from_wallet or not to_wallet or not amount:
-                    logger.warning(f"Skipping invalid trade {i+1}/{len(trades)}: {trade}")
+                from_wallet = trade.get("from_wallet") or trade.get("from")
+                to_wallet = trade.get("to_wallet") or trade.get("to")
+                amount = float(trade.get("amount", 0))
+
+                if not all([from_wallet, to_wallet, amount > 0]):
+                    logger.warning(f"Skipping invalid trade {i + 1}/{len(trades)}: {trade}")
                     results["trades_failed"] += 1
-                    results["trade_results"].append({
-                        "status": "skipped",
-                        "from_wallet": from_wallet,
-                        "to_wallet": to_wallet,
-                        "amount": amount,
-                        "error": "Invalid trade parameters"
-                    })
+                    results["trade_results"].append({"status": "skipped", "error": "Invalid trade parameters", **trade})
                     continue
-                
-                # Log the trade
-                logger.info(f"Executing trade {i+1}/{len(trades)}: {amount} SOL from {from_wallet} to {to_wallet}")
-                
-                # Get the private key for the sender wallet
-                sender_private_key = None
-                if from_wallet in wallet_map:
-                    sender_private_key = wallet_map[from_wallet]["private_key"]
-                
-                # If sender is mother wallet, use fund_child_wallets
-                if from_wallet == mother_wallet and to_wallet in child_wallets:
-                    # If mother wallet is sending to child wallet
-                    trade_result = await self.transfer_between_wallets(
-                        from_wallet=from_wallet,
-                        from_private_key=trade.get("private_key"),  # Use provided key if available
-                        to_wallet=to_wallet,
-                        amount=amount,
-                        token_address=token_address,
-                        verify_transfer=verify_transfers
-                    )
-                elif from_wallet in child_wallets and to_wallet == mother_wallet:
-                    # If child wallet is sending to mother wallet
-                    trade_result = await self.transfer_child_to_mother(
-                        child_wallet=from_wallet,
-                        child_private_key=sender_private_key,
-                        mother_wallet=to_wallet,
-                        amount=amount,
-                        token_address=token_address,
-                        verify_transfer=verify_transfers
-                    )
-                else:
-                    # If transfer is between child wallets
-                    trade_result = await self.transfer_between_wallets(
-                        from_wallet=from_wallet,
-                        from_private_key=sender_private_key,
-                        to_wallet=to_wallet,
-                        amount=amount,
-                        token_address=token_address,
-                        verify_transfer=verify_transfers
-                    )
-                
-                # Update trade results
+
+                logger.info(f"Executing trade {i + 1}/{len(trades)}: {amount:.6f} SOL from {from_wallet} to {to_wallet}")
+
+                sender_private_key = private_key_map.get(from_wallet)
+                if not sender_private_key:
+                    logger.error(f"Skipping trade: No private key found for sender wallet {from_wallet}")
+                    results["trades_failed"] += 1
+                    results["trade_results"].append({"status": "failed", "error": "Missing sender private key", **trade})
+                    continue
+
+                trade_result = await self.transfer_between_wallets(
+                    from_wallet=from_wallet,
+                    from_private_key=sender_private_key,
+                    to_wallet=to_wallet,
+                    amount=amount,
+                    token_address=token_address,
+                    verify_transfer=verify_transfers,
+                )
+
                 results["trades_executed"] += 1
-                if trade_result.get("status") == "success" or trade_result.get("verified", False):
+                if trade_result.get("status") == "success" or trade_result.get("verified"):
                     results["trades_succeeded"] += 1
                 else:
                     results["trades_failed"] += 1
-                
-                # Add the result to the list
+
                 results["trade_results"].append(trade_result)
-                
-                # Add a small delay between trades
-                await asyncio.sleep(1)
-                
+                await asyncio.sleep(random.uniform(0.5, 2.0))  # Small delay between trades
+
             except Exception as e:
-                logger.error(f"Error executing trade {i+1}/{len(trades)}: {str(e)}")
+                logger.error(f"Error executing trade {i + 1}/{len(trades)}: {str(e)}")
                 results["trades_failed"] += 1
-                results["trade_results"].append({
-                    "status": "error",
-                    "from_wallet": trade.get("from_wallet"),
-                    "to_wallet": trade.get("to_wallet"),
-                    "amount": trade.get("amount"),
-                    "error": str(e)
-                })
-                
-                # Continue with the next trade
+                error_info = {"status": "error", "error": str(e), **trade}
+                if trade_result:
+                    error_info["api_response"] = trade_result.get("api_response")
+                results["trade_results"].append(error_info)
                 continue
-        
-        # Update final status
+
         results["end_time"] = time.time()
         results["duration"] = results["end_time"] - results["start_time"]
-        
         if results["trades_succeeded"] == results["total_trades"]:
             results["status"] = "success"
         elif results["trades_succeeded"] > 0:
             results["status"] = "partial_success"
         else:
             results["status"] = "failed"
-        
+
         logger.info(f"Volume run completed: {results['trades_succeeded']}/{results['total_trades']} trades succeeded in {results['duration']:.2f} seconds")
-        
         return results
-    
+
     def approve_gas_spike(self, run_id: str, instruction_index: int) -> Dict[str, Any]:
         """
         Approve a gas spike for a specific instruction.
@@ -3792,45 +3746,41 @@ class ApiClient:
             # Restore original timeout
             self.timeout = original_timeout
             
-    async def execute_volume_run(self, mother_wallet: str, child_wallets: List[str], 
-                               child_private_keys: List[str], trades: List[Dict[str, Any]], 
-                               token_address: str, verify_transfers: bool = True) -> Dict[str, Any]:
+    async def execute_volume_run(
+        self,
+        child_wallets: List[str],
+        child_private_keys: List[str],
+        trades: List[Dict[str, Any]],
+        token_address: str,
+        verify_transfers: bool = True,
+    ) -> Dict[str, Any]:
         """
         Execute a complete volume generation run with transaction verification.
-        
+        This method handles child-to-child transfers based on a provided schedule.
+
         Args:
-            mother_wallet: Mother wallet address
-            child_wallets: List of child wallet addresses
-            child_private_keys: List of child wallet private keys
-            trades: List of trade instructions with from_wallet, to_wallet, and amount
-            token_address: Token contract address
-            verify_transfers: Whether to verify transfers by checking balance changes
-            
+            child_wallets: List of child wallet addresses.
+            child_private_keys: List of corresponding child wallet private keys.
+            trades: List of trade instructions with 'from', 'to', and 'amount'.
+            token_address: Token contract address for the transfers.
+            verify_transfers: Whether to verify transfers by checking balance changes.
+
         Returns:
-            Status of volume generation operations
+            A dictionary summarizing the status of the volume generation run.
         """
         if self.use_mock:
             return {
                 "status": "success",
                 "trades_executed": len(trades),
                 "trades_succeeded": len(trades),
-                "trades_failed": 0
+                "trades_failed": 0,
             }
-        
+
         logger.info(f"Starting volume run with {len(trades)} trades for token {token_address}")
-        
-        # Generate a batch ID for this volume run
+
         batch_id = self.generate_batch_id()
-        
-        # Create a wallet map for easy lookup
-        wallet_map = {}
-        for i, wallet in enumerate(child_wallets):
-            wallet_map[wallet] = {
-                "private_key": child_private_keys[i] if i < len(child_private_keys) else None,
-                "index": i
-            }
-        
-        # Track results
+        private_key_map = dict(zip(child_wallets, child_private_keys))
+
         results = {
             "batch_id": batch_id,
             "status": "in_progress",
@@ -3843,68 +3793,42 @@ class ApiClient:
             "start_time": time.time(),
             "end_time": None,
             "duration": 0,
-            "verification_enabled": verify_transfers
+            "verification_enabled": verify_transfers,
         }
-        
-        # Execute each trade
+
         for i, trade in enumerate(trades):
+            trade_result = None
             try:
-                from_wallet = trade.get("from_wallet")
-                to_wallet = trade.get("to_wallet")
-                amount = trade.get("amount")
-                
-                # Skip invalid trades
-                if not from_wallet or not to_wallet or not amount:
-                    logger.warning(f"Skipping invalid trade {i+1}/{len(trades)}: {trade}")
+                from_wallet = trade.get("from_wallet") or trade.get("from")
+                to_wallet = trade.get("to_wallet") or trade.get("to")
+                amount = float(trade.get("amount", 0))
+
+                if not all([from_wallet, to_wallet, amount > 0]):
+                    logger.warning(f"Skipping invalid trade {i + 1}/{len(trades)}: {trade}")
                     results["trades_failed"] += 1
-                    results["trade_results"].append({
-                        "status": "skipped",
-                        "from_wallet": from_wallet,
-                        "to_wallet": to_wallet,
-                        "amount": amount,
-                        "error": "Invalid trade parameters"
-                    })
+                    results["trade_results"].append({"status": "skipped", "error": "Invalid trade parameters", **trade})
                     continue
-                
-                # Log the trade
-                logger.info(f"Executing trade {i+1}/{len(trades)}: {amount} SOL from {from_wallet} to {to_wallet}")
-                
+
+                logger.info(f"Executing trade {i + 1}/{len(trades)}: {amount} SOL from {from_wallet} to {to_wallet}")
+
                 # Get the private key for the sender wallet
-                sender_private_key = None
-                if from_wallet in wallet_map:
-                    sender_private_key = wallet_map[from_wallet]["private_key"]
+                sender_private_key = private_key_map.get(from_wallet)
                 
-                # If sender is mother wallet, use fund_child_wallets
-                if from_wallet == mother_wallet and to_wallet in child_wallets:
-                    # If mother wallet is sending to child wallet
-                    trade_result = await self.transfer_between_wallets(
-                        from_wallet=from_wallet,
-                        from_private_key=trade.get("private_key"),  # Use provided key if available
-                        to_wallet=to_wallet,
-                        amount=amount,
-                        token_address=token_address,
-                        verify_transfer=verify_transfers
-                    )
-                elif from_wallet in child_wallets and to_wallet == mother_wallet:
-                    # If child wallet is sending to mother wallet
-                    trade_result = await self.transfer_child_to_mother(
-                        child_wallet=from_wallet,
-                        child_private_key=sender_private_key,
-                        mother_wallet=to_wallet,
-                        amount=amount,
-                        token_address=token_address,
-                        verify_transfer=verify_transfers
-                    )
-                else:
-                    # If transfer is between child wallets
-                    trade_result = await self.transfer_between_wallets(
-                        from_wallet=from_wallet,
-                        from_private_key=sender_private_key,
-                        to_wallet=to_wallet,
-                        amount=amount,
-                        token_address=token_address,
-                        verify_transfer=verify_transfers
-                    )
+                if not sender_private_key:
+                    logger.error(f"Skipping trade: No private key found for sender wallet {from_wallet}")
+                    results["trades_failed"] += 1
+                    results["trade_results"].append({ "status": "failed", "error": "Missing sender private key", **trade})
+                    continue
+
+                # All volume generation transfers are child-to-child
+                trade_result = await self.transfer_between_wallets(
+                    from_wallet=from_wallet,
+                    from_private_key=sender_private_key,
+                    to_wallet=to_wallet,
+                    amount=amount,
+                    token_address=token_address,
+                    verify_transfer=verify_transfers
+                )
                 
                 # Update trade results
                 results["trades_executed"] += 1
@@ -3916,16 +3840,16 @@ class ApiClient:
                 # Add the result to the list
                 results["trade_results"].append(trade_result)
                 
-                # Add a small delay between trades
-                await asyncio.sleep(1)
+                # Add a small random delay between trades to appear more organic
+                await asyncio.sleep(random.uniform(1.0, 3.0))
                 
             except Exception as e:
-                logger.error(f"Error executing trade {i+1}/{len(trades)}: {str(e)}")
+                logger.error(f"Error executing trade {i + 1}/{len(trades)}: {str(e)}")
                 results["trades_failed"] += 1
                 results["trade_results"].append({
                     "status": "error",
-                    "from_wallet": trade.get("from_wallet"),
-                    "to_wallet": trade.get("to_wallet"),
+                    "from_wallet": trade.get("from_wallet") or trade.get("from"),
+                    "to_wallet": trade.get("to_wallet") or trade.get("to"),
                     "amount": trade.get("amount"),
                     "error": str(e)
                 })
@@ -4453,4 +4377,4 @@ class ApiClient:
             raise ApiClientError(f"Jupiter tokens request failed: {str(e)}")
 
 # Create a singleton instance
-api_client = ApiClient() 
+api_client = ApiClient()
