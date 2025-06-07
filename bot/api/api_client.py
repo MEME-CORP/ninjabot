@@ -4681,8 +4681,8 @@ class ApiClient:
                         slippage_bps=100  # 1% slippage
                     )
                     
-                    if not buy_quote.get("data"):
-                        logger.error(f"Failed to get buy quote for {token_address}")
+                    if not buy_quote.get("quoteResponse"):
+                        logger.error(f"Failed to get buy quote for {token_address}: {buy_quote.get('error', 'No quote response')}")
                         results["swaps_failed"] += 1
                         continue
                     
@@ -4725,7 +4725,7 @@ class ApiClient:
                                 slippage_bps=100  # 1% slippage
                             )
                             
-                            if sell_quote.get("data"):
+                            if sell_quote.get("quoteResponse"):
                                 # Execute sell swap
                                 sell_result = self.execute_jupiter_swap(
                                     user_wallet_private_key=wallet_private_key,
@@ -4740,7 +4740,7 @@ class ApiClient:
                                     logger.warning(f"❌ SELL failed for wallet {from_wallet}")
                                     results["swaps_failed"] += 1
                             else:
-                                logger.warning(f"❌ Failed to get sell quote for {token_address}")
+                                logger.warning(f"❌ Failed to get sell quote for {token_address}: {sell_quote.get('error', 'No quote response')}")
                                 results["swaps_failed"] += 1
                         else:
                             logger.warning(f"❌ No token balance found to sell for wallet {from_wallet}")
