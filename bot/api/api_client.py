@@ -3809,7 +3809,7 @@ class ApiClient:
                     results["trade_results"].append({"status": "skipped", "error": "Invalid trade parameters", **trade})
                     continue
 
-                logger.info(f"Executing trade {i + 1}/{len(trades)}: {amount} SOL from {from_wallet} to {to_wallet}")
+                logger.info(f"Executing trade {i + 1}/{len(trades)}: {amount:.6f} SOL from {from_wallet} to {to_wallet}")
 
                 # Get the private key for the sender wallet
                 sender_private_key = private_key_map.get(from_wallet)
@@ -4630,6 +4630,22 @@ class ApiClient:
         # SOL mint address for Jupiter swaps
         SOL_MINT = "So11111111111111111111111111111111111111112"
         
+        # Solana account minimums (in lamports)
+        SOL_ACCOUNT_RENT_EXEMPTION = 890880  # ~0.00089 SOL
+        TOKEN_ACCOUNT_RENT_EXEMPTION = 2039280  # ~0.002 SOL
+        TRANSACTION_FEE_BUFFER = 10000  # ~0.00001 SOL
+        PRIORITY_FEE_BUFFER = 150000  # ~0.00015 SOL
+        
+        # Total reserved amount per wallet (in lamports)
+        TOTAL_RESERVED_LAMPORTS = (
+            SOL_ACCOUNT_RENT_EXEMPTION + 
+            TOKEN_ACCOUNT_RENT_EXEMPTION + 
+            TRANSACTION_FEE_BUFFER + 
+            PRIORITY_FEE_BUFFER
+        )
+        
+        logger.info(f"Reserved amount per wallet: {TOTAL_RESERVED_LAMPORTS / 1_000_000_000:.6f} SOL")
+        
         batch_id = self.generate_batch_id()
         private_key_map = dict(zip(child_wallets, child_private_keys))
         
@@ -4650,12 +4666,40 @@ class ApiClient:
             "verification_enabled": verify_transfers,
         }
         
+        def calculate_safe_swap_amount(wallet_address: str, requested_sol: float) -> int:
+            """Calculate safe swap amount in lamports, accounting for rent and fees."""
+            try:
+                # Get current SOL balance
+                balance_info = self.check_balance(wallet_address)
+                current_sol = balance_info.get("balanceSol", 0)
+                current_lamports = int(current_sol * 1_000_000_000)
+                
+                # Calculate maximum usable amount
+                usable_lamports = current_lamports - TOTAL_RESERVED_LAMPORTS
+                
+                # Use smaller of requested amount or usable amount
+                requested_lamports = int(requested_sol * 1_000_000_000)
+                safe_lamports = min(requested_lamports, usable_lamports)
+                
+                # Ensure minimum swap amount (at least 10,000 lamports = 0.00001 SOL)
+                if safe_lamports < 10000:
+                    logger.warning(f"Wallet {wallet_address} has insufficient balance for swap")
+                    return 0
+                
+                logger.info(f"Wallet {wallet_address}: {current_sol:.6f} SOL available, "
+                           f"using {safe_lamports / 1_000_000_000:.6f} SOL for swap")
+                return safe_lamports
+                
+            except Exception as e:
+                logger.error(f"Error calculating safe swap amount for {wallet_address}: {str(e)}")
+                return 0
+        
         for i, trade in enumerate(trades):
             try:
                 from_wallet = trade.get("from_wallet") or trade.get("from")
-                amount_sol = float(trade.get("amount", 0))
+                requested_amount_sol = float(trade.get("amount", 0))
                 
-                if not all([from_wallet, amount_sol > 0]):
+                if not all([from_wallet, requested_amount_sol > 0]):
                     logger.warning(f"Skipping invalid trade {i + 1}/{len(trades)}: {trade}")
                     results["swaps_failed"] += 1
                     continue
@@ -4666,18 +4710,24 @@ class ApiClient:
                     results["swaps_failed"] += 1
                     continue
                 
+                # Calculate safe swap amount based on actual wallet balance
+                safe_amount_lamports = calculate_safe_swap_amount(from_wallet, requested_amount_sol)
+                if safe_amount_lamports <= 0:
+                    logger.error(f"Wallet {from_wallet} has insufficient balance for any swap")
+                    results["swaps_failed"] += 1
+                    continue
+                
+                actual_amount_sol = safe_amount_lamports / 1_000_000_000
+                
                 # Step 1: BUY - Swap SOL for target token
-                logger.info(f"Swap {i + 1}/{len(trades)}: BUY {amount_sol:.6f} SOL worth of {token_address[:8]}...")
+                logger.info(f"Swap {i + 1}/{len(trades)}: BUY {actual_amount_sol:.6f} SOL worth of {token_address[:8]}...")
                 
                 try:
-                    # Convert SOL amount to lamports for Jupiter (1 SOL = 1e9 lamports)
-                    amount_lamports = int(amount_sol * 1_000_000_000)
-                    
                     # Get quote for SOL -> Token
                     buy_quote = self.get_jupiter_quote(
                         input_mint=SOL_MINT,
                         output_mint=token_address,
-                        amount=amount_lamports,
+                        amount=safe_amount_lamports,
                         slippage_bps=100  # 1% slippage
                     )
                     
@@ -4695,8 +4745,8 @@ class ApiClient:
                     
                     if buy_result.get("status") == "success":
                         results["buys_succeeded"] += 1
-                        results["total_volume_sol"] += amount_sol
-                        logger.info(f"✅ BUY successful: {amount_sol:.6f} SOL -> {token_address[:8]}...")
+                        results["total_volume_sol"] += actual_amount_sol
+                        logger.info(f"✅ BUY successful: {actual_amount_sol:.6f} SOL -> {token_address[:8]}...")
                         
                         # Add delay before sell
                         await asyncio.sleep(random.uniform(2.0, 4.0))
@@ -4809,38 +4859,148 @@ class ApiClient:
             if token_list_response.status_code == 200:
                 tokens = token_list_response.json()
                 for token in tokens:
-                    if token.get('address') == token_address:
+                    if token.get("address") == token_address:
                         return {
-                            "success": True,
-                            "symbol": token.get('symbol', 'Unknown'),
-                            "name": token.get('name', 'Unknown Token'),
-                            "decimals": token.get('decimals', 9),
-                            "logoURI": token.get('logoURI'),
-                            "verified": True
+                            "status": "success",
+                            "token_info": {
+                                "address": token.get("address"),
+                                "symbol": token.get("symbol"),
+                                "name": token.get("name"),
+                                "decimals": token.get("decimals", 6),
+                                "logoURI": token.get("logoURI"),
+                                "tags": token.get("tags", []),
+                                "source": "jupiter"
+                            }
                         }
             
-            # Fallback: Use basic validation
-            if len(token_address) == 44:  # Standard Solana address length
-                return {
-                    "success": True,
-                    "symbol": "Unknown",
-                    "name": "Unknown SPL Token",
-                    "decimals": 9,
-                    "verified": False
+            # Fallback to basic token info
+            return {
+                "status": "success",
+                "token_info": {
+                    "address": token_address,
+                    "symbol": "UNKNOWN",
+                    "name": "Unknown Token",
+                    "decimals": 6,  # Most SPL tokens use 6 decimals
+                    "source": "fallback"
                 }
-            else:
-                return {
-                    "success": False,
-                    "error": "Invalid token address format"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting SPL token info: {str(e)}")
+            return {
+                "status": "error",
+                "error": str(e),
+                "token_info": None
+            }
+    
+    def check_spl_swap_readiness(self, child_wallets: List[str], min_swap_amount_sol: float = 0.0001) -> Dict[str, Any]:
+        """
+        Check if child wallets have sufficient balance for SPL swaps.
+        
+        Args:
+            child_wallets: List of child wallet addresses
+            min_swap_amount_sol: Minimum SOL amount needed per swap
+            
+        Returns:
+            Dictionary with readiness status and recommendations
+        """
+        # Solana account minimums (in lamports)
+        SOL_ACCOUNT_RENT_EXEMPTION = 890880  # ~0.00089 SOL
+        TOKEN_ACCOUNT_RENT_EXEMPTION = 2039280  # ~0.002 SOL
+        TRANSACTION_FEE_BUFFER = 10000  # ~0.00001 SOL
+        PRIORITY_FEE_BUFFER = 150000  # ~0.00015 SOL
+        
+        # Total reserved amount per wallet (in lamports)
+        TOTAL_RESERVED_LAMPORTS = (
+            SOL_ACCOUNT_RENT_EXEMPTION + 
+            TOKEN_ACCOUNT_RENT_EXEMPTION + 
+            TRANSACTION_FEE_BUFFER + 
+            PRIORITY_FEE_BUFFER
+        )
+        
+        min_required_lamports = TOTAL_RESERVED_LAMPORTS + int(min_swap_amount_sol * 1_000_000_000)
+        min_required_sol = min_required_lamports / 1_000_000_000
+        
+        results = {
+            "status": "checking",
+            "total_wallets": len(child_wallets),
+            "wallets_ready": 0,
+            "wallets_insufficient": 0,
+            "min_required_per_wallet": min_required_sol,
+            "reserved_amount_per_wallet": TOTAL_RESERVED_LAMPORTS / 1_000_000_000,
+            "wallet_details": [],
+            "recommendations": []
+        }
+        
+        insufficient_wallets = []
+        total_additional_needed = 0
+        
+        for wallet_address in child_wallets:
+            try:
+                # Get current SOL balance
+                balance_info = self.check_balance(wallet_address)
+                current_sol = balance_info.get("balanceSol", 0)
+                current_lamports = int(current_sol * 1_000_000_000)
+                
+                # Calculate usable amount for swaps
+                usable_lamports = current_lamports - TOTAL_RESERVED_LAMPORTS
+                usable_sol = max(0, usable_lamports / 1_000_000_000)
+                
+                is_ready = current_lamports >= min_required_lamports
+                
+                wallet_detail = {
+                    "address": wallet_address,
+                    "current_balance_sol": current_sol,
+                    "usable_for_swaps_sol": usable_sol,
+                    "is_ready": is_ready,
+                    "shortfall_sol": max(0, min_required_sol - current_sol)
                 }
                 
-        except Exception as e:
-            logger.error(f"Error getting SPL token info for {token_address}: {str(e)}")
-            return {
-                "success": False,
-                "error": str(e),
-                "token_address": token_address
-            }
+                results["wallet_details"].append(wallet_detail)
+                
+                if is_ready:
+                    results["wallets_ready"] += 1
+                else:
+                    results["wallets_insufficient"] += 1
+                    insufficient_wallets.append(wallet_address)
+                    total_additional_needed += wallet_detail["shortfall_sol"]
+                    
+            except Exception as e:
+                logger.error(f"Error checking balance for wallet {wallet_address}: {str(e)}")
+                results["wallets_insufficient"] += 1
+                insufficient_wallets.append(wallet_address)
+        
+        # Determine overall status
+        if results["wallets_ready"] == results["total_wallets"]:
+            results["status"] = "ready"
+        elif results["wallets_ready"] > 0:
+            results["status"] = "partially_ready"
+        else:
+            results["status"] = "not_ready"
+        
+        # Generate recommendations
+        if results["wallets_insufficient"] > 0:
+            results["recommendations"].append(
+                f"⚠️ {results['wallets_insufficient']} out of {results['total_wallets']} "
+                f"child wallets need more SOL for SPL swaps."
+            )
+            results["recommendations"].append(
+                f"💰 Each wallet needs at least {min_required_sol:.6f} SOL "
+                f"({TOTAL_RESERVED_LAMPORTS / 1_000_000_000:.6f} SOL for rent/fees + "
+                f"{min_swap_amount_sol:.6f} SOL for swaps)."
+            )
+            results["recommendations"].append(
+                f"📈 Total additional funding needed: {total_additional_needed:.6f} SOL"
+            )
+            results["recommendations"].append(
+                "🔧 Solution: Fund child wallets with more SOL before starting SPL volume generation."
+            )
+        else:
+            results["recommendations"].append(
+                "✅ All child wallets have sufficient balance for SPL swaps!"
+            )
+        
+        return results
 
 # Create a singleton instance
 api_client = ApiClient()

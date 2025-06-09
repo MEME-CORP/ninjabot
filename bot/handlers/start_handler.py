@@ -794,58 +794,80 @@ async def generate_preview(message: telegram.Message, context: CallbackContext) 
             parse_mode=ParseMode.MARKDOWN
         )
 
-        # Check if child wallets are already funded
+        # Check if child wallets are ready for SPL swaps
         await context.bot.send_message(
             chat_id=user.id,
-            text="🔍 Checking if child wallets are already funded..."
+            text="🔍 Checking if child wallets are ready for SPL swaps..."
         )
 
-        # Calculate amount per child wallet
-        amount_per_wallet = total_volume / len(child_wallets) if child_wallets else 0
+        # Calculate minimum swap amount (use a portion of total volume)
+        min_swap_amount = total_volume / (len(child_wallets) * 10) if child_wallets else 0.0001
+        
+        # Check SPL swap readiness
+        readiness_check = api_client.check_spl_swap_readiness(
+            child_wallets=child_wallets,
+            min_swap_amount_sol=min_swap_amount
+        )
 
-        # Check child wallet funding status
-        funding_status = await check_child_wallets_funding_status(user.id, amount_per_wallet)
+        # Format readiness report
+        readiness_message = (
+            f"📊 **SPL Swap Readiness Report**\n\n"
+            f"**Status:** {readiness_check['status'].replace('_', ' ').title()}\n"
+            f"**Ready Wallets:** {readiness_check['wallets_ready']}/{readiness_check['total_wallets']}\n"
+            f"**Min Required per Wallet:** {readiness_check['min_required_per_wallet']:.6f} SOL\n"
+            f"**Reserved for Fees/Rent:** {readiness_check['reserved_amount_per_wallet']:.6f} SOL\n\n"
+        )
+        
+        for recommendation in readiness_check['recommendations']:
+            readiness_message += f"{recommendation}\n"
 
-        if funding_status.get("error"):
-            logger.warning(f"Error checking child wallet funding status for user {user.id}: {funding_status['error']}")
-            await context.bot.send_message(
-                chat_id=user.id,
-                text="⚠️ Could not verify child wallet balances. Proceeding with mother wallet funding check."
-            )
-            session_manager.update_session_value(user.id, "child_wallets_need_funding", True)
-        elif funding_status.get("all_funded", False):
-            logger.info(f"All child wallets already sufficiently funded for user {user.id}")
-            await context.bot.send_message(
-                chat_id=user.id,
-                text=f"✅ Child wallets are already funded! Found {funding_status['funded_wallets']}/{funding_status['total_wallets']} wallets with sufficient balance."
-            )
-            session_manager.update_session_value(user.id, "child_wallets_need_funding", False)
-        else:
-            logger.info(f"Partial or no funding for child wallets for user {user.id}")
-            await context.bot.send_message(
-                chat_id=user.id,
-                text=f"📊 Child Wallet Status: {funding_status.get('funded_wallets', 0)}/{funding_status.get('total_wallets', 0)} funded. Please fund the mother wallet."
-            )
-            session_manager.update_session_value(user.id, "child_wallets_need_funding", True)
-            
-        session_manager.update_session_value(user.id, "child_funding_status", funding_status)
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=readiness_message,
+            parse_mode=ParseMode.MARKDOWN
+        )
 
-        if funding_status.get("all_funded", False):
+        # Store readiness info in session
+        session_manager.update_session_value(user.id, "child_wallets_need_funding", readiness_check['status'] != 'ready')
+        session_manager.update_session_value(user.id, "spl_readiness_check", readiness_check)
+
+        if readiness_check['status'] == 'ready':
             await context.bot.send_message(
                 chat_id=user.id,
-                text="🚀 Ready to start volume generation!",
+                text="🚀 All wallets ready for SPL volume generation!",
                 reply_markup=InlineKeyboardMarkup([
-                    [build_button("🚀 Start Volume Generation", "start_execution")],
+                    [build_button("🚀 Start SPL Volume Generation", "start_execution")],
+                    [build_button("💸 Return All Funds to Mother", "trigger_return_all_funds")]
+                ])
+            )
+        elif readiness_check['status'] == 'partially_ready':
+            await context.bot.send_message(
+                chat_id=user.id,
+                text="⚠️ Some wallets are ready, but for best results fund all wallets.",
+                reply_markup=InlineKeyboardMarkup([
+                    [build_button("🚀 Start with Ready Wallets", "start_execution")],
+                    [build_button("⏳ Fund More Wallets First", "fund_more_wallets")],
                     [build_button("💸 Return All Funds to Mother", "trigger_return_all_funds")]
                 ])
             )
         else:
+            # Calculate total funding needed
+            total_needed = readiness_check['total_wallets'] * readiness_check['min_required_per_wallet']
             await context.bot.send_message(
                 chat_id=user.id,
-                text="Please fund the mother wallet now. I'll check the balance every few seconds.",
-                reply_markup=InlineKeyboardMarkup([[build_button("Check Balance Now", "check_balance")]])
+                text=(
+                    f"💰 **Funding Required for SPL Swaps**\n\n"
+                    f"Child wallets need more SOL for SPL trading.\n"
+                    f"**Total needed:** {total_needed:.6f} SOL\n\n"
+                    f"Please fund the mother wallet with sufficient SOL, "
+                    f"then fund the child wallets."
+                ),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([
+                    [build_button("💰 Fund Child Wallets", "fund_child_wallets")],
+                    [build_button("🔄 Check Readiness Again", "check_spl_readiness")]
+                ])
             )
-            await start_balance_polling(user.id, context)
 
     except ApiClientError as e:
         logger.error(f"Error generating schedule: {str(e)}", extra={"user_id": user.id})
@@ -1553,6 +1575,201 @@ async def finish_and_restart(update: Update, context: CallbackContext) -> int:
     return ConversationHandler.END
 
 
+async def fund_child_wallets_handler(update: Update, context: CallbackContext) -> int:
+    """Fund child wallets with the required amount for SPL swaps."""
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+
+    # Get session data
+    mother_wallet = session_manager.get_session_value(user.id, "mother_wallet")
+    mother_private_key = session_manager.get_session_value(user.id, "mother_private_key")
+    child_wallets = session_manager.get_session_value(user.id, "child_wallets")
+    total_volume = session_manager.get_session_value(user.id, "total_volume")
+    spl_readiness_check = session_manager.get_session_value(user.id, "spl_readiness_check", {})
+
+    if not all([mother_wallet, mother_private_key, child_wallets, total_volume]):
+        await query.edit_message_text(
+            format_error_message("Session data missing. Please restart with /start.")
+        )
+        return ConversationHandler.END
+
+    # Calculate funding amount per wallet
+    min_required_per_wallet = spl_readiness_check.get('min_required_per_wallet', 0.0035)
+    
+    await query.edit_message_text(
+        f"💰 **Funding Child Wallets**\n\n"
+        f"Transferring {min_required_per_wallet:.6f} SOL to each child wallet...",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+    try:
+        # Fund child wallets using the existing API method
+        funding_result = api_client.fund_child_wallets(
+            mother_wallet=mother_wallet,
+            child_wallets=child_wallets,
+            token_address="So11111111111111111111111111111111111111112",  # SOL mint
+            amount_per_wallet=min_required_per_wallet,
+            mother_private_key=mother_private_key,
+            verify_transfers=True
+        )
+
+        successful_transfers = funding_result.get("successful_transfers", 0)
+        failed_transfers = funding_result.get("failed_transfers", 0)
+        total_transfers = successful_transfers + failed_transfers
+
+        logger.info(
+            f"Child wallet funding completed for user {user.id}",
+            extra={
+                "user_id": user.id,
+                "successful_transfers": successful_transfers,
+                "failed_transfers": failed_transfers,
+                "amount_per_wallet": min_required_per_wallet
+            }
+        )
+
+        # Show funding results
+        results_message = (
+            f"💰 **Child Wallet Funding Complete**\n\n"
+            f"✅ Successful: {successful_transfers}/{total_transfers}\n"
+            f"❌ Failed: {failed_transfers}/{total_transfers}\n"
+            f"💵 Amount per wallet: {min_required_per_wallet:.6f} SOL\n\n"
+        )
+
+        if failed_transfers == 0:
+            results_message += "🎉 All wallets funded successfully! Ready for SPL volume generation."
+            keyboard = [
+                [build_button("🚀 Start SPL Volume Generation", "start_execution")],
+                [build_button("🔄 Check Readiness Again", "check_spl_readiness")]
+            ]
+        else:
+            results_message += f"⚠️ {failed_transfers} wallet(s) failed to fund. You can retry or proceed with ready wallets."
+            keyboard = [
+                [build_button("🔄 Retry Funding", "fund_child_wallets")],
+                [build_button("🚀 Start with Ready Wallets", "start_execution")],
+                [build_button("🔄 Check Readiness", "check_spl_readiness")]
+            ]
+
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=results_message,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+        # Update session to indicate funding completed
+        session_manager.update_session_value(user.id, "child_wallets_need_funding", failed_transfers > 0)
+
+        return ConversationState.PREVIEW_SCHEDULE
+
+    except ApiClientError as e:
+        logger.error(f"Error funding child wallets: {str(e)}", extra={"user_id": user.id})
+        
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=format_error_message(f"Failed to fund child wallets: {str(e)}"),
+            reply_markup=InlineKeyboardMarkup([
+                [build_button("🔄 Try Again", "fund_child_wallets")],
+                [build_button("🔄 Check Readiness", "check_spl_readiness")]
+            ])
+        )
+        
+        return ConversationState.PREVIEW_SCHEDULE
+
+
+async def check_spl_readiness_handler(update: Update, context: CallbackContext) -> int:
+    """Re-check SPL swap readiness for child wallets."""
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+
+    # Get session data
+    child_wallets = session_manager.get_session_value(user.id, "child_wallets")
+    total_volume = session_manager.get_session_value(user.id, "total_volume")
+
+    if not all([child_wallets, total_volume]):
+        await query.edit_message_text(
+            format_error_message("Session data missing. Please restart with /start.")
+        )
+        return ConversationHandler.END
+
+    await query.edit_message_text("🔍 Rechecking SPL swap readiness...")
+
+    try:
+        # Calculate minimum swap amount
+        min_swap_amount = total_volume / (len(child_wallets) * 10) if child_wallets else 0.0001
+        
+        # Check SPL swap readiness
+        readiness_check = api_client.check_spl_swap_readiness(
+            child_wallets=child_wallets,
+            min_swap_amount_sol=min_swap_amount
+        )
+
+        # Update session with new readiness data
+        session_manager.update_session_value(user.id, "spl_readiness_check", readiness_check)
+        session_manager.update_session_value(user.id, "child_wallets_need_funding", readiness_check['status'] != 'ready')
+
+        # Format readiness report
+        readiness_message = (
+            f"📊 **Updated SPL Swap Readiness Report**\n\n"
+            f"**Status:** {readiness_check['status'].replace('_', ' ').title()}\n"
+            f"**Ready Wallets:** {readiness_check['wallets_ready']}/{readiness_check['total_wallets']}\n"
+            f"**Min Required per Wallet:** {readiness_check['min_required_per_wallet']:.6f} SOL\n"
+            f"**Reserved for Fees/Rent:** {readiness_check['reserved_amount_per_wallet']:.6f} SOL\n\n"
+        )
+        
+        for recommendation in readiness_check['recommendations']:
+            readiness_message += f"{recommendation}\n"
+
+        # Show appropriate buttons based on readiness status
+        if readiness_check['status'] == 'ready':
+            keyboard = [
+                [build_button("🚀 Start SPL Volume Generation", "start_execution")],
+                [build_button("💸 Return All Funds to Mother", "trigger_return_all_funds")]
+            ]
+            readiness_message += "\n🚀 All wallets ready for SPL volume generation!"
+        elif readiness_check['status'] == 'partially_ready':
+            keyboard = [
+                [build_button("🚀 Start with Ready Wallets", "start_execution")],
+                [build_button("💰 Fund Remaining Wallets", "fund_child_wallets")],
+                [build_button("💸 Return All Funds", "trigger_return_all_funds")]
+            ]
+        else:
+            keyboard = [
+                [build_button("💰 Fund Child Wallets", "fund_child_wallets")],
+                [build_button("🔄 Check Again", "check_spl_readiness")],
+                [build_button("💸 Return All Funds", "trigger_return_all_funds")]
+            ]
+
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=readiness_message,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+        return ConversationState.PREVIEW_SCHEDULE
+
+    except ApiClientError as e:
+        logger.error(f"Error checking SPL readiness: {str(e)}", extra={"user_id": user.id})
+        
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=format_error_message(f"Failed to check readiness: {str(e)}"),
+            reply_markup=InlineKeyboardMarkup([
+                [build_button("🔄 Try Again", "check_spl_readiness")]
+            ])
+        )
+        
+        return ConversationState.PREVIEW_SCHEDULE
+
+
+async def fund_more_wallets_handler(update: Update, context: CallbackContext) -> int:
+    """Handler for funding more wallets when partially ready."""
+    # This is essentially the same as fund_child_wallets_handler
+    return await fund_child_wallets_handler(update, context)
+
+
 def register_start_handler(application):
     """Register the start command handler."""
     conv_handler = ConversationHandler(
@@ -1572,12 +1789,17 @@ def register_start_handler(application):
                 CallbackQueryHandler(check_balance, pattern=r"^check_balance$"),
                 CallbackQueryHandler(start_execution, pattern=r"^start_execution$"),
                 CallbackQueryHandler(trigger_return_all_funds, pattern=r"^trigger_return_all_funds$"),
-                CallbackQueryHandler(regenerate_preview, pattern=r"^regenerate_preview$")
+                CallbackQueryHandler(regenerate_preview, pattern=r"^regenerate_preview$"),
+                CallbackQueryHandler(fund_child_wallets_handler, pattern=r"^fund_child_wallets$"),
+                CallbackQueryHandler(check_spl_readiness_handler, pattern=r"^check_spl_readiness$"),
+                CallbackQueryHandler(fund_more_wallets_handler, pattern=r"^fund_more_wallets$")
             ],
             ConversationState.AWAIT_FUNDING: [
                 CallbackQueryHandler(check_balance, pattern=r"^check_balance$"),
                 CallbackQueryHandler(start_execution, pattern=r"^start_execution$"),
-                CallbackQueryHandler(trigger_return_all_funds, pattern=r"^trigger_return_all_funds$")
+                CallbackQueryHandler(trigger_return_all_funds, pattern=r"^trigger_return_all_funds$"),
+                CallbackQueryHandler(fund_child_wallets_handler, pattern=r"^fund_child_wallets$"),
+                CallbackQueryHandler(check_spl_readiness_handler, pattern=r"^check_spl_readiness$")
             ],
             ConversationState.CHILD_BALANCES_OVERVIEW: [
                 CallbackQueryHandler(trigger_volume_generation, pattern=r"^trigger_volume_generation$"),
