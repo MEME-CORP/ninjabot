@@ -38,7 +38,8 @@ from bot.utils.message_utils import (
     format_child_balances_overview,
     format_return_funds_summary,
     format_child_wallets_funding_status,
-    format_return_funds_progress
+    format_return_funds_progress,
+    format_volume_generation_insufficient_balance_message
 )
 from bot.api.api_client import api_client, ApiClientError
 from bot.events.event_system import event_system, TransactionConfirmedEvent, TransactionFailedEvent
@@ -795,79 +796,84 @@ async def generate_preview(message: telegram.Message, context: CallbackContext) 
         )
 
         # Check if child wallets are ready for SPL swaps
-        await context.bot.send_message(
+        loading_spl_check = await context.bot.send_message(
             chat_id=user.id,
             text="🔍 Checking if child wallets are ready for SPL swaps..."
         )
-
-        # Calculate minimum swap amount (use a portion of total volume)
-        min_swap_amount = total_volume / (len(child_wallets) * 10) if child_wallets else 0.0001
         
-        # Check SPL swap readiness
-        readiness_check = api_client.check_spl_swap_readiness(
-            child_wallets=child_wallets,
-            min_swap_amount_sol=min_swap_amount
-        )
-
-        # Format readiness report
-        readiness_message = (
-            f"📊 **SPL Swap Readiness Report**\n\n"
-            f"**Status:** {readiness_check['status'].replace('_', ' ').title()}\n"
-            f"**Ready Wallets:** {readiness_check['wallets_ready']}/{readiness_check['total_wallets']}\n"
-            f"**Min Required per Wallet:** {readiness_check['min_required_per_wallet']:.6f} SOL\n"
-            f"**Reserved for Fees/Rent:** {readiness_check['reserved_amount_per_wallet']:.6f} SOL\n\n"
-        )
-        
-        for recommendation in readiness_check['recommendations']:
-            readiness_message += f"{recommendation}\n"
-
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=readiness_message,
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-        # Store readiness info in session
-        session_manager.update_session_value(user.id, "child_wallets_need_funding", readiness_check['status'] != 'ready')
-        session_manager.update_session_value(user.id, "spl_readiness_check", readiness_check)
-
-        if readiness_check['status'] == 'ready':
-            await context.bot.send_message(
-                chat_id=user.id,
-                text="🚀 All wallets ready for SPL volume generation!",
-                reply_markup=InlineKeyboardMarkup([
-                    [build_button("🚀 Start SPL Volume Generation", "start_execution")],
-                    [build_button("💸 Return All Funds to Mother", "trigger_return_all_funds")]
-                ])
+        try:
+            # Calculate minimum swap amount based on total volume
+            min_swap_amount = total_volume / (len(child_wallets) * 10) if child_wallets else 0.0001
+            
+            # Check SPL swap readiness
+            readiness_check = api_client.check_spl_swap_readiness(
+                child_wallets=child_wallets,
+                min_swap_amount_sol=min_swap_amount
             )
-        elif readiness_check['status'] == 'partially_ready':
-            await context.bot.send_message(
-                chat_id=user.id,
-                text="⚠️ Some wallets are ready, but for best results fund all wallets.",
-                reply_markup=InlineKeyboardMarkup([
-                    [build_button("🚀 Start with Ready Wallets", "start_execution")],
-                    [build_button("⏳ Fund More Wallets First", "fund_more_wallets")],
-                    [build_button("💸 Return All Funds to Mother", "trigger_return_all_funds")]
-                ])
+            
+            # Store readiness check in session for later use
+            session_manager.update_session_value(user.id, "spl_readiness_check", readiness_check)
+            session_manager.update_session_value(user.id, "child_wallets_need_funding", readiness_check['status'] != 'ready')
+            
+            if readiness_check['status'] == 'ready':
+                # All wallets ready - show positive message and continue
+                await loading_spl_check.edit_text(
+                    f"✅ **All Child Wallets Ready**\n\n"
+                    f"All {readiness_check['total_wallets']} child wallets have sufficient balance for SPL swaps.\n"
+                    f"Ready to generate {total_volume} SOL worth of volume!",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                
+                # Show action button to start volume generation
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text="🚀 Ready to start SPL volume generation!",
+                    reply_markup=InlineKeyboardMarkup([
+                        [build_button("🚀 Start SPL Volume Generation", "start_execution")],
+                        [build_button("💸 Return All Funds to Mother", "trigger_return_all_funds")]
+                    ])
+                )
+            else:
+                # Some wallets need funding - show detailed message with solutions
+                insufficient_message = format_volume_generation_insufficient_balance_message(
+                    total_wallets=readiness_check['total_wallets'],
+                    wallets_with_insufficient_balance=readiness_check['wallets_insufficient'],
+                    required_per_wallet=readiness_check['min_required_per_wallet'],
+                    reserved_per_wallet=readiness_check['reserved_amount_per_wallet'],
+                    min_swap_amount=min_swap_amount
+                )
+                
+                await loading_spl_check.edit_text(insufficient_message, parse_mode=ParseMode.MARKDOWN)
+                
+                # Show appropriate action buttons based on readiness status
+                if readiness_check['status'] == 'partially_ready':
+                    keyboard = [
+                        [build_button("💰 Fund Remaining Wallets", "fund_child_wallets")],
+                        [build_button("🚀 Start with Ready Wallets", "start_execution")],
+                        [build_button("🔄 Check Again", "check_spl_readiness")]
+                    ]
+                else:
+                    keyboard = [
+                        [build_button("💰 Fund Child Wallets", "fund_child_wallets")],
+                        [build_button("🔄 Check Again", "check_spl_readiness")],
+                        [build_button("💸 Return All Funds", "trigger_return_all_funds")]
+                    ]
+                
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text="What would you like to do?",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                
+                return ConversationState.PREVIEW_SCHEDULE
+                
+        except Exception as e:
+            logger.error(f"Error checking SPL readiness: {str(e)}", extra={"user_id": user.id})
+            await loading_spl_check.edit_text(
+                format_error_message(f"Failed to check wallet readiness: {str(e)}")
             )
-        else:
-            # Calculate total funding needed
-            total_needed = readiness_check['total_wallets'] * readiness_check['min_required_per_wallet']
-            await context.bot.send_message(
-                chat_id=user.id,
-                text=(
-                    f"💰 **Funding Required for SPL Swaps**\n\n"
-                    f"Child wallets need more SOL for SPL trading.\n"
-                    f"**Total needed:** {total_needed:.6f} SOL\n\n"
-                    f"Please fund the mother wallet with sufficient SOL, "
-                    f"then fund the child wallets."
-                ),
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=InlineKeyboardMarkup([
-                    [build_button("💰 Fund Child Wallets", "fund_child_wallets")],
-                    [build_button("🔄 Check Readiness Again", "check_spl_readiness")]
-                ])
-            )
+
+
 
     except ApiClientError as e:
         logger.error(f"Error generating schedule: {str(e)}", extra={"user_id": user.id})

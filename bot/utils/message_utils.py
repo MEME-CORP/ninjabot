@@ -686,3 +686,47 @@ def format_spl_token_validation_message(token_address: str, is_valid: bool, toke
     message += f"\n🔄 Ready to generate volume for this SPL token!"
     
     return message
+
+def format_volume_generation_insufficient_balance_message(
+    total_wallets: int,
+    wallets_with_insufficient_balance: int,
+    required_per_wallet: float,
+    reserved_per_wallet: float,
+    min_swap_amount: float
+) -> str:
+    """
+    Format message for insufficient balance during volume generation.
+    
+    Args:
+        total_wallets: Total number of child wallets
+        wallets_with_insufficient_balance: Number of wallets with insufficient balance
+        required_per_wallet: Total SOL required per wallet
+        reserved_per_wallet: SOL reserved for rent/fees per wallet
+        min_swap_amount: Minimum SOL amount needed for swaps
+        
+    Returns:
+        Formatted insufficient balance message
+    """
+    
+    message = f"⚠️ **Insufficient Balance for Volume Generation**\n\n"
+    
+    message += f"**Status**: {wallets_with_insufficient_balance} out of {total_wallets} child wallets have insufficient balance for SPL swaps.\n\n"
+    
+    message += f"**Balance Requirements per Wallet**:\n"
+    message += f"• **Total Required**: {required_per_wallet:.6f} SOL\n"
+    message += f"• **Reserved for Rent/Fees**: {reserved_per_wallet:.6f} SOL\n"
+    message += f"• **Available for Swaps**: {min_swap_amount:.6f} SOL\n\n"
+    
+    message += f"**What this means**:\n"
+    message += f"• Each wallet needs at least {required_per_wallet:.6f} SOL to perform volume generation\n"
+    message += f"• {reserved_per_wallet:.6f} SOL is reserved for account rent and transaction fees\n"
+    message += f"• The remaining {min_swap_amount:.6f} SOL is used for token swaps\n\n"
+    
+    message += f"**Solutions**:\n"
+    message += f"• **Fund child wallets** with more SOL (recommended)\n"
+    message += f"• **Reduce volume amount** to match available balance\n"
+    message += f"• **Check wallet balances** to ensure funding was successful\n\n"
+    
+    message += f"💡 **Tip**: Use 'Fund Child Wallets' option to add more SOL to your child wallets."
+    
+    return message

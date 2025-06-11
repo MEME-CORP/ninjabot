@@ -865,7 +865,11 @@ class ApiClient:
             fee = total_volume * SERVICE_FEE_RATE
             remaining_volume = total_volume - fee
             
-            # Create random transfers
+            # Calculate realistic per-wallet spending limit based on typical child wallet balance
+            # Assume child wallets have ~0.003 SOL with ~0.0014 SOL usable after reserves
+            max_per_wallet_spend = 0.0013  # Conservative limit per wallet per trade
+            
+            # Create random transfers with realistic amounts
             transfers = []
             total_transferred = 0
             num_transfers = len(child_wallets) * 2  # Each wallet does ~2 transfers
@@ -874,12 +878,13 @@ class ApiClient:
                 # Determine a random amount for this transfer
                 max_possible = remaining_volume - total_transferred
                 if num_transfers - i > 1:
-                    # Leave some for remaining transfers
-                    max_amount = max_possible * 0.8
-                    amount = random.uniform(max_possible * 0.01, max_amount)
+                    # Leave some for remaining transfers, but respect wallet limits
+                    max_amount = min(max_possible * 0.8, max_per_wallet_spend)
+                    min_amount = min(max_possible * 0.01, max_per_wallet_spend * 0.1)
+                    amount = random.uniform(min_amount, max_amount)
                 else:
-                    # Last transfer, use remaining amount
-                    amount = max_possible
+                    # Last transfer, use remaining amount but cap at wallet limit
+                    amount = min(max_possible, max_per_wallet_spend)
                 
                 total_transferred += amount
                 
@@ -4630,11 +4635,11 @@ class ApiClient:
         # SOL mint address for Jupiter swaps
         SOL_MINT = "So11111111111111111111111111111111111111112"
         
-        # Solana account minimums (in lamports)
-        SOL_ACCOUNT_RENT_EXEMPTION = 890880  # ~0.00089 SOL
-        TOKEN_ACCOUNT_RENT_EXEMPTION = 2039280  # ~0.002 SOL
-        TRANSACTION_FEE_BUFFER = 10000  # ~0.00001 SOL
-        PRIORITY_FEE_BUFFER = 150000  # ~0.00015 SOL
+        # Solana account minimums (in lamports) - REAL WORLD VALUES based on actual logs
+        SOL_ACCOUNT_RENT_EXEMPTION = 890880      # ~0.00089 SOL (actual rent exemption for SOL account)
+        TOKEN_ACCOUNT_RENT_EXEMPTION = 2039280   # ~0.00204 SOL (ACTUAL from logs: "need 2039280")
+        TRANSACTION_FEE_BUFFER = 20000           # ~0.00002 SOL (increased buffer for transaction fees)
+        PRIORITY_FEE_BUFFER = 100000             # ~0.00010 SOL (increased for higher priority fees)
         
         # Total reserved amount per wallet (in lamports)
         TOTAL_RESERVED_LAMPORTS = (
@@ -4671,7 +4676,18 @@ class ApiClient:
             try:
                 # Get current SOL balance
                 balance_info = self.check_balance(wallet_address)
-                current_sol = balance_info.get("balanceSol", 0)
+                
+                # Extract SOL balance from the formatted response
+                current_sol = 0
+                if 'balances' in balance_info:
+                    for balance in balance_info['balances']:
+                        if balance.get('symbol') == 'SOL' or balance.get('token') == "So11111111111111111111111111111111111111112":
+                            current_sol = balance.get('amount', 0)
+                            break
+                else:
+                    # Fallback: try direct extraction for backward compatibility
+                    current_sol = balance_info.get("balanceSol", 0)
+                
                 current_lamports = int(current_sol * 1_000_000_000)
                 
                 # Calculate maximum usable amount
@@ -4681,9 +4697,17 @@ class ApiClient:
                 requested_lamports = int(requested_sol * 1_000_000_000)
                 safe_lamports = min(requested_lamports, usable_lamports)
                 
+                # Detailed debugging
+                logger.info(f"DEBUG - Wallet {wallet_address[:8]}...")
+                logger.info(f"  Current balance: {current_sol:.6f} SOL ({current_lamports} lamports)")
+                logger.info(f"  Reserved amount: {TOTAL_RESERVED_LAMPORTS / 1_000_000_000:.6f} SOL ({TOTAL_RESERVED_LAMPORTS} lamports)")
+                logger.info(f"  Usable amount: {usable_lamports / 1_000_000_000:.6f} SOL ({usable_lamports} lamports)")
+                logger.info(f"  Requested amount: {requested_sol:.6f} SOL ({requested_lamports} lamports)")
+                logger.info(f"  Safe amount: {safe_lamports / 1_000_000_000:.6f} SOL ({safe_lamports} lamports)")
+                
                 # Ensure minimum swap amount (at least 10,000 lamports = 0.00001 SOL)
                 if safe_lamports < 10000:
-                    logger.warning(f"Wallet {wallet_address} has insufficient balance for swap")
+                    logger.warning(f"Wallet {wallet_address} has insufficient balance for swap: safe_lamports={safe_lamports} < 10000")
                     return 0
                 
                 logger.info(f"Wallet {wallet_address}: {current_sol:.6f} SOL available, "
@@ -4904,11 +4928,11 @@ class ApiClient:
         Returns:
             Dictionary with readiness status and recommendations
         """
-        # Solana account minimums (in lamports)
-        SOL_ACCOUNT_RENT_EXEMPTION = 890880  # ~0.00089 SOL
-        TOKEN_ACCOUNT_RENT_EXEMPTION = 2039280  # ~0.002 SOL
-        TRANSACTION_FEE_BUFFER = 10000  # ~0.00001 SOL
-        PRIORITY_FEE_BUFFER = 150000  # ~0.00015 SOL
+        # Solana account minimums (in lamports) - REAL WORLD VALUES based on actual logs
+        SOL_ACCOUNT_RENT_EXEMPTION = 890880      # ~0.00089 SOL (actual rent exemption for SOL account)
+        TOKEN_ACCOUNT_RENT_EXEMPTION = 2039280   # ~0.00204 SOL (ACTUAL from logs: "need 2039280")
+        TRANSACTION_FEE_BUFFER = 20000           # ~0.00002 SOL (increased buffer for transaction fees)
+        PRIORITY_FEE_BUFFER = 100000             # ~0.00010 SOL (increased for higher priority fees)
         
         # Total reserved amount per wallet (in lamports)
         TOTAL_RESERVED_LAMPORTS = (
@@ -4939,7 +4963,17 @@ class ApiClient:
             try:
                 # Get current SOL balance
                 balance_info = self.check_balance(wallet_address)
-                current_sol = balance_info.get("balanceSol", 0)
+                
+                # Extract SOL balance from the formatted response
+                current_sol = 0
+                if 'balances' in balance_info:
+                    for balance in balance_info['balances']:
+                        if balance.get('symbol') == 'SOL' or balance.get('token') == "So11111111111111111111111111111111111111112":
+                            current_sol = balance.get('amount', 0)
+                            break
+                else:
+                    # Fallback: try direct extraction for backward compatibility
+                    current_sol = balance_info.get("balanceSol", 0)
                 current_lamports = int(current_sol * 1_000_000_000)
                 
                 # Calculate usable amount for swaps
