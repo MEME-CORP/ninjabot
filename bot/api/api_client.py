@@ -2141,6 +2141,7 @@ class ApiClient:
     def check_sufficient_balance(self, mother_wallet: str, token_address: str, required_volume: float) -> Dict[str, Any]:
         """
         Check if the mother wallet has sufficient balance for the required volume.
+        Enhanced with safety buffer for complex transactions.
         
         Args:
             mother_wallet: Mother wallet address
@@ -2190,18 +2191,32 @@ class ApiClient:
             # Log extracted values for debugging
             logger.info(f"Extracted balance: {current_balance} {token_symbol}")
             
-            # Determine if the balance is sufficient
-            sufficient = current_balance >= required_volume
+            # Enhanced safety buffer for complex transactions
+            # Add 10% buffer plus 0.005 SOL minimum for complex Jupiter operations
+            if token_symbol == "SOL":
+                safety_buffer = max(required_volume * 0.1, 0.005)  # 10% buffer or 0.005 SOL minimum
+                adjusted_required_volume = required_volume + safety_buffer
+                logger.info(f"Applied safety buffer: {safety_buffer:.6f} SOL (total required: {adjusted_required_volume:.6f} SOL)")
+            else:
+                # For other tokens, use 5% buffer
+                safety_buffer = required_volume * 0.05
+                adjusted_required_volume = required_volume + safety_buffer
+                logger.info(f"Applied safety buffer: {safety_buffer:.6f} {token_symbol} (total required: {adjusted_required_volume:.6f} {token_symbol})")
+            
+            # Determine if the balance is sufficient (using adjusted volume)
+            sufficient = current_balance >= adjusted_required_volume
             
             if sufficient:
-                logger.info(f"Wallet has sufficient balance: {current_balance} {token_symbol}")
+                logger.info(f"Wallet has sufficient balance with safety buffer: {current_balance} >= {adjusted_required_volume} {token_symbol}")
             else:
-                logger.info(f"Wallet balance insufficient: {current_balance}/{required_volume} {token_symbol}")
+                logger.info(f"Wallet balance insufficient (with safety buffer): {current_balance}/{adjusted_required_volume} {token_symbol}")
             
             return {
                 'sufficient': sufficient,
                 'current_balance': current_balance,
-                'required_balance': required_volume,
+                'required_balance': required_volume,  # Return original required amount
+                'adjusted_required_balance': adjusted_required_volume,  # Include buffered amount
+                'safety_buffer': safety_buffer,
                 'token_symbol': token_symbol
             }
             
@@ -2211,6 +2226,8 @@ class ApiClient:
                 'sufficient': False,
                 'current_balance': 0,
                 'required_balance': required_volume,
+                'adjusted_required_balance': required_volume,
+                'safety_buffer': 0,
                 'token_symbol': 'tokens',
                 'error': str(e)
             }
@@ -4645,8 +4662,8 @@ class ApiClient:
             # Solana account minimums (in lamports) - REAL WORLD VALUES based on actual logs
             SOL_ACCOUNT_RENT_EXEMPTION = 890880      # ~0.00089 SOL (actual rent exemption for SOL account)
             TOKEN_ACCOUNT_RENT_EXEMPTION = 2039280   # ~0.00204 SOL (ACTUAL from logs: "need 2039280")
-            TRANSACTION_FEE_BUFFER = 20000           # ~0.00002 SOL (increased buffer for transaction fees)
-            PRIORITY_FEE_BUFFER = 100000             # ~0.00010 SOL (increased for higher priority fees)
+            TRANSACTION_FEE_BUFFER = 50000           # ~0.00005 SOL (enhanced buffer for complex transaction fees)
+            PRIORITY_FEE_BUFFER = 500000             # ~0.0005 SOL (significantly increased for complex Jupiter swaps)
             
             # Total reserved amount per wallet (in lamports)
             TOTAL_RESERVED_LAMPORTS = (
@@ -4679,7 +4696,7 @@ class ApiClient:
             }
             
             def calculate_safe_swap_amount(wallet_address: str, requested_sol: float) -> float:
-                """Calculate safe swap amount with reduced gas fee reservation"""
+                """Calculate safe swap amount with increased buffer for complex transactions"""
                 try:
                     balance_response = self.check_balance(wallet_address)
                     if not balance_response.get("success"):
@@ -4689,22 +4706,23 @@ class ApiClient:
                     current_balance_sol = balance_response.get("balance", 0.0)
                     current_lamports = int(current_balance_sol * 1_000_000_000)
                     
-                    # Fix: Use reasonable reserved amount for gas fees (reduced from 0.003050 to 0.001 SOL)
-                    reserved_lamports = 1_000_000  # 0.001 SOL for gas fees
+                    # Enhanced buffer: Increased from 0.001 to 0.0025 SOL for complex Jupiter swap transactions
+                    # Jupiter swaps involve: WSOL creation + token account creation + swap + priority fees
+                    reserved_lamports = 2_500_000  # 0.0025 SOL for comprehensive gas fees and transaction complexity
                     usable_lamports = current_lamports - reserved_lamports
                     
-                    # Minimum swap amount (increased for better success rate)
-                    min_swap_lamports = 50_000  # 0.00005 SOL minimum
+                    # Increased minimum swap amount for better transaction success rate
+                    min_swap_lamports = 100_000  # 0.0001 SOL minimum (doubled from previous)
                     
                     # Calculate safe amount
                     requested_lamports = int(requested_sol * 1_000_000_000)
                     safe_lamports = min(usable_lamports, requested_lamports)
                     
-                    # Enhanced debug logging
-                    logger.info(f"DEBUG - Balance Check for Wallet {wallet_address[:8]}...")
+                    # Enhanced debug logging with buffer analysis
+                    logger.info(f"DEBUG - Enhanced Balance Check for Wallet {wallet_address[:8]}...")
                     logger.info(f"  ✅ API Response Success: {balance_response.get('success', False)}")
                     logger.info(f"  💰 Current balance: {current_balance_sol:.6f} SOL ({current_lamports} lamports)")
-                    logger.info(f"  🔒 Reserved amount: {reserved_lamports/1_000_000_000:.6f} SOL ({reserved_lamports} lamports)")
+                    logger.info(f"  🔒 Reserved amount: {reserved_lamports/1_000_000_000:.6f} SOL ({reserved_lamports} lamports) [ENHANCED BUFFER]")
                     logger.info(f"  ⚡ Usable amount: {usable_lamports/1_000_000_000:.6f} SOL ({usable_lamports} lamports)")
                     logger.info(f"  📋 Requested amount: {requested_sol:.6f} SOL ({requested_lamports} lamports)")
                     logger.info(f"  ✨ Safe amount: {safe_lamports/1_000_000_000:.6f} SOL ({safe_lamports} lamports)")
@@ -4985,8 +5003,8 @@ class ApiClient:
         # Solana account minimums (in lamports) - REAL WORLD VALUES based on actual logs
         SOL_ACCOUNT_RENT_EXEMPTION = 890880      # ~0.00089 SOL (actual rent exemption for SOL account)
         TOKEN_ACCOUNT_RENT_EXEMPTION = 2039280   # ~0.00204 SOL (ACTUAL from logs: "need 2039280")
-        TRANSACTION_FEE_BUFFER = 20000           # ~0.00002 SOL (increased buffer for transaction fees)
-        PRIORITY_FEE_BUFFER = 100000             # ~0.00010 SOL (increased for higher priority fees)
+        TRANSACTION_FEE_BUFFER = 50000           # ~0.00005 SOL (enhanced buffer for complex transaction fees)
+        PRIORITY_FEE_BUFFER = 500000             # ~0.0005 SOL (significantly increased for complex Jupiter swaps)
         
         # Total reserved amount per wallet (in lamports)
         TOTAL_RESERVED_LAMPORTS = (
