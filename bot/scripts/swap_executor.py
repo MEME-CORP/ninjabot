@@ -197,17 +197,39 @@ class SwapExecutor:
         return result
     
     async def _validate_swap_preconditions(self, result: SwapResult) -> Optional[str]:
-        """Validate conditions before attempting swap."""
+        """Validate that the swap can be executed."""
         try:
-            # Check minimum amount
-            if result.input_amount <= 0:
-                return f"Invalid amount: {result.input_amount}"
+            # For sell operations, check if we have the input token
+            if result.output_token == "SOL" or result.output_token == "So11111111111111111111111111111111111111112":
+                # This is a sell operation (token -> SOL)
+                # Check if wallet has the input token
+                token_balance = self.api_client.check_spl_token_balance(
+                    result.wallet_address, 
+                    result.input_token
+                )
+                
+                if token_balance <= 0:
+                    return f"Insufficient token balance for sell: {token_balance}"
+                
+                if token_balance < result.input_amount:
+                    logger.warning(f"Adjusting sell amount from {result.input_amount} to {token_balance} (available balance)")
+                    result.input_amount = token_balance
             
-            # Check wallet balance (basic validation)
-            if result.input_amount < 0.000001:  # Minimum reasonable amount
-                return f"Amount too small: {result.input_amount}"
+            else:
+                # This is a buy operation (SOL -> token)
+                # Check SOL balance
+                balance_info = self.api_client.check_balance(result.wallet_address)
+                sol_balance = 0.0
+                
+                for balance in balance_info.get('balances', []):
+                    if balance.get('symbol') == 'SOL':
+                        sol_balance = balance.get('amount', 0.0)
+                        break
+                
+                min_required = result.input_amount + 0.001  # Add buffer for fees
+                if sol_balance < min_required:
+                    return f"Insufficient SOL balance: {sol_balance:.6f} < {min_required:.6f}"
             
-            # Additional validation can be added here
             return None
             
         except Exception as e:

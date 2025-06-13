@@ -47,6 +47,39 @@ def format_wallet_imported_message(address: str) -> str:
         f"Now, how many child wallets would you like to create? (min: 10)"
     )
 
+def format_existing_child_wallets_found_message(wallet_address: str, num_existing: int) -> str:
+    """
+    Format message when existing child wallets are found for a mother wallet.
+    
+    Args:
+        wallet_address: The mother wallet address
+        num_existing: Number of existing child wallets
+        
+    Returns:
+        Formatted message for existing child wallets
+    """
+    return (
+        f"✅ Using saved wallet: `{wallet_address}`\n\n"
+        f"Found {num_existing} existing child wallets associated with this mother wallet.\n\n"
+        f"You can use these existing wallets or create a new set (this will replace the existing ones)."
+    )
+
+def format_no_child_wallets_found_message(wallet_address: str) -> str:
+    """
+    Format message when no child wallets are found for a mother wallet.
+    
+    Args:
+        wallet_address: The mother wallet address
+        
+    Returns:
+        Formatted message for no existing child wallets
+    """
+    return (
+        f"✅ Using saved wallet: `{wallet_address}`\n\n"
+        f"No child wallets found for this mother wallet.\n\n"
+        f"How many child wallets would you like to create? (min: 10)"
+    )
+
 def format_child_wallets_message(num_wallets: int, child_addresses: List[str] = None) -> str:
     """
     Format the message confirming the number of child wallets.

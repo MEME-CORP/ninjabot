@@ -273,55 +273,75 @@ class WalletSwapManager:
         amount_results: List[WalletAmountResult],
         summary: ExecutionSummary
     ) -> None:
-        """Execute swaps sequentially one by one."""
-        logger.info("Executing swaps sequentially")
+        """Execute swaps sequentially for all wallets."""
+        logger.info(f"Starting sequential execution for {len(selected_wallets)} wallets")
         
-        # Create executor
-        executor = self._create_executor(config.execution_config)
-        
-        # Create single batch
-        batch = BatchExecutionResult(
+        batch_result = BatchExecutionResult(
             batch_id="sequential_batch",
             start_time=time.time()
         )
         
-        # Execute each swap
-        for i, amount_result in enumerate(amount_results):
+        for i, (wallet_data, amount_result) in enumerate(zip(selected_wallets, amount_results)):
             if self.is_cancelled:
                 logger.info("Execution cancelled by user")
                 break
             
-            self._report_progress("Executing sequential swaps", i, len(amount_results))
-            
-            # Find corresponding wallet data
-            wallet_data = next(
-                (w for w in selected_wallets if w['address'] == amount_result.wallet_address),
-                None
-            )
-            
-            if not wallet_data:
-                logger.warning(f"Wallet data not found for {amount_result.wallet_address}")
+            if not amount_result.is_valid:
+                logger.warning(f"Skipping wallet {i+1} due to invalid amount: {amount_result.error}")
                 continue
             
-            # Execute swap
-            swap_result = await executor.execute_swap(
-                wallet_address=wallet_data['address'],
-                wallet_private_key=wallet_data['private_key'],
-                wallet_index=amount_result.wallet_index,
-                input_token=config.token_config.input_token,
-                output_token=config.token_config.output_token,
-                amount=amount_result.calculated_amount
-            )
+            # Report progress
+            self._report_progress("executing", i + 1, len(selected_wallets))
             
-            batch.swap_results.append(swap_result)
-            summary.all_swap_results.append(swap_result)
-            
-            # Add delay between swaps
-            if i < len(amount_results) - 1:  # Don't delay after last swap
-                await asyncio.sleep(config.execution_config.delay_between_swaps)
+            try:
+                # Execute the swap
+                swap_result = await self._create_executor(config.execution_config).execute_swap(
+                    wallet_address=wallet_data["address"],
+                    wallet_private_key=wallet_data["private_key"],
+                    wallet_index=i,
+                    input_token=config.token_config.input_token,
+                    output_token=config.token_config.output_token,
+                    amount=amount_result.calculated_amount
+                )
+                
+                batch_result.swap_results.append(swap_result)
+                summary.all_swap_results.append(swap_result)
+                
+                # Log individual result
+                if swap_result.is_successful:
+                    logger.info(f"✅ Wallet {i+1}/{len(selected_wallets)} - Swap successful: {swap_result.final_transaction_id}")
+                else:
+                    logger.warning(f"❌ Wallet {i+1}/{len(selected_wallets)} - Swap failed: {swap_result.final_error}")
+                
+                # Add delay between swaps if configured
+                if config.execution_config.delay_between_swaps > 0:
+                    await asyncio.sleep(config.execution_config.delay_between_swaps)
+                
+            except Exception as e:
+                logger.error(f"Error executing swap for wallet {i+1}: {str(e)}")
+                
+                # Create failed swap result
+                failed_result = SwapResult(
+                    wallet_address=wallet_data["address"],
+                    wallet_index=i,
+                    wallet_private_key=wallet_data["private_key"],
+                    input_token=config.token_config.input_token,
+                    output_token=config.token_config.output_token,
+                    input_amount=amount_result.calculated_amount,
+                    status=SwapStatus.FAILED,
+                    start_time=time.time(),
+                    end_time=time.time(),
+                    final_error=str(e),
+                    error_classification="execution_error"
+                )
+                
+                batch_result.swap_results.append(failed_result)
+                summary.all_swap_results.append(failed_result)
         
-        batch.end_time = time.time()
-        summary.batch_results.append(batch)
+        batch_result.end_time = time.time()
+        summary.batch_results.append(batch_result)
+        
+        logger.info(f"Sequential execution completed: {batch_result.success_count}/{len(batch_result.swap_results)} successful")
     
     async def _execute_parallel(
         self,

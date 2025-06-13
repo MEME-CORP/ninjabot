@@ -124,44 +124,67 @@ class AmountCalculator:
         
         for i, address in enumerate(wallet_addresses):
             try:
-                # Get wallet balance
-                balance_info = self.api_client.check_balance(address, token_mint)
-                
-                # Extract SOL balance (assuming SOL is the primary token for most operations)
-                sol_balance = 0.0
-                for balance in balance_info.get('balances', []):
-                    if balance.get('symbol') == 'SOL':
-                        sol_balance = balance.get('amount', 0.0)
-                        break
-                
-                if sol_balance <= min_balance_threshold:
+                if token_mint == "So11111111111111111111111111111111111111112":
+                    # SOL balance check
+                    balance_info = self.api_client.check_balance(address, token_mint)
+                    sol_balance = 0.0
+                    for balance in balance_info.get('balances', []):
+                        if balance.get('symbol') == 'SOL':
+                            sol_balance = balance.get('amount', 0.0)
+                            break
+                    
+                    if sol_balance <= min_balance_threshold:
+                        results.append(WalletAmountResult(
+                            wallet_index=i,
+                            wallet_address=address,
+                            calculated_amount=0.0,
+                            strategy_used=AmountStrategy.PERCENTAGE,
+                            source_balance=sol_balance,
+                            error=f"Insufficient balance: {sol_balance:.6f} SOL"
+                        ))
+                        continue
+                    
+                    available_balance = sol_balance - min_balance_threshold
+                    calculated_amount = available_balance * percentage
+                    
+                    if calculated_amount > available_balance:
+                        calculated_amount = available_balance
+                    
                     results.append(WalletAmountResult(
                         wallet_index=i,
                         wallet_address=address,
-                        calculated_amount=0.0,
+                        calculated_amount=calculated_amount,
                         strategy_used=AmountStrategy.PERCENTAGE,
                         source_balance=sol_balance,
-                        error=f"Insufficient balance: {sol_balance:.6f} SOL"
+                        percentage_used=percentage
                     ))
-                    continue
-                
-                # Calculate amount ensuring minimum balance remains
-                available_balance = sol_balance - min_balance_threshold
-                calculated_amount = available_balance * percentage
-                
-                # Ensure we don't exceed available balance
-                if calculated_amount > available_balance:
-                    calculated_amount = available_balance
-                
-                results.append(WalletAmountResult(
-                    wallet_index=i,
-                    wallet_address=address,
-                    calculated_amount=calculated_amount,
-                    strategy_used=AmountStrategy.PERCENTAGE,
-                    source_balance=sol_balance,
-                    percentage_used=percentage
-                ))
-                
+                    
+                else:
+                    # SPL token balance check
+                    token_balance = self.api_client.check_spl_token_balance(address, token_mint)
+                    
+                    if token_balance <= 0:
+                        results.append(WalletAmountResult(
+                            wallet_index=i,
+                            wallet_address=address,
+                            calculated_amount=0.0,
+                            strategy_used=AmountStrategy.PERCENTAGE,
+                            source_balance=token_balance,
+                            error=f"No token balance found: {token_balance}"
+                        ))
+                        continue
+                    
+                    calculated_amount = token_balance * percentage
+                    
+                    results.append(WalletAmountResult(
+                        wallet_index=i,
+                        wallet_address=address,
+                        calculated_amount=calculated_amount,
+                        strategy_used=AmountStrategy.PERCENTAGE,
+                        source_balance=token_balance,
+                        percentage_used=percentage
+                    ))
+                    
             except Exception as e:
                 logger.warning(f"Failed to get balance for wallet {address}: {str(e)}")
                 results.append(WalletAmountResult(

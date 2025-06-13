@@ -28,6 +28,8 @@ from bot.utils.message_utils import (
     format_welcome_message,
     format_wallet_created_message,
     format_wallet_imported_message,
+    format_existing_child_wallets_found_message,
+    format_no_child_wallets_found_message,
     format_child_wallets_message,
     format_volume_confirmation_message,
     format_schedule_preview,
@@ -401,35 +403,52 @@ async def wallet_choice(update: Update, context: CallbackContext) -> int:
                 # Check if there are saved child wallets for this mother wallet
                 child_wallets = api_client.load_child_wallets(wallet_address)
 
-                # Build keyboard with options
+                # Build keyboard with options - conditional logic to prevent data fragmentation
                 keyboard = []
 
                 if child_wallets:
-                    # Option to use existing child wallets
+                    # Only show relevant options when child wallets exist - prevents data fragmentation
+                    logger.info(
+                        f"Found {len(child_wallets)} existing child wallets for mother wallet",
+                        extra={"user_id": user.id, "mother_wallet": wallet_address, "child_count": len(child_wallets)}
+                    )
+                    
                     keyboard.append([build_button("Use Existing Child Wallets", f"use_existing_children_{wallet_index}")])
-
-                # Option to create new child wallets
-                keyboard.append([build_button("Create New Child Wallets", f"create_new_children_{wallet_index}")])
-
-                # Send confirmation and ask about child wallets
-                await query.edit_message_text(
-                    f"✅ Using saved wallet: `{wallet_address}`\n\nWhat would you like to do with child wallets?",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-
-                # Store child wallets in session
-                child_addresses = [wallet.get('address') for wallet in child_wallets if wallet.get('address')]
-                session_manager.update_session_value(user.id, "child_wallets", child_addresses)
-
-                # Also store the full child wallets data (with private keys) for return funds functionality
-                session_manager.update_session_value(user.id, "child_wallets_data", child_wallets)
-
-                # Set number of child wallets
-                num_wallets = len(child_addresses)
-                session_manager.update_session_value(user.id, "num_child_wallets", num_wallets)
-
-                return ConversationState.CHILD_WALLET_CHOICE
+                    # Optional warning-level replace option
+                    keyboard.append([build_button("⚠️ Replace Child Wallets", f"create_new_children_{wallet_index}")])
+                    
+                    # Store child wallets in session for existing wallets
+                    child_addresses = [wallet.get('address') for wallet in child_wallets if wallet.get('address')]
+                    session_manager.update_session_value(user.id, "child_wallets", child_addresses)
+                    session_manager.update_session_value(user.id, "child_wallets_data", child_wallets)
+                    session_manager.update_session_value(user.id, "num_child_wallets", len(child_addresses))
+                    
+                    # Send message with existing child wallets context
+                    await query.edit_message_text(
+                        format_existing_child_wallets_found_message(wallet_address, len(child_wallets)),
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    
+                    return ConversationState.CHILD_WALLET_CHOICE
+                else:
+                    # No existing child wallets, go directly to creation - streamlined UX
+                    logger.info(
+                        f"No existing child wallets found for mother wallet, proceeding to creation",
+                        extra={"user_id": user.id, "mother_wallet": wallet_address}
+                    )
+                    
+                    await query.edit_message_text(
+                        format_no_child_wallets_found_message(wallet_address),
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    
+                    # Initialize empty session data for new child wallet creation
+                    session_manager.update_session_value(user.id, "child_wallets", [])
+                    session_manager.update_session_value(user.id, "child_wallets_data", [])
+                    session_manager.update_session_value(user.id, "num_child_wallets", 0)
+                    
+                    return ConversationState.NUM_CHILD_WALLETS
 
             except (ValueError, TypeError) as e:
                 logger.error(f"Error parsing wallet index: {str(e)}", extra={"user_id": user.id, "choice": choice})
