@@ -41,7 +41,8 @@ from bot.utils.message_utils import (
     format_return_funds_summary,
     format_child_wallets_funding_status,
     format_return_funds_progress,
-    format_volume_generation_insufficient_balance_message
+    format_volume_generation_insufficient_balance_message,
+    format_sell_remaining_balance_summary
 )
 from bot.api.api_client import api_client, ApiClientError
 from bot.events.event_system import event_system, TransactionConfirmedEvent, TransactionFailedEvent
@@ -133,6 +134,7 @@ async def volume_generation_job(context: CallbackContext):
             chat_id=user_id,
             text="What would you like to do next?",
             reply_markup=InlineKeyboardMarkup([
+                [build_button("🪙 Sell Remaining Token Balance", "sell_remaining_balance")],
                 [build_button("💸 Return All Funds to Mother", "trigger_return_all_funds")],
                 [build_button("🔄 Finish and Start New Run", "finish_and_restart")]
             ])
@@ -176,6 +178,7 @@ async def volume_generation_job(context: CallbackContext):
             chat_id=user_id,
             text="What would you like to do next?",
             reply_markup=InlineKeyboardMarkup([
+                [build_button("🪙 Sell Remaining Token Balance", "sell_remaining_balance")],
                 [build_button("🔄 Start New Run", "finish_and_restart")],
                 [build_button("💸 Return All Funds", "trigger_return_all_funds")]
             ])
@@ -1552,6 +1555,105 @@ async def trigger_volume_generation(update: Update, context: CallbackContext) ->
         return ConversationState.CHILD_BALANCES_OVERVIEW
 
 
+async def sell_remaining_balance(update: Update, context: CallbackContext) -> int:
+    """
+    Handler to sell remaining token balance from child wallets.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next conversation state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        # Get session data
+        child_wallets_data = session_manager.get_session_value(user.id, "child_wallets_data", [])
+        token_address = session_manager.get_session_value(user.id, "token_address")
+        
+        if not child_wallets_data:
+            await context.bot.send_message(
+                chat_id=user.id,
+                text="❌ No child wallets found. Please start a new volume generation run.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return ConversationState.COMPLETION
+        
+        if not token_address:
+            await context.bot.send_message(
+                chat_id=user.id,
+                text="❌ No token address found. Please start a new volume generation run.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return ConversationState.COMPLETION
+        
+        # Extract wallet addresses and private keys
+        child_wallets = [wallet["address"] for wallet in child_wallets_data]
+        child_private_keys = [wallet["private_key"] for wallet in child_wallets_data]
+        
+        # Send progress message
+        progress_message = await context.bot.send_message(
+            chat_id=user.id,
+            text=f"🔄 **Selling Remaining Token Balance**\n\n"
+                 f"**Token:** `{token_address[:8]}...{token_address[-8:] if len(token_address) > 16 else token_address}`\n"
+                 f"**Wallets:** {len(child_wallets)}\n"
+                 f"**Status:** Checking token balances...",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Execute sell operation
+        sell_results = await api_client.sell_remaining_token_balance(
+            child_wallets=child_wallets,
+            child_private_keys=child_private_keys,
+            token_address=token_address
+        )
+        
+        # Format results message using utility function
+        results_message = format_sell_remaining_balance_summary(sell_results, token_address)
+        
+        # Update progress message with results
+        await context.bot.edit_message_text(
+            chat_id=user.id,
+            message_id=progress_message.message_id,
+            text=results_message,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Offer next steps
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="What would you like to do next?",
+            reply_markup=InlineKeyboardMarkup([
+                [build_button("💸 Return All Funds to Mother", "trigger_return_all_funds")],
+                [build_button("🔄 Finish and Start New Run", "finish_and_restart")]
+            ])
+        )
+        
+        return ConversationState.COMPLETION
+        
+    except Exception as e:
+        logger.error(
+            f"Error in sell remaining balance for user {user.id}",
+            extra={"user_id": user.id, "error": str(e)},
+            exc_info=True
+        )
+        
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=f"❌ **Error Selling Tokens**\n\n"
+                 f"An error occurred while selling remaining token balance:\n"
+                 f"`{str(e)}`\n\n"
+                 f"Please try again or start a new run.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.COMPLETION
+
+
 async def trigger_return_all_funds(update: Update, context: CallbackContext) -> int:
     """Return all funds from child wallets to the mother wallet."""
     user = update.callback_query.from_user
@@ -1833,10 +1935,12 @@ def register_start_handler(application):
             ],
             ConversationState.EXECUTION: [
                 CallbackQueryHandler(cancel, pattern=r"^cancel$"),
+                CallbackQueryHandler(sell_remaining_balance, pattern=r"^sell_remaining_balance$"),
                 CallbackQueryHandler(trigger_return_all_funds, pattern=r"^trigger_return_all_funds$"),
                 CallbackQueryHandler(finish_and_restart, pattern=r"^finish_and_restart$"),
             ],
             ConversationState.COMPLETION: [
+                CallbackQueryHandler(sell_remaining_balance, pattern=r"^sell_remaining_balance$"),
                 CallbackQueryHandler(trigger_return_all_funds, pattern=r"^trigger_return_all_funds$"),
                 CallbackQueryHandler(finish_and_restart, pattern=r"^finish_and_restart$"),
             ]

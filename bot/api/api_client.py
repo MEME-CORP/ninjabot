@@ -3867,22 +3867,18 @@ class ApiClient:
                     to_wallet=to_wallet,
                     amount=amount,
                     token_address=token_address,
-                    verify_transfer=verify_transfers
+                    verify_transfer=verify_transfers,
                 )
-                
-                # Update trade results
+
                 results["trades_executed"] += 1
                 if trade_result.get("status") == "success" or trade_result.get("verified"):
                     results["trades_succeeded"] += 1
                 else:
                     results["trades_failed"] += 1
-                
-                # Add the result to the list
+
                 results["trade_results"].append(trade_result)
-                
-                # Add a small random delay between trades to appear more organic
-                await asyncio.sleep(random.uniform(1.0, 3.0))
-                
+                await asyncio.sleep(random.uniform(0.5, 2.0))  # Small delay between trades
+
             except Exception as e:
                 logger.error(f"Error executing trade {i + 1}/{len(trades)}: {str(e)}")
                 results["trades_failed"] += 1
@@ -5215,6 +5211,145 @@ class ApiClient:
         except Exception as e:
             logger.error(f"Error checking SPL token balance for {wallet_address}: {str(e)}")
             return 0.0
+
+    async def sell_remaining_token_balance(self, child_wallets: List[str], child_private_keys: List[str], 
+                                          token_address: str, min_balance_threshold: float = 0.0001) -> Dict[str, Any]:
+        """
+        Sell remaining token balance from child wallets back to SOL using Jupiter DEX.
+        
+        Args:
+            child_wallets: List of child wallet addresses
+            child_private_keys: List of corresponding private keys
+            token_address: Token mint address to sell
+            min_balance_threshold: Minimum token balance threshold to attempt selling
+            
+        Returns:
+            Dictionary containing sell operation results
+            
+        Raises:
+            ApiClientError: If the sell operation fails
+        """
+        if len(child_wallets) != len(child_private_keys):
+            raise ApiClientError("Mismatch between number of child wallets and private keys")
+        
+        logger.info(f"Starting sell remaining balance operation for {len(child_wallets)} wallets")
+        
+        results = {
+            "status": "success",
+            "total_wallets": len(child_wallets),
+            "sells_attempted": 0,
+            "sells_succeeded": 0,
+            "sells_failed": 0,
+            "sells_skipped": 0,
+            "total_sol_received": 0.0,
+            "batch_id": self.generate_batch_id(),
+            "wallet_results": [],
+            "errors": []
+        }
+        
+        try:
+            for i, (wallet_address, private_key) in enumerate(zip(child_wallets, child_private_keys)):
+                wallet_result = {
+                    "wallet_address": wallet_address,
+                    "status": "pending",
+                    "token_balance_before": 0.0,
+                    "sol_received": 0.0,
+                    "transaction_id": None,
+                    "error": None
+                }
+                
+                try:
+                    # Check token balance
+                    token_balance_info = self.get_spl_token_balance(wallet_address, token_address)
+                    token_balance = token_balance_info.get("balance", 0)
+                    wallet_result["token_balance_before"] = token_balance
+                    
+                    # Skip if balance is below threshold
+                    if token_balance < min_balance_threshold:
+                        wallet_result["status"] = "skipped"
+                        wallet_result["error"] = f"Token balance {token_balance} below threshold {min_balance_threshold}"
+                        results["sells_skipped"] += 1
+                        logger.info(f"Skipping wallet {wallet_address}: balance {token_balance} below threshold")
+                        continue
+                    
+                    # Convert to lamports for Jupiter
+                    token_amount_lamports = int(token_balance * (10 ** token_balance_info.get("decimals", 6)))
+                    
+                    # Get swap quote
+                    quote_response = self.get_jupiter_quote(
+                        input_mint=token_address,
+                        output_mint="SOL",
+                        amount=token_amount_lamports,
+                        slippage_bps=100  # 1% slippage for selling
+                    )
+                    
+                    results["sells_attempted"] += 1
+                    
+                    # Execute the sell swap
+                    swap_result = self.execute_jupiter_swap(
+                        user_wallet_private_key=private_key,
+                        quote_response=quote_response["quoteResponse"],
+                        wrap_and_unwrap_sol=True,
+                        collect_fees=True,
+                        verify_swap=False  # Skip verification for bulk operations
+                    )
+                    
+                    if swap_result.get("status") == "success":
+                        wallet_result["status"] = "success"
+                        wallet_result["transaction_id"] = swap_result.get("transactionId")
+                        
+                        # Estimate SOL received from quote
+                        estimated_sol = float(quote_response["quoteResponse"].get("outAmount", "0")) / 1_000_000_000
+                        wallet_result["sol_received"] = estimated_sol
+                        results["total_sol_received"] += estimated_sol
+                        results["sells_succeeded"] += 1
+                        
+                        logger.info(f"✅ Sell successful for wallet {wallet_address}: {token_balance} tokens -> {estimated_sol:.6f} SOL")
+                    else:
+                        wallet_result["status"] = "failed"
+                        wallet_result["error"] = swap_result.get("message", "Unknown swap error")
+                        results["sells_failed"] += 1
+                        logger.error(f"❌ Sell failed for wallet {wallet_address}: {wallet_result['error']}")
+                    
+                except Exception as e:
+                    wallet_result["status"] = "failed"
+                    wallet_result["error"] = str(e)
+                    results["sells_failed"] += 1
+                    results["errors"].append({
+                        "wallet": wallet_address,
+                        "error": str(e),
+                        "step": "sell_operation"
+                    })
+                    logger.error(f"❌ Error selling tokens for wallet {wallet_address}: {str(e)}")
+                
+                results["wallet_results"].append(wallet_result)
+                
+                # Brief delay between operations
+                await asyncio.sleep(0.5)
+            
+            # Determine overall status
+            if results["sells_failed"] == 0 and results["sells_succeeded"] > 0:
+                results["status"] = "success"
+            elif results["sells_succeeded"] > 0 and results["sells_failed"] > 0:
+                results["status"] = "partial_success"
+            elif results["sells_succeeded"] == 0 and results["sells_attempted"] > 0:
+                results["status"] = "failed"
+            else:
+                results["status"] = "no_operations"
+            
+            logger.info(f"Sell remaining balance completed: {results['sells_succeeded']} successful, "
+                       f"{results['sells_failed']} failed, {results['sells_skipped']} skipped")
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Critical error in sell remaining balance operation: {str(e)}")
+            results["status"] = "failed"
+            results["errors"].append({
+                "error": str(e),
+                "step": "overall_operation"
+            })
+            return results
 
 # Create a singleton instance
 api_client = ApiClient()

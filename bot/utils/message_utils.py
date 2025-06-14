@@ -765,3 +765,53 @@ def format_volume_generation_insufficient_balance_message(
     message += f"💡 **Tip**: Use 'Fund Child Wallets' option to add more SOL to your child wallets."
     
     return message
+
+def format_sell_remaining_balance_summary(sell_results: Dict[str, Any], token_address: str) -> str:
+    """
+    Format a summary message for sell remaining balance operation.
+    
+    Args:
+        sell_results: Results from the sell operation
+        token_address: Token contract address
+        
+    Returns:
+        Formatted message string
+    """
+    status_emoji = {
+        "success": "✅",
+        "partial_success": "⚠️",
+        "failed": "❌",
+        "no_operations": "ℹ️"
+    }.get(sell_results.get("status", "failed"), "ℹ️")
+    
+    # Format token address display
+    token_display = f"{token_address[:8]}...{token_address[-8:]}" if len(token_address) > 16 else token_address
+    
+    message = (
+        f"{status_emoji} **Token Sale Complete**\n\n"
+        f"**Token:** `{token_display}`\n"
+        f"**Status:** {sell_results.get('status', 'Unknown').replace('_', ' ').title()}\n"
+        f"**Batch ID:** `{sell_results.get('batch_id', 'N/A')}`\n\n"
+        f"📊 **Sale Summary:**\n"
+        f"  - Total Wallets: {sell_results.get('total_wallets', 0)}\n"
+        f"  - Sales Attempted: {sell_results.get('sells_attempted', 0)}\n"
+        f"  - Sales Successful: {sell_results.get('sells_succeeded', 0)}\n"
+        f"  - Sales Failed: {sell_results.get('sells_failed', 0)}\n"
+        f"  - Sales Skipped: {sell_results.get('sells_skipped', 0)}\n"
+        f"  - Total SOL Received: {sell_results.get('total_sol_received', 0):.6f} SOL\n"
+    )
+    
+    # Add performance metrics if available
+    total_attempted = sell_results.get('sells_attempted', 0)
+    if total_attempted > 0:
+        success_rate = (sell_results.get('sells_succeeded', 0) / total_attempted) * 100
+        message += f"  - Success Rate: {success_rate:.1f}%\n"
+    
+    # Add helpful notes based on results
+    if sell_results.get('sells_skipped', 0) > 0:
+        message += f"\n💡 **Note:** {sell_results.get('sells_skipped', 0)} wallet(s) were skipped due to insufficient token balance."
+    
+    if sell_results.get('sells_failed', 0) > 0:
+        message += f"\n⚠️ **Warning:** {sell_results.get('sells_failed', 0)} sale(s) failed. Check individual wallet results for details."
+    
+    return message
