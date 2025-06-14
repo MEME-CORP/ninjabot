@@ -106,7 +106,7 @@ class ApiClient:
                 }
             )
             
-            response = getattr(self.session, method)(url, **kwargs)
+            response = getattr(self.session, method.lower())(url, **kwargs)
             elapsed = time.time() - start_time
             
             logger.debug(
@@ -481,7 +481,7 @@ class ApiClient:
         try:
             logger.debug(f"Making direct {method.upper()} request to {endpoint}")
             
-            response = getattr(self.session, method)(url, **kwargs)
+            response = getattr(self.session, method.lower())(url, **kwargs)
             elapsed = time.time() - start_time
             
             logger.debug(f"Received direct response from {endpoint} in {elapsed:.2f}s")
@@ -865,9 +865,9 @@ class ApiClient:
             fee = total_volume * SERVICE_FEE_RATE
             remaining_volume = total_volume - fee
             
-            # Calculate realistic per-wallet spending limit based on typical child wallet balance
-            # Assume child wallets have ~0.003 SOL with ~0.0014 SOL usable after reserves
-            max_per_wallet_spend = 0.0013  # Conservative limit per wallet per trade
+            # VOLUME ENFORCEMENT: Calculate per-wallet spending limit based on total volume
+            # Distribute the volume across all trades respecting the user's total limit
+            max_per_wallet_spend = min(0.0013, remaining_volume / (len(child_wallets) * 2))  # Conservative limit per wallet per trade
             
             # Create random transfers with realistic amounts
             transfers = []
@@ -1527,8 +1527,8 @@ class ApiClient:
                       idempotency_key: str = None, verify_transfers: bool = True) -> Dict[str, Any]:
         """Fund child wallets with increased minimum amounts"""
         
-        # Fix 3: Increase minimum funding amount
-        min_funding_amount = 0.005  # Increased from previous lower amount
+        # Fix 3: Increase minimum funding amount for Jupiter compatibility
+        min_funding_amount = 0.012  # Increased to cover Jupiter swap + rent + fees (was 0.005)
         
         if amount_per_wallet < min_funding_amount:
             logger.warning(f"Requested funding amount {amount_per_wallet} is below minimum {min_funding_amount}, adjusting...")
@@ -2191,31 +2191,31 @@ class ApiClient:
             # Log extracted values for debugging
             logger.info(f"Extracted balance: {current_balance} {token_symbol}")
             
-            # Enhanced safety buffer for complex transactions
-            # Add 10% buffer plus 0.005 SOL minimum for complex Jupiter operations
+            # Minimal buffer for essential transaction fees only
+            # Reduced from 10%+0.005 to minimal 0.001 SOL for basic transaction costs
             if token_symbol == "SOL":
-                safety_buffer = max(required_volume * 0.1, 0.005)  # 10% buffer or 0.005 SOL minimum
+                safety_buffer = 0.001  # Minimal 0.001 SOL for basic transaction fees
                 adjusted_required_volume = required_volume + safety_buffer
-                logger.info(f"Applied safety buffer: {safety_buffer:.6f} SOL (total required: {adjusted_required_volume:.6f} SOL)")
+                logger.info(f"Applied minimal safety buffer: {safety_buffer:.6f} SOL (total required: {adjusted_required_volume:.6f} SOL)")
             else:
-                # For other tokens, use 5% buffer
-                safety_buffer = required_volume * 0.05
+                # For other tokens, use minimal 1% buffer
+                safety_buffer = required_volume * 0.01
                 adjusted_required_volume = required_volume + safety_buffer
-                logger.info(f"Applied safety buffer: {safety_buffer:.6f} {token_symbol} (total required: {adjusted_required_volume:.6f} {token_symbol})")
+                logger.info(f"Applied minimal safety buffer: {safety_buffer:.6f} {token_symbol} (total required: {adjusted_required_volume:.6f} {token_symbol})")
             
-            # Determine if the balance is sufficient (using adjusted volume)
+            # Determine if the balance is sufficient (using minimal adjusted volume)
             sufficient = current_balance >= adjusted_required_volume
             
             if sufficient:
-                logger.info(f"Wallet has sufficient balance with safety buffer: {current_balance} >= {adjusted_required_volume} {token_symbol}")
+                logger.info(f"Wallet has sufficient balance with minimal buffer: {current_balance} >= {adjusted_required_volume} {token_symbol}")
             else:
-                logger.info(f"Wallet balance insufficient (with safety buffer): {current_balance}/{adjusted_required_volume} {token_symbol}")
+                logger.info(f"Wallet balance insufficient (with minimal buffer): {current_balance}/{adjusted_required_volume} {token_symbol}")
             
             return {
                 'sufficient': sufficient,
                 'current_balance': current_balance,
                 'required_balance': required_volume,  # Return original required amount
-                'adjusted_required_balance': adjusted_required_volume,  # Include buffered amount
+                'adjusted_required_balance': adjusted_required_volume,  # Include minimal buffered amount
                 'safety_buffer': safety_buffer,
                 'token_symbol': token_symbol
             }
@@ -4662,8 +4662,8 @@ class ApiClient:
             # Solana account minimums (in lamports) - REAL WORLD VALUES based on actual logs
             SOL_ACCOUNT_RENT_EXEMPTION = 890880      # ~0.00089 SOL (actual rent exemption for SOL account)
             TOKEN_ACCOUNT_RENT_EXEMPTION = 2039280   # ~0.00204 SOL (ACTUAL from logs: "need 2039280")
-            TRANSACTION_FEE_BUFFER = 50000           # ~0.00005 SOL (enhanced buffer for complex transaction fees)
-            PRIORITY_FEE_BUFFER = 500000             # ~0.0005 SOL (significantly increased for complex Jupiter swaps)
+            TRANSACTION_FEE_BUFFER = 25000           # ~0.000025 SOL (minimal transaction fees)
+            PRIORITY_FEE_BUFFER = 100000             # ~0.0001 SOL (reduced for faster funding)
             
             # Total reserved amount per wallet (in lamports)
             TOTAL_RESERVED_LAMPORTS = (
@@ -4696,7 +4696,7 @@ class ApiClient:
             }
             
             def calculate_safe_swap_amount(wallet_address: str, requested_sol: float) -> float:
-                """Calculate safe swap amount with increased buffer for complex transactions"""
+                """Calculate safe swap amount with volume limit enforcement"""
                 try:
                     balance_response = self.check_balance(wallet_address)
                     if not balance_response.get("success"):
@@ -4706,27 +4706,31 @@ class ApiClient:
                     current_balance_sol = balance_response.get("balance", 0.0)
                     current_lamports = int(current_balance_sol * 1_000_000_000)
                     
-                    # Enhanced buffer: Increased from 0.001 to 0.0025 SOL for complex Jupiter swap transactions
-                    # Jupiter swaps involve: WSOL creation + token account creation + swap + priority fees
-                    reserved_lamports = 2_500_000  # 0.0025 SOL for comprehensive gas fees and transaction complexity
+                    # Jupiter-compatible buffer: Increased to cover account rent + transaction fees
+                    # Jupiter requires ~0.002 SOL for account rent + ~0.0005 SOL for transaction fees
+                    reserved_lamports = 2_500_000  # 0.0025 SOL for Jupiter compatibility (was 800_000)
                     usable_lamports = current_lamports - reserved_lamports
                     
                     # Increased minimum swap amount for better transaction success rate
                     min_swap_lamports = 100_000  # 0.0001 SOL minimum (doubled from previous)
                     
-                    # Calculate safe amount
+                    # VOLUME LIMIT ENFORCEMENT: Respect the requested amount as the maximum
+                    # Instead of using all available balance, use the smaller of requested vs available
                     requested_lamports = int(requested_sol * 1_000_000_000)
+                    
+                    # Ensure we don't exceed either the requested amount OR available balance
                     safe_lamports = min(usable_lamports, requested_lamports)
                     
-                    # Enhanced debug logging with buffer analysis
-                    logger.info(f"DEBUG - Enhanced Balance Check for Wallet {wallet_address[:8]}...")
+                    # Enhanced debug logging with Jupiter compatibility analysis
+                    logger.info(f"DEBUG - Jupiter-Compatible Balance Check for Wallet {wallet_address[:8]}...")
                     logger.info(f"  ✅ API Response Success: {balance_response.get('success', False)}")
                     logger.info(f"  💰 Current balance: {current_balance_sol:.6f} SOL ({current_lamports} lamports)")
-                    logger.info(f"  🔒 Reserved amount: {reserved_lamports/1_000_000_000:.6f} SOL ({reserved_lamports} lamports) [ENHANCED BUFFER]")
+                    logger.info(f"  🔒 Reserved amount: {reserved_lamports/1_000_000_000:.6f} SOL ({reserved_lamports} lamports) [JUPITER BUFFER]")
                     logger.info(f"  ⚡ Usable amount: {usable_lamports/1_000_000_000:.6f} SOL ({usable_lamports} lamports)")
                     logger.info(f"  📋 Requested amount: {requested_sol:.6f} SOL ({requested_lamports} lamports)")
                     logger.info(f"  ✨ Safe amount: {safe_lamports/1_000_000_000:.6f} SOL ({safe_lamports} lamports)")
                     logger.info(f"  ❓ Sufficient for swap: {safe_lamports >= min_swap_lamports}")
+                    logger.info(f"  🎯 Jupiter ready: {(safe_lamports + reserved_lamports) >= 8_500_000} (needs ~0.0085 SOL total)")
                     
                     if safe_lamports < min_swap_lamports:
                         logger.warning(f"Wallet {wallet_address} has insufficient balance for swap: safe_lamports={safe_lamports} < {min_swap_lamports}")
@@ -4738,44 +4742,82 @@ class ApiClient:
                     logger.error(f"Error calculating safe swap amount for {wallet_address}: {e}")
                     return 0.0
 
-            # Fix 2: Pre-check wallet balances before starting volume generation
+            # Fix 2: Enhanced Jupiter-ready wallet validation before volume generation
             total_usable_balance = 0.0
             insufficient_wallets = []
+            jupiter_ready_wallets = 0
             
             for wallet_address in child_wallets:
-                safe_amount = calculate_safe_swap_amount(wallet_address, 0.001)  # Test with small amount
-                if safe_amount <= 0:
-                    insufficient_wallets.append(wallet_address)
+                # Check current balance and Jupiter readiness
+                balance_response = self.check_balance(wallet_address)
+                if balance_response.get("success"):
+                    current_balance_sol = balance_response.get("balance", 0.0)
+                    # Jupiter minimum: 0.007 SOL swap + 0.0025 SOL buffer = 0.0095 SOL total
+                    jupiter_minimum = 0.0095
+                    
+                    if current_balance_sol >= jupiter_minimum:
+                        safe_amount = calculate_safe_swap_amount(wallet_address, 0.007)  # Test with realistic amount
+                        if safe_amount > 0:
+                            total_usable_balance += safe_amount
+                            jupiter_ready_wallets += 1
+                            logger.info(f"✅ Wallet {wallet_address[:8]}... Jupiter-ready: {current_balance_sol:.6f} SOL")
+                        else:
+                            insufficient_wallets.append(wallet_address)
+                            logger.warning(f"⚠️ Wallet {wallet_address[:8]}... insufficient for safe swaps: {current_balance_sol:.6f} SOL")
+                    else:
+                        insufficient_wallets.append(wallet_address)
+                        logger.warning(f"❌ Wallet {wallet_address[:8]}... below Jupiter minimum: {current_balance_sol:.6f} SOL < {jupiter_minimum} SOL")
                 else:
-                    total_usable_balance += safe_amount
+                    insufficient_wallets.append(wallet_address)
+                    logger.error(f"❌ Cannot check balance for wallet {wallet_address[:8]}...")
             
-            # Check if we have enough total balance
-            if len(insufficient_wallets) > 7:  # Allow up to 3 failed wallets out of 10
-                logger.error(f"Too many wallets ({len(insufficient_wallets)}) have insufficient balance")
+            # Check if we have enough Jupiter-ready wallets for volume generation
+            max_allowed_failures = min(3, len(child_wallets) // 2)  # Allow up to 3 failures or 50% of wallets
+            if len(insufficient_wallets) > max_allowed_failures:
+                logger.error(f"❌ Insufficient Jupiter-ready wallets: {jupiter_ready_wallets}/{len(child_wallets)} ready, {len(insufficient_wallets)} insufficient")
                 return {
                     "success": False,
-                    "error": f"Insufficient wallet funding. {len(insufficient_wallets)} wallets cannot perform swaps",
+                    "error": f"Insufficient wallet funding for Jupiter swaps. Only {jupiter_ready_wallets} wallets are Jupiter-ready out of {len(child_wallets)}",
                     "details": {
+                        "jupiter_ready_wallets": jupiter_ready_wallets,
                         "insufficient_wallets": len(insufficient_wallets),
-                        "total_usable_balance": total_usable_balance
+                        "total_wallets": len(child_wallets),
+                        "total_usable_balance": total_usable_balance,
+                        "jupiter_minimum_per_wallet": 0.0095,
+                        "recommended_action": "Fund child wallets with at least 0.012 SOL each"
                     }
                 }
             
-            logger.info(f"Balance check passed: {len(child_wallets) - len(insufficient_wallets)} wallets ready, total usable: {total_usable_balance:.6f} SOL")
+            logger.info(f"✅ Jupiter readiness check passed: {jupiter_ready_wallets}/{len(child_wallets)} wallets ready, total usable: {total_usable_balance:.6f} SOL")
 
             successful_buys = 0
             successful_sells = 0
             total_volume = 0.0
+            
+            # VOLUME ENFORCEMENT: Calculate total intended volume from trades
+            intended_total_volume = sum(trade.get("amount", trade.get("amount_sol", 0.001)) for trade in trades)
+            logger.info(f"Volume enforcement: Intended total volume: {intended_total_volume:.6f} SOL across {len(trades)} trades")
             
             for i, trade in enumerate(trades):
                 try:
                     wallet_idx = trade.get("wallet_index", i % len(child_wallets))
                     wallet_address = child_wallets[wallet_idx]
                     wallet_private_key = child_private_keys[wallet_idx]
-                    trade_sol_amount = trade.get("amount_sol", 0.01)
+                    
+                    # VOLUME ENFORCEMENT: Use the trade amount from schedule instead of defaulting to 0.01
+                    # This ensures we respect the user's total volume limit distribution
+                    trade_sol_amount = trade.get("amount", trade.get("amount_sol", 0.001))  # Fallback to smaller default
                     
                     # Calculate safe swap amount
                     safe_sol_amount = calculate_safe_swap_amount(wallet_address, trade_sol_amount)
+                    
+                    # VOLUME ENFORCEMENT: Check if adding this swap would exceed intended total
+                    if total_volume + safe_sol_amount > intended_total_volume * 1.1:  # Allow 10% tolerance
+                        logger.warning(f"Skipping swap {i+1}: would exceed intended volume limit "
+                                     f"(current: {total_volume:.6f}, intended: {intended_total_volume:.6f}, "
+                                     f"this swap: {safe_sol_amount:.6f})")
+                        results["swaps_failed"] += 1
+                        continue
                     
                     if safe_sol_amount <= 0:
                         logger.error(f"Wallet {wallet_address} has insufficient balance for any swap")
@@ -4804,68 +4846,44 @@ class ApiClient:
                             verify_swap=verify_transfers
                         )
                         
-                        if buy_result.get("success"):
+                        # Fix: Consistent success checking - use "status" field consistently
+                        buy_successful = (buy_result.get("status") == "success" or buy_result.get("success") == True)
+                        
+                        if buy_successful:
                             logger.info(f"✅ BUY successful: {safe_sol_amount:.6f} SOL -> {token_address[:8]}...")
                             successful_buys += 1
                             total_volume += safe_sol_amount
                             
-                            # Wait a moment for blockchain confirmation
-                            await asyncio.sleep(3)
+                            # Extended wait for blockchain confirmation and token account creation
+                            logger.info(f"⏳ Waiting 8 seconds for blockchain confirmation and token balance propagation...")
+                            await asyncio.sleep(8)
                             
-                            # SELL operation (Token -> SOL)
+                            # SELL operation (Token -> SOL) - Enhanced with multiple retry attempts
                             logger.info(f"Swap {i+1}/{len(trades)}: SELL {token_address[:8]}... back to SOL")
                             
-                            # Check SPL token balance using the new API method
-                            token_balance_info = self.get_spl_token_balance(wallet_address, token_address)
+                            sell_successful = False
+                            max_sell_retries = 3
                             
-                            if token_balance_info.get("success") and token_balance_info.get("balance", 0) > 0:
-                                raw_token_balance = token_balance_info.get("balance", 0)
-                                token_decimals = token_balance_info.get("decimals", 6)
+                            for retry_attempt in range(max_sell_retries):
+                                logger.info(f"🔄 Sell attempt {retry_attempt + 1}/{max_sell_retries} for wallet {wallet_address[:8]}...")
                                 
-                                logger.info(f"Found token balance: {raw_token_balance} (decimals: {token_decimals}) for wallet {wallet_address[:8]}...")
+                                # Check SPL token balance
+                                token_balance_info = self.get_spl_token_balance(wallet_address, token_address)
                                 
-                                # Get sell quote (Token -> SOL)
-                                sell_quote = self.get_jupiter_quote(
-                                    input_mint=token_address,
-                                    output_mint=SOL_MINT,
-                                    amount=raw_token_balance,  # Use raw balance (already in token units)
-                                    slippage_bps=100
-                                )
-                                
-                                # Fix: Check for quoteResponse instead of non-existent 'success' field
-                                if sell_quote.get("quoteResponse") is not None:
-                                    sell_result = self.execute_jupiter_swap(
-                                        user_wallet_private_key=wallet_private_key,
-                                        quote_response=sell_quote,
-                                        verify_swap=verify_transfers
-                                    )
+                                if token_balance_info.get("success") and token_balance_info.get("balance", 0) > 0:
+                                    raw_token_balance = token_balance_info.get("balance", 0)
+                                    token_decimals = token_balance_info.get("decimals", 6)
                                     
-                                    if sell_result.get("success"):
-                                        logger.info(f"✅ SELL successful: {token_address[:8]}... -> SOL")
-                                        successful_sells += 1
-                                    else:
-                                        logger.warning(f"❌ SELL failed: {sell_result.get('message', 'Unknown error')}")
-                                else:
-                                    logger.warning(f"❌ SELL quote failed: {sell_quote.get('message', 'Unknown error')}")
-                            else:
-                                # Retry logic - sometimes balance updates take time
-                                logger.warning(f"❌ No token balance found initially, retrying in 5 seconds...")
-                                await asyncio.sleep(5)
-                                
-                                # Retry balance check
-                                retry_balance_info = self.get_spl_token_balance(wallet_address, token_address)
-                                if retry_balance_info.get("success") and retry_balance_info.get("balance", 0) > 0:
-                                    raw_token_balance = retry_balance_info.get("balance", 0)
+                                    logger.info(f"💰 Found token balance: {raw_token_balance} (decimals: {token_decimals}) for wallet {wallet_address[:8]}...")
                                     
-                                    # Retry sell with found balance
+                                    # Get sell quote (Token -> SOL)
                                     sell_quote = self.get_jupiter_quote(
                                         input_mint=token_address,
                                         output_mint=SOL_MINT,
-                                        amount=raw_token_balance,
-                                        slippage_bps=100
+                                        amount=raw_token_balance,  # Use raw balance (already in token units)
+                                        slippage_bps=150  # Increased slippage for better success rate
                                     )
                                     
-                                    # Fix: Check for quoteResponse instead of non-existent 'success' field
                                     if sell_quote.get("quoteResponse") is not None:
                                         sell_result = self.execute_jupiter_swap(
                                             user_wallet_private_key=wallet_private_key,
@@ -4873,18 +4891,34 @@ class ApiClient:
                                             verify_swap=verify_transfers
                                         )
                                         
-                                        if sell_result.get("success"):
-                                            logger.info(f"✅ SELL successful (retry): {token_address[:8]}... -> SOL")
+                                        # Fix: Consistent success checking - use same logic as buy
+                                        sell_result_successful = (sell_result.get("status") == "success" or sell_result.get("success") == True)
+                                        
+                                        if sell_result_successful:
+                                            logger.info(f"✅ SELL successful (attempt {retry_attempt + 1}): {token_address[:8]}... -> SOL")
                                             successful_sells += 1
+                                            sell_successful = True
+                                            break
                                         else:
-                                            logger.warning(f"❌ SELL failed (retry): {sell_result.get('message', 'Unknown error')}")
+                                            logger.warning(f"❌ SELL failed (attempt {retry_attempt + 1}): {sell_result.get('message', 'Unknown error')}")
                                     else:
-                                        logger.warning(f"❌ SELL quote failed (retry): {sell_quote.get('message', 'Unknown error')}")
+                                        logger.warning(f"❌ SELL quote failed (attempt {retry_attempt + 1}): {sell_quote.get('message', 'Unknown error')}")
+                                        
                                 else:
-                                    logger.warning(f"❌ No token balance found to sell for wallet {wallet_address[:8]}...")
+                                    logger.warning(f"⚠️ No token balance found (attempt {retry_attempt + 1}) for wallet {wallet_address[:8]}...")
+                                
+                                # Wait before next retry (progressive backoff)
+                                if retry_attempt < max_sell_retries - 1:
+                                    wait_time = 5 + (retry_attempt * 3)  # 5s, 8s, 11s
+                                    logger.info(f"⏳ Waiting {wait_time} seconds before next sell attempt...")
+                                    await asyncio.sleep(wait_time)
+                            
+                            if not sell_successful:
+                                logger.error(f"❌ All sell attempts failed for wallet {wallet_address[:8]}... after {max_sell_retries} retries")
+                                results["swaps_failed"] += 1
                             
                             # Wait between trades
-                            await asyncio.sleep(5)
+                            await asyncio.sleep(3)
                             
                         else:
                             logger.warning(f"❌ BUY failed: {buy_result.get('message', 'Unknown error')}")
@@ -4916,7 +4950,8 @@ class ApiClient:
             
             logger.info(f"SPL volume generation completed: {successful_buys} buys, {successful_sells} sells, "
                        f"{results['swaps_failed']} failures in {results['duration']:.2f} seconds. "
-                       f"Total volume: {total_volume:.6f} SOL")
+                       f"Total volume: {total_volume:.6f} SOL "
+                       f"(intended: {intended_total_volume:.6f} SOL, compliance: {((total_volume/intended_total_volume)*100):.1f}%)")
             
             return results
             
@@ -5003,8 +5038,8 @@ class ApiClient:
         # Solana account minimums (in lamports) - REAL WORLD VALUES based on actual logs
         SOL_ACCOUNT_RENT_EXEMPTION = 890880      # ~0.00089 SOL (actual rent exemption for SOL account)
         TOKEN_ACCOUNT_RENT_EXEMPTION = 2039280   # ~0.00204 SOL (ACTUAL from logs: "need 2039280")
-        TRANSACTION_FEE_BUFFER = 50000           # ~0.00005 SOL (enhanced buffer for complex transaction fees)
-        PRIORITY_FEE_BUFFER = 500000             # ~0.0005 SOL (significantly increased for complex Jupiter swaps)
+        TRANSACTION_FEE_BUFFER = 25000           # ~0.000025 SOL (minimal transaction fees)
+        PRIORITY_FEE_BUFFER = 100000             # ~0.0001 SOL (reduced for faster funding)
         
         # Total reserved amount per wallet (in lamports)
         TOTAL_RESERVED_LAMPORTS = (

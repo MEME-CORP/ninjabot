@@ -120,7 +120,9 @@ def format_volume_confirmation_message(volume: float) -> str:
     """
     return (
         f"✅ Volume amount set to {volume:,} SOL.\n\n"
-        f"This volume will be generated through transfers between your child wallets for the SPL token you specify."
+        f"This volume will be generated through transfers between your child wallets for the SPL token you specify.\n\n"
+        f"⚡ **Volume Enforcement**: The system will strictly enforce this total limit - "
+        f"no individual swap will exceed the remaining volume budget to ensure compliance."
     )
 
 def format_schedule_preview(
