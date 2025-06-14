@@ -772,12 +772,13 @@ async def generate_preview(message: telegram.Message, context: CallbackContext) 
     )
 
     try:
-        # Generate schedule
-        schedule = api_client.generate_schedule(
+        # Generate natural trading schedule with separated phases for better stealth
+        schedule = api_client.generate_natural_trading_schedule(
             mother_wallet=mother_wallet,
             child_wallets=child_wallets,
             token_address=token_address,
-            total_volume=total_volume
+            total_volume=total_volume,
+            pattern_type="separated_phases"
         )
 
         # Store schedule in session

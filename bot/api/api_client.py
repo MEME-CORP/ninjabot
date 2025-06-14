@@ -950,6 +950,238 @@ class ApiClient:
         self.use_mock = old_use_mock
         return result
     
+    def generate_natural_trading_schedule(
+        self, 
+        mother_wallet: str,
+        child_wallets: List[str],
+        token_address: str,
+        total_volume: float,
+        pattern_type: str = "separated_phases"
+    ) -> Dict[str, Any]:
+        """
+        Generate a more natural trading schedule that supports separated buy/sell patterns.
+        
+        Args:
+            mother_wallet: Mother wallet address
+            child_wallets: List of child wallet addresses  
+            token_address: Token contract address
+            total_volume: Total volume to generate
+            pattern_type: Type of pattern ('separated_phases', 'mixed', 'traditional')
+            
+        Returns:
+            Schedule information with natural trading patterns
+        """
+        import random
+        import time
+        
+        # Calculate fee
+        from bot.config import SERVICE_FEE_RATE
+        fee = total_volume * SERVICE_FEE_RATE
+        remaining_volume = total_volume - fee
+        
+        logger.info(
+            f"Generating natural trading schedule: {pattern_type} pattern",
+            extra={
+                "mother_wallet": mother_wallet,
+                "child_wallets_count": len(child_wallets),
+                "token_address": token_address,
+                "total_volume": total_volume,
+                "pattern_type": pattern_type
+            }
+        )
+        
+        if pattern_type == "separated_phases":
+            # Create a schedule that supports separated buy/sell phases
+            
+            # Distribute volume across wallets with realistic variation
+            num_operations = random.randint(len(child_wallets), len(child_wallets) * 2)
+            
+            # Create buy operations first
+            buy_operations = []
+            total_assigned = 0
+            
+            for i in range(num_operations):
+                # Select a random wallet for this operation
+                wallet_idx = random.randint(0, len(child_wallets) - 1)
+                wallet_address = child_wallets[wallet_idx]
+                
+                # Calculate amount for this operation
+                if i == num_operations - 1:  # Last operation gets remaining volume
+                    amount = remaining_volume - total_assigned
+                else:
+                    # Random amount between 5% and 15% of remaining volume
+                    max_amount = (remaining_volume - total_assigned) * 0.15
+                    min_amount = max_amount * 0.33  # At least 1/3 of max
+                    amount = random.uniform(min_amount, max_amount)
+                
+                # Ensure amount is reasonable
+                amount = max(0.001, min(amount, 0.01))  # Between 0.001 and 0.01 SOL
+                total_assigned += amount
+                
+                buy_operations.append({
+                    "id": f"buy_{i}",
+                    "type": "buy",
+                    "wallet_index": wallet_idx,
+                    "from": wallet_address,
+                    "to": "TOKEN_MINT",  # Placeholder for token purchases
+                    "amount": amount,
+                    "amount_sol": amount,
+                    "timestamp": time.time() + random.randint(1, 60),  # Spread over first minute
+                    "status": "pending",
+                    "phase": "buying"
+                })
+                
+                if total_assigned >= remaining_volume * 0.95:  # Stop when we've assigned 95% of volume
+                    break
+            
+            # Create corresponding sell operations (delayed)
+            sell_operations = []
+            for i, buy_op in enumerate(buy_operations):
+                sell_operations.append({
+                    "id": f"sell_{i}",
+                    "type": "sell", 
+                    "wallet_index": buy_op["wallet_index"],
+                    "from": "TOKEN_BALANCE",  # Placeholder for token sales
+                    "to": buy_op["from"],  # Same wallet
+                    "amount": buy_op["amount"] * 0.95,  # Slightly less due to fees/slippage
+                    "amount_sol": buy_op["amount"] * 0.95,
+                    "timestamp": buy_op["timestamp"] + random.randint(30, 300),  # 30s to 5min later
+                    "status": "pending", 
+                    "phase": "selling",
+                    "paired_with": buy_op["id"]
+                })
+            
+            # Combine and sort by timestamp
+            all_transfers = buy_operations + sell_operations
+            all_transfers.sort(key=lambda x: x["timestamp"])
+            
+        elif pattern_type == "mixed":
+            # Create a mixed pattern with some immediate sells and some delayed
+            all_transfers = []
+            total_assigned = 0
+            num_operations = random.randint(len(child_wallets), len(child_wallets) * 3)
+            
+            for i in range(num_operations):
+                wallet_idx = random.randint(0, len(child_wallets) - 1)
+                wallet_address = child_wallets[wallet_idx]
+                
+                # Calculate amount
+                if i == num_operations - 1:
+                    amount = remaining_volume - total_assigned
+                else:
+                    max_amount = (remaining_volume - total_assigned) * 0.12
+                    min_amount = max_amount * 0.4
+                    amount = random.uniform(min_amount, max_amount)
+                
+                amount = max(0.001, min(amount, 0.008))
+                total_assigned += amount
+                
+                # Decide if this should be immediate or delayed sell
+                use_delay = random.random() > 0.4  # 60% chance of delay
+                
+                if use_delay:
+                    # Create buy first, then delayed sell
+                    buy_time = time.time() + random.randint(1, 120)
+                    sell_time = buy_time + random.randint(15, 180)  # 15s to 3min delay
+                    
+                    all_transfers.extend([
+                        {
+                            "id": f"buy_{i}",
+                            "type": "buy",
+                            "wallet_index": wallet_idx,
+                            "from": wallet_address,
+                            "to": "TOKEN_MINT",
+                            "amount": amount,
+                            "timestamp": buy_time,
+                            "status": "pending",
+                            "pattern": "delayed"
+                        },
+                        {
+                            "id": f"sell_{i}",
+                            "type": "sell",
+                            "wallet_index": wallet_idx, 
+                            "from": "TOKEN_BALANCE",
+                            "to": wallet_address,
+                            "amount": amount * 0.95,
+                            "timestamp": sell_time,
+                            "status": "pending",
+                            "pattern": "delayed",
+                            "paired_with": f"buy_{i}"
+                        }
+                    ])
+                else:
+                    # Traditional immediate pattern
+                    base_time = time.time() + random.randint(1, 180)
+                    
+                    all_transfers.extend([
+                        {
+                            "id": f"buy_{i}",
+                            "type": "buy", 
+                            "wallet_index": wallet_idx,
+                            "from": wallet_address,
+                            "to": "TOKEN_MINT",
+                            "amount": amount,
+                            "timestamp": base_time,
+                            "status": "pending",
+                            "pattern": "immediate"
+                        },
+                        {
+                            "id": f"sell_{i}",
+                            "type": "sell",
+                            "wallet_index": wallet_idx,
+                            "from": "TOKEN_BALANCE", 
+                            "to": wallet_address,
+                            "amount": amount * 0.95,
+                            "timestamp": base_time + random.randint(5, 15),  # Very short delay
+                            "status": "pending",
+                            "pattern": "immediate",
+                            "paired_with": f"buy_{i}"
+                        }
+                    ])
+                
+                if total_assigned >= remaining_volume * 0.95:
+                    break
+            
+            all_transfers.sort(key=lambda x: x["timestamp"])
+            
+        else:  # traditional pattern
+            # Fall back to traditional immediate buy-sell pattern
+            return self.generate_schedule(mother_wallet, child_wallets, token_address, total_volume)
+        
+        # Add service fee transaction
+        if all_transfers:
+            fee_transfer = {
+                "id": "tx_fee",
+                "type": "fee",
+                "from": child_wallets[0],
+                "to": "ServiceFeeWallet123456789",
+                "amount": fee,
+                "timestamp": all_transfers[-1]["timestamp"] + random.randint(10, 60),
+                "status": "pending",
+                "is_fee": True
+            }
+            all_transfers.append(fee_transfer)
+        
+        return {
+            "run_id": f"run_{int(time.time())}_{pattern_type}",
+            "mother_wallet": mother_wallet,
+            "token_address": token_address,
+            "total_volume": total_volume,
+            "service_fee": fee,
+            "net_volume": remaining_volume,
+            "transfers": all_transfers,
+            "created_at": time.time(),
+            "pattern_type": pattern_type,
+            "buy_operations": len([t for t in all_transfers if t.get("type") == "buy"]),
+            "sell_operations": len([t for t in all_transfers if t.get("type") == "sell"]),
+            "total_operations": len(all_transfers),
+            "separation_info": {
+                "uses_separated_phases": pattern_type == "separated_phases",
+                "max_delay_seconds": max([t.get("timestamp", 0) for t in all_transfers if t.get("type") == "sell"]) - 
+                                   min([t.get("timestamp", 0) for t in all_transfers if t.get("type") == "buy"]) if all_transfers else 0
+            }
+        }
+    
     def generate_funding_operation_id(self, mother_wallet: str, child_wallet: str, amount: float) -> str:
         """
         Generate a deterministic operation ID to track mother-to-child funding attempts.
@@ -4647,10 +4879,10 @@ class ApiClient:
         token_address: str,
         verify_transfers: bool = True,
     ) -> Dict[str, Any]:
-        """Execute SPL volume generation with proper balance management"""
+        """Execute SPL volume generation with separated buy/sell phases for natural trading patterns"""
         
         try:
-            logger.info(f"Starting SPL volume generation with {len(trades)} swaps for token {token_address}")
+            logger.info(f"Starting advanced SPL volume generation with {len(trades)} swaps for token {token_address}")
             
             # SOL mint address for Jupiter swaps
             SOL_MINT = "So11111111111111111111111111111111111111112"
@@ -4689,6 +4921,7 @@ class ApiClient:
                 "duration": 0,
                 "total_volume_sol": 0,
                 "verification_enabled": verify_transfers,
+                "pattern_type": "separated_phases"  # Indicate the new pattern
             }
             
             def calculate_safe_swap_amount(wallet_address: str, requested_sol: float) -> float:
@@ -4738,7 +4971,7 @@ class ApiClient:
                     logger.error(f"Error calculating safe swap amount for {wallet_address}: {e}")
                     return 0.0
 
-            # Fix 2: Enhanced Jupiter-ready wallet validation before volume generation
+            # Enhanced Jupiter-ready wallet validation before volume generation
             total_usable_balance = 0.0
             insufficient_wallets = []
             jupiter_ready_wallets = 0
@@ -4793,34 +5026,59 @@ class ApiClient:
             # VOLUME ENFORCEMENT: Calculate total intended volume from trades
             intended_total_volume = sum(trade.get("amount", trade.get("amount_sol", 0.001)) for trade in trades)
             logger.info(f"Volume enforcement: Intended total volume: {intended_total_volume:.6f} SOL across {len(trades)} trades")
+
+            # NEW SEPARATED PATTERN LOGIC - Phase-based approach
+            import random
+            
+            # Step 1: Create separated buy and sell operations with randomization
+            buy_operations = []
+            sell_operations = []
+            wallet_token_balances = {wallet: 0.0 for wallet in child_wallets}  # Track token holdings per wallet
+            
+            # Phase 1: Generate BUY operations across different wallets
+            logger.info("🛍️ PHASE 1: Generating distributed BUY operations...")
             
             for i, trade in enumerate(trades):
+                wallet_idx = trade.get("wallet_index", i % len(child_wallets))
+                wallet_address = child_wallets[wallet_idx]
+                trade_sol_amount = trade.get("amount", trade.get("amount_sol", 0.001))
+                
+                # VOLUME ENFORCEMENT: Check if adding this swap would exceed intended total
+                if total_volume + trade_sol_amount > intended_total_volume * 1.1:  # Allow 10% tolerance
+                    logger.warning(f"Skipping buy {i+1}: would exceed intended volume limit")
+                    continue
+                
+                buy_operations.append({
+                    "type": "buy",
+                    "wallet_address": wallet_address,
+                    "wallet_private_key": private_key_map[wallet_address],
+                    "amount_sol": trade_sol_amount,
+                    "operation_id": f"buy_{i}",
+                    "original_trade_index": i
+                })
+                total_volume += trade_sol_amount
+
+            # Shuffle buy operations to randomize execution order
+            random.shuffle(buy_operations)
+            
+            # Phase 2: Execute BUY operations with delays
+            logger.info(f"🚀 PHASE 1: Executing {len(buy_operations)} BUY operations...")
+            
+            for buy_op in buy_operations:
                 try:
-                    wallet_idx = trade.get("wallet_index", i % len(child_wallets))
-                    wallet_address = child_wallets[wallet_idx]
-                    wallet_private_key = child_private_keys[wallet_idx]
-                    
-                    # VOLUME ENFORCEMENT: Use the trade amount from schedule instead of defaulting to 0.01
-                    # This ensures we respect the user's total volume limit distribution
-                    trade_sol_amount = trade.get("amount", trade.get("amount_sol", 0.001))  # Fallback to smaller default
+                    wallet_address = buy_op["wallet_address"] 
+                    wallet_private_key = buy_op["wallet_private_key"]
+                    trade_sol_amount = buy_op["amount_sol"]
                     
                     # Calculate safe swap amount
                     safe_sol_amount = calculate_safe_swap_amount(wallet_address, trade_sol_amount)
                     
-                    # VOLUME ENFORCEMENT: Check if adding this swap would exceed intended total
-                    if total_volume + safe_sol_amount > intended_total_volume * 1.1:  # Allow 10% tolerance
-                        logger.warning(f"Skipping swap {i+1}: would exceed intended volume limit "
-                                     f"(current: {total_volume:.6f}, intended: {intended_total_volume:.6f}, "
-                                     f"this swap: {safe_sol_amount:.6f})")
-                        results["swaps_failed"] += 1
-                        continue
-                    
                     if safe_sol_amount <= 0:
-                        logger.error(f"Wallet {wallet_address} has insufficient balance for any swap")
+                        logger.error(f"Wallet {wallet_address} has insufficient balance for buy operation")
                         results["swaps_failed"] += 1
                         continue
                     
-                    logger.info(f"Swap {i+1}/{len(trades)}: BUY {safe_sol_amount:.6f} SOL worth of {token_address[:8]}...")
+                    logger.info(f"BUY Operation: {safe_sol_amount:.6f} SOL → {token_address[:8]}... (Wallet: {wallet_address[:8]}...)")
                     
                     # BUY operation (SOL -> Token)
                     buy_quote = self.get_jupiter_quote(
@@ -4830,11 +5088,7 @@ class ApiClient:
                         slippage_bps=100
                     )
                     
-                    # Debug logging for quote response
-                    logger.info(f"Buy quote response keys: {list(buy_quote.keys()) if isinstance(buy_quote, dict) else 'Not a dict'}")
-                    logger.info(f"Quote success check: quoteResponse exists = {buy_quote.get('quoteResponse') is not None}")
-                    
-                    # Fix: Check for quoteResponse instead of non-existent 'success' field
+                    # Check for valid quote
                     if buy_quote.get("quoteResponse") is not None:
                         buy_result = self.execute_jupiter_swap(
                             user_wallet_private_key=wallet_private_key,
@@ -4842,80 +5096,24 @@ class ApiClient:
                             verify_swap=verify_transfers
                         )
                         
-                        # Fix: Consistent success checking - use "status" field consistently
-                        buy_successful = (buy_result.get("status") == "success" or buy_result.get("success") == True)
+                        # Check if buy was successful
+                        buy_result_successful = (buy_result.get("status") == "success" or buy_result.get("success") == True)
                         
-                        if buy_successful:
-                            logger.info(f"✅ BUY successful: {safe_sol_amount:.6f} SOL -> {token_address[:8]}...")
+                        if buy_result_successful:
+                            logger.info(f"✅ BUY successful: {safe_sol_amount:.6f} SOL → {token_address[:8]}... (Wallet: {wallet_address[:8]}...)")
                             successful_buys += 1
-                            total_volume += safe_sol_amount
                             
-                            # Extended wait for blockchain confirmation and token account creation
-                            logger.info(f"⏳ Waiting 8 seconds for blockchain confirmation and token balance propagation...")
-                            await asyncio.sleep(8)
+                            # Track token balance for this wallet (estimate)
+                            wallet_token_balances[wallet_address] += safe_sol_amount  # Use SOL amount as proxy
                             
-                            # SELL operation (Token -> SOL) - Enhanced with multiple retry attempts
-                            logger.info(f"Swap {i+1}/{len(trades)}: SELL {token_address[:8]}... back to SOL")
-                            
-                            sell_successful = False
-                            max_sell_retries = 3
-                            
-                            for retry_attempt in range(max_sell_retries):
-                                logger.info(f"🔄 Sell attempt {retry_attempt + 1}/{max_sell_retries} for wallet {wallet_address[:8]}...")
-                                
-                                # Check SPL token balance
-                                token_balance_info = self.get_spl_token_balance(wallet_address, token_address)
-                                
-                                if token_balance_info.get("success") and token_balance_info.get("balance", 0) > 0:
-                                    raw_token_balance = token_balance_info.get("balance", 0)
-                                    token_decimals = token_balance_info.get("decimals", 6)
-                                    
-                                    logger.info(f"💰 Found token balance: {raw_token_balance} (decimals: {token_decimals}) for wallet {wallet_address[:8]}...")
-                                    
-                                    # Get sell quote (Token -> SOL)
-                                    sell_quote = self.get_jupiter_quote(
-                                        input_mint=token_address,
-                                        output_mint=SOL_MINT,
-                                        amount=raw_token_balance,  # Use raw balance (already in token units)
-                                        slippage_bps=150  # Increased slippage for better success rate
-                                    )
-                                    
-                                    if sell_quote.get("quoteResponse") is not None:
-                                        sell_result = self.execute_jupiter_swap(
-                                            user_wallet_private_key=wallet_private_key,
-                                            quote_response=sell_quote,
-                                            verify_swap=verify_transfers
-                                        )
-                                        
-                                        # Fix: Consistent success checking - use same logic as buy
-                                        sell_result_successful = (sell_result.get("status") == "success" or sell_result.get("success") == True)
-                                        
-                                        if sell_result_successful:
-                                            logger.info(f"✅ SELL successful (attempt {retry_attempt + 1}): {token_address[:8]}... -> SOL")
-                                            successful_sells += 1
-                                            sell_successful = True
-                                            break
-                                        else:
-                                            logger.warning(f"❌ SELL failed (attempt {retry_attempt + 1}): {sell_result.get('message', 'Unknown error')}")
-                                    else:
-                                        logger.warning(f"❌ SELL quote failed (attempt {retry_attempt + 1}): {sell_quote.get('message', 'Unknown error')}")
-                                        
-                                else:
-                                    logger.warning(f"⚠️ No token balance found (attempt {retry_attempt + 1}) for wallet {wallet_address[:8]}...")
-                                
-                                # Wait before next retry (progressive backoff)
-                                if retry_attempt < max_sell_retries - 1:
-                                    wait_time = 5 + (retry_attempt * 3)  # 5s, 8s, 11s
-                                    logger.info(f"⏳ Waiting {wait_time} seconds before next sell attempt...")
-                                    await asyncio.sleep(wait_time)
-                            
-                            if not sell_successful:
-                                logger.error(f"❌ All sell attempts failed for wallet {wallet_address[:8]}... after {max_sell_retries} retries")
-                                results["swaps_failed"] += 1
-                            
-                            # Wait between trades
-                            await asyncio.sleep(3)
-                            
+                            results["swap_results"].append({
+                                "operation_id": buy_op["operation_id"],
+                                "type": "buy",
+                                "wallet": wallet_address[:8] + "...",
+                                "amount_sol": safe_sol_amount,
+                                "status": "success",
+                                "timestamp": time.time()
+                            })
                         else:
                             logger.warning(f"❌ BUY failed: {buy_result.get('message', 'Unknown error')}")
                             results["swaps_failed"] += 1
@@ -4925,8 +5123,102 @@ class ApiClient:
                     
                     results["swaps_executed"] += 1
                     
+                    # Random delay between buy operations (1-5 seconds)
+                    await asyncio.sleep(random.uniform(1, 5))
+                    
                 except Exception as e:
-                    logger.error(f"Error in swap {i+1}: {str(e)}")
+                    logger.error(f"Error in buy operation: {str(e)}")
+                    results["swaps_failed"] += 1
+                    continue
+
+            # Phase 3: Wait period to create separation between buys and sells
+            separation_delay = random.uniform(10, 30)  # 10-30 second delay
+            logger.info(f"⏳ SEPARATION PHASE: Waiting {separation_delay:.1f} seconds to create natural trading gap...")
+            await asyncio.sleep(separation_delay)
+
+            # Phase 4: Generate SELL operations from wallets that have tokens
+            logger.info("💰 PHASE 2: Generating SELL operations from token holders...")
+            
+            # Only create sell operations for wallets that actually bought tokens
+            for wallet_address, estimated_token_amount in wallet_token_balances.items():
+                if estimated_token_amount > 0:  # Only wallets that successfully bought
+                    sell_operations.append({
+                        "type": "sell",
+                        "wallet_address": wallet_address,
+                        "wallet_private_key": private_key_map[wallet_address],
+                        "estimated_tokens": estimated_token_amount,
+                        "operation_id": f"sell_{wallet_address[:8]}"
+                    })
+
+            # Shuffle sell operations to randomize which wallet sells first
+            random.shuffle(sell_operations)
+            
+            # Phase 5: Execute SELL operations with delays
+            logger.info(f"🔄 PHASE 2: Executing {len(sell_operations)} SELL operations...")
+            
+            for sell_op in sell_operations:
+                try:
+                    wallet_address = sell_op["wallet_address"]
+                    wallet_private_key = sell_op["wallet_private_key"]
+                    
+                    logger.info(f"SELL Operation: {token_address[:8]}... → SOL (Wallet: {wallet_address[:8]}...)")
+                    
+                    # Check actual SPL token balance
+                    token_balance_info = self.get_spl_token_balance(wallet_address, token_address)
+                    
+                    if token_balance_info.get("success") and token_balance_info.get("balance", 0) > 0:
+                        raw_token_balance = token_balance_info.get("balance", 0)
+                        token_decimals = token_balance_info.get("decimals", 6)
+                        
+                        logger.info(f"💰 Found token balance: {raw_token_balance} (decimals: {token_decimals}) for wallet {wallet_address[:8]}...")
+                        
+                        # Get sell quote (Token -> SOL)
+                        sell_quote = self.get_jupiter_quote(
+                            input_mint=token_address,
+                            output_mint=SOL_MINT,
+                            amount=raw_token_balance,  # Use raw balance (already in token units)
+                            slippage_bps=150  # Increased slippage for better success rate
+                        )
+                        
+                        if sell_quote.get("quoteResponse") is not None:
+                            sell_result = self.execute_jupiter_swap(
+                                user_wallet_private_key=wallet_private_key,
+                                quote_response=sell_quote,
+                                verify_swap=verify_transfers
+                            )
+                            
+                            # Check if sell was successful
+                            sell_result_successful = (sell_result.get("status") == "success" or sell_result.get("success") == True)
+                            
+                            if sell_result_successful:
+                                logger.info(f"✅ SELL successful: {token_address[:8]}... → SOL (Wallet: {wallet_address[:8]}...)")
+                                successful_sells += 1
+                                
+                                results["swap_results"].append({
+                                    "operation_id": sell_op["operation_id"],
+                                    "type": "sell",
+                                    "wallet": wallet_address[:8] + "...",
+                                    "token_balance_sold": raw_token_balance,
+                                    "status": "success",
+                                    "timestamp": time.time()
+                                })
+                            else:
+                                logger.warning(f"❌ SELL failed: {sell_result.get('message', 'Unknown error')}")
+                                results["swaps_failed"] += 1
+                        else:
+                            logger.warning(f"❌ SELL quote failed: {sell_quote.get('message', 'Unknown error')}")
+                            results["swaps_failed"] += 1
+                    else:
+                        logger.warning(f"⚠️ No token balance found for wallet {wallet_address[:8]}...")
+                        results["swaps_failed"] += 1
+                    
+                    results["swaps_executed"] += 1
+                    
+                    # Random delay between sell operations (2-8 seconds)
+                    await asyncio.sleep(random.uniform(2, 8))
+                    
+                except Exception as e:
+                    logger.error(f"Error in sell operation: {str(e)}")
                     results["swaps_failed"] += 1
                     continue
             
@@ -4944,10 +5236,11 @@ class ApiClient:
             else:
                 results["status"] = "failed"
             
-            logger.info(f"SPL volume generation completed: {successful_buys} buys, {successful_sells} sells, "
+            logger.info(f"🎯 ADVANCED SPL volume generation completed: {successful_buys} buys, {successful_sells} sells, "
                        f"{results['swaps_failed']} failures in {results['duration']:.2f} seconds. "
                        f"Total volume: {total_volume:.6f} SOL "
-                       f"(intended: {intended_total_volume:.6f} SOL, compliance: {((total_volume/intended_total_volume)*100):.1f}%)")
+                       f"(intended: {intended_total_volume:.6f} SOL, compliance: {((total_volume/intended_total_volume)*100):.1f}%) "
+                       f"Pattern: Separated phases with {separation_delay:.1f}s gap")
             
             return results
             
@@ -4960,7 +5253,8 @@ class ApiClient:
                 "swaps_executed": 0,
                 "buys_succeeded": 0,
                 "sells_succeeded": 0,
-                "swaps_failed": len(trades)
+                "swaps_failed": len(trades),
+                "pattern_type": "separated_phases"
             }
 
     def get_spl_token_info(self, token_address: str) -> Dict[str, Any]:
