@@ -74,6 +74,21 @@ class ConversationState:
     SPL_PREVIEW = 24
     SPL_EXECUTION = 25
 
+    # Activity Selection States (New for PumpFun Integration)
+    ACTIVITY_SELECTION = 30
+    ACTIVITY_CONFIRMATION = 31
+
+    # Bundling Workflow States
+    BUNDLING_WALLET_SETUP = 40
+    IMPORT_AIRDROP_WALLET = 41
+    BUNDLED_WALLETS_COUNT = 42
+    TOKEN_CREATION_START = 43
+    TOKEN_PARAMETER_INPUT = 44
+    TOKEN_CREATION_PREVIEW = 45
+    TOKEN_CREATION_EXECUTION = 46
+    BUNDLE_OPERATION_PROGRESS = 47
+    BUNDLE_OPERATION_COMPLETE = 48
+
 # Volume generation strategies
 class VolumeStrategy:
     MAX_VOLUME = "MAX_VOLUME"
@@ -94,6 +109,17 @@ class CallbackPrefix:
     SPL_AMOUNT_STRATEGY = "spl_amt_"
     SPL_EXECUTION_MODE = "spl_exec_"
     SPL_CONFIRM = "spl_confirm_"
+
+    # Activity Selection prefixes
+    ACTIVITY = "activity_"
+    VOLUME_GENERATION = "volume_gen"
+    BUNDLING = "bundling"
+
+    # Bundling Workflow prefixes
+    BUNDLING_SETUP = "bundle_setup_"
+    TOKEN_PARAM = "token_param_"
+    BUY_AMOUNT = "buy_amt_"
+    BATCH_OPERATION = "batch_op_"
 
 # Make everything available at package level
 __all__ = [

@@ -15,7 +15,7 @@ from telegram.ext import (
 )
 from loguru import logger
 
-from bot.config import ConversationState, MIN_CHILD_WALLETS, SERVICE_FEE_RATE, CONVERSATION_TIMEOUT
+from bot.config import ConversationState, CallbackPrefix, MIN_CHILD_WALLETS, SERVICE_FEE_RATE, CONVERSATION_TIMEOUT
 from bot.utils.keyboard_utils import build_button, build_keyboard, build_menu
 from bot.utils.validation_utils import (
     validate_child_wallets_input,
@@ -188,7 +188,7 @@ async def volume_generation_job(context: CallbackContext):
 # Handler functions
 async def start(update: Update, context: CallbackContext) -> int:
     """
-    Start the conversation and ask for wallet creation or import.
+    Start the conversation and show activity selection.
 
     Args:
         update: The update object
@@ -206,6 +206,108 @@ async def start(update: Update, context: CallbackContext) -> int:
     # Clear any existing session data
     session_manager.clear_session(user.id)
 
+    # Import message formatters
+    from bot.utils.message_utils import format_activity_selection_message
+
+    # Build keyboard with activity options
+    keyboard = [
+        [build_button("📊 Volume Generation", f"{CallbackPrefix.ACTIVITY}{CallbackPrefix.VOLUME_GENERATION}")],
+        [build_button("🚀 Token Bundling (PumpFun)", f"{CallbackPrefix.ACTIVITY}{CallbackPrefix.BUNDLING}")]
+    ]
+
+    # Send activity selection message
+    message = update.effective_message
+    await message.reply_text(
+        format_activity_selection_message(),
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+    return ConversationState.ACTIVITY_SELECTION
+
+
+async def activity_choice(update: Update, context: CallbackContext) -> int:
+    """
+    Handle activity selection (Volume Generation vs Bundling).
+
+    Args:
+        update: The update object
+        context: The context object
+
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+
+    choice = query.data
+    
+    # Import message formatters
+    from bot.utils.message_utils import format_activity_confirmation_message
+
+    if choice == f"{CallbackPrefix.ACTIVITY}{CallbackPrefix.VOLUME_GENERATION}":
+        # User selected Volume Generation
+        session_manager.update_session_value(user.id, "activity_type", "volume_generation")
+        
+        logger.info(
+            f"User {user.id} selected Volume Generation",
+            extra={"user_id": user.id, "activity": "volume_generation"}
+        )
+        
+        # Show confirmation and redirect to wallet setup for volume generation
+        await query.edit_message_text(
+            format_activity_confirmation_message("volume_generation"),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Add small delay for user to read confirmation
+        await asyncio.sleep(2)
+        
+        # Redirect to wallet choice for volume generation workflow
+        return await start_volume_generation_workflow(update, context)
+    
+    elif choice == f"{CallbackPrefix.ACTIVITY}{CallbackPrefix.BUNDLING}":
+        # User selected Bundling
+        session_manager.update_session_value(user.id, "activity_type", "bundling")
+        
+        logger.info(
+            f"User {user.id} selected Token Bundling",
+            extra={"user_id": user.id, "activity": "bundling"}
+        )
+        
+        # Show confirmation and redirect to bundling workflow
+        await query.edit_message_text(
+            format_activity_confirmation_message("bundling"),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Add small delay for user to read confirmation
+        await asyncio.sleep(2)
+        
+        # Redirect to bundling wallet setup
+        return await start_bundling_workflow(update, context)
+    
+    else:
+        # Invalid choice, return to activity selection
+        logger.warning(f"Invalid activity choice: {choice} from user {user.id}")
+        return await start(update, context)
+
+
+async def start_volume_generation_workflow(update: Update, context: CallbackContext) -> int:
+    """
+    Start the volume generation workflow with wallet setup.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    
     # Check if there are any saved mother wallets
     saved_wallets = api_client.list_saved_wallets('mother')
 
@@ -219,15 +321,95 @@ async def start(update: Update, context: CallbackContext) -> int:
     if saved_wallets:
         keyboard.append([build_button("Use Saved Wallet", "use_saved_wallet")])
 
+    # Add back button to return to activity selection
+    keyboard.append([build_button("« Back to Activities", "back_to_activities")])
+
     # Send welcome message with keyboard
-    message = update.effective_message
-    await message.reply_text(
+    await query.edit_message_text(
         format_welcome_message(),
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.MARKDOWN
     )
 
     return ConversationState.WALLET_CHOICE
+
+
+async def start_bundling_workflow(update: Update, context: CallbackContext) -> int:
+    """
+    Start the bundling workflow with airdrop wallet setup.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    
+    # Initialize PumpFun client
+    try:
+        from bot.api.pumpfun_client import PumpFunClient
+        pumpfun_client = PumpFunClient()
+        
+        # Store client in session for later use
+        session_manager.update_session_value(user.id, "pumpfun_client", pumpfun_client)
+        
+        # Check PumpFun API health
+        health_status = pumpfun_client.health_check()
+        if not health_status.get("api_reachable", False):
+            logger.error(
+                f"PumpFun API not reachable for user {user.id}",
+                extra={"user_id": user.id, "health_status": health_status}
+            )
+            
+            # Show error and return to activity selection
+            keyboard = [[build_button("« Back to Activities", "back_to_activities")]]
+            await query.edit_message_text(
+                "❌ **PumpFun API Unavailable**\n\n"
+                "The PumpFun API is currently not reachable. Please try again later or contact support.\n\n"
+                f"Error: {health_status.get('error', 'Unknown error')}",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            return ConversationState.ACTIVITY_SELECTION
+        
+    except Exception as e:
+        logger.error(
+            f"Failed to initialize PumpFun client for user {user.id}: {str(e)}",
+            extra={"user_id": user.id}
+        )
+        
+        # Show error and return to activity selection
+        keyboard = [[build_button("« Back to Activities", "back_to_activities")]]
+        await query.edit_message_text(
+            "❌ **PumpFun Setup Error**\n\n"
+            "Failed to initialize PumpFun integration. Please try again later.\n\n"
+            f"Error: {str(e)}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.ACTIVITY_SELECTION
+    
+    # Build keyboard for airdrop wallet setup
+    keyboard = [
+        [build_button("Create Airdrop Wallet", "create_airdrop_wallet")],
+        [build_button("Import Airdrop Wallet", "import_airdrop_wallet")],
+        [build_button("« Back to Activities", "back_to_activities")]
+    ]
+
+    await query.edit_message_text(
+        "🏪 **Airdrop Wallet Setup**\n\n"
+        "First, let's set up your airdrop (mother) wallet that will fund your bundled wallets.\n\n"
+        "Choose how you want to set up your airdrop wallet:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+    return ConversationState.BUNDLING_WALLET_SETUP
 
 
 async def wallet_choice(update: Update, context: CallbackContext) -> int:
@@ -348,6 +530,10 @@ async def wallet_choice(update: Update, context: CallbackContext) -> int:
 
     elif choice == "back_to_wallet_choice":
         # Go back to wallet choice
+        return await start(update, context)
+    
+    elif choice == "back_to_activities":
+        # Go back to activity selection
         return await start(update, context)
 
     else:
@@ -1900,9 +2086,32 @@ async def fund_more_wallets_handler(update: Update, context: CallbackContext) ->
 
 def register_start_handler(application):
     """Register the start command handler."""
+    # Import bundling handlers
+    from bot.handlers.bundling_handler import (
+        create_airdrop_wallet,
+        import_airdrop_wallet,
+        process_airdrop_wallet_import,
+        bundled_wallets_count,
+        token_creation_start,
+        token_parameter_input,
+        execute_token_creation,
+        bundle_operation_progress
+    )
+    
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
+            # Activity Selection States
+            ConversationState.ACTIVITY_SELECTION: [
+                CallbackQueryHandler(activity_choice, pattern=r"^activity_"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.ACTIVITY_CONFIRMATION: [
+                CallbackQueryHandler(start_volume_generation_workflow, pattern=f"^{CallbackPrefix.ACTIVITY}{CallbackPrefix.VOLUME_GENERATION}$"),
+                CallbackQueryHandler(start_bundling_workflow, pattern=f"^{CallbackPrefix.ACTIVITY}{CallbackPrefix.BUNDLING}$")
+            ],
+            
+            # Volume Generation States (existing)
             ConversationState.WALLET_CHOICE: [CallbackQueryHandler(wallet_choice)],
             ConversationState.IMPORT_WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND, import_wallet)],
             ConversationState.SAVED_WALLET_CHOICE: [CallbackQueryHandler(wallet_choice)],
@@ -1944,6 +2153,48 @@ def register_start_handler(application):
                 CallbackQueryHandler(sell_remaining_balance, pattern=r"^sell_remaining_balance$"),
                 CallbackQueryHandler(trigger_return_all_funds, pattern=r"^trigger_return_all_funds$"),
                 CallbackQueryHandler(finish_and_restart, pattern=r"^finish_and_restart$"),
+            ],
+            
+            # Bundling Workflow States (NEW)
+            ConversationState.BUNDLING_WALLET_SETUP: [
+                CallbackQueryHandler(create_airdrop_wallet, pattern=r"^create_airdrop_wallet$"),
+                CallbackQueryHandler(import_airdrop_wallet, pattern=r"^import_airdrop_wallet$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.IMPORT_AIRDROP_WALLET: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_airdrop_wallet_import),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.BUNDLED_WALLETS_COUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, bundled_wallets_count),
+                CallbackQueryHandler(token_creation_start, pattern=r"^continue_to_bundled_count$"),
+                CallbackQueryHandler(token_creation_start, pattern=r"^start_token_creation$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.TOKEN_CREATION_START: [
+                CallbackQueryHandler(token_creation_start, pattern=r"^start_token_creation$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.TOKEN_PARAMETER_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, token_parameter_input),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.TOKEN_CREATION_PREVIEW: [
+                CallbackQueryHandler(execute_token_creation, pattern=r"^confirm_token_creation$"),
+                CallbackQueryHandler(token_creation_start, pattern=r"^edit_token_parameters$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.TOKEN_CREATION_EXECUTION: [
+                CallbackQueryHandler(bundle_operation_progress, pattern=r"^execute_token_creation$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.BUNDLE_OPERATION_PROGRESS: [
+                CallbackQueryHandler(bundle_operation_progress, pattern=r"^start_bundle_operations$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.BUNDLE_OPERATION_COMPLETE: [
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$"),
+                CallbackQueryHandler(bundle_operation_progress, pattern=r"^view_transaction_details$")
             ]
         },
         fallbacks=[CommandHandler("cancel", cancel)],

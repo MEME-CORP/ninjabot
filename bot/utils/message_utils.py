@@ -815,3 +815,315 @@ def format_sell_remaining_balance_summary(sell_results: Dict[str, Any], token_ad
         message += f"\n⚠️ **Warning:** {sell_results.get('sells_failed', 0)} sale(s) failed. Check individual wallet results for details."
     
     return message
+
+# =============================================================================
+# PUMPFUN BUNDLING MESSAGE FORMATTERS
+# =============================================================================
+
+def format_activity_selection_message() -> str:
+    """
+    Format activity selection message for choosing between Volume Generation and Bundling.
+    
+    Returns:
+        Formatted activity selection message
+    """
+    message = "🚀 **Welcome to NinjaBot Trading Platform!**\n\n"
+    message += "Please select your trading activity:\n\n"
+    message += "📊 **Volume Generation**\n"
+    message += "Generate trading volume for existing SPL tokens using Jupiter aggregator.\n"
+    message += "• Trade SOL ↔ SPL tokens\n"
+    message += "• Configurable volume targets\n"
+    message += "• Multiple wallet coordination\n\n"
+    message += "🚀 **Token Bundling (PumpFun)**\n"
+    message += "Create new tokens and execute coordinated buy/sell operations.\n"
+    message += "• Create custom tokens\n"
+    message += "• Batch wallet operations\n"
+    message += "• Bundle transactions via Jito\n\n"
+    message += "Choose your preferred activity to continue:"
+    
+    return message
+
+def format_activity_confirmation_message(activity_type: str) -> str:
+    """
+    Format activity confirmation message.
+    
+    Args:
+        activity_type: Selected activity ('volume_generation' or 'bundling')
+        
+    Returns:
+        Formatted confirmation message
+    """
+    if activity_type == "volume_generation":
+        message = "📊 **Volume Generation Selected**\n\n"
+        message += "You've chosen to generate trading volume for existing SPL tokens.\n"
+        message += "This will help increase trading activity and market presence.\n\n"
+        message += "Let's start by setting up your wallet configuration..."
+    else:
+        message = "🚀 **Token Bundling Selected**\n\n"
+        message += "You've chosen to create and bundle new tokens using PumpFun.\n"
+        message += "This includes token creation and coordinated trading operations.\n\n"
+        message += "Let's start by setting up your wallet infrastructure..."
+    
+    return message
+
+def format_token_creation_start_message() -> str:
+    """
+    Format token creation start message.
+    
+    Returns:
+        Formatted token creation start message
+    """
+    message = "🪙 **Token Creation Setup**\n\n"
+    message += "Let's create your custom token! I'll guide you through each parameter:\n\n"
+    message += "📝 **Required Information:**\n"
+    message += "• Token Name (e.g., 'My Amazing Token')\n"
+    message += "• Token Symbol (e.g., 'MAT')\n"
+    message += "• Description\n"
+    message += "• Token Image\n\n"
+    message += "🔗 **Optional Social Links:**\n"
+    message += "• Twitter URL\n"
+    message += "• Telegram URL\n"
+    message += "• Website URL\n\n"
+    message += "Let's start with the token name..."
+    
+    return message
+
+def format_token_parameter_request(parameter_name: str, description: str, optional: bool = False) -> str:
+    """
+    Format token parameter request message.
+    
+    Args:
+        parameter_name: Name of the parameter being requested
+        description: Description of the parameter
+        optional: Whether the parameter is optional
+        
+    Returns:
+        Formatted parameter request message
+    """
+    required_text = "Optional" if optional else "Required"
+    
+    message = f"📝 **{parameter_name}** ({'Optional' if optional else 'Required'})\n\n"
+    message += f"{description}\n\n"
+    
+    if parameter_name.lower() == "name":
+        message += "💡 **Guidelines:**\n"
+        message += "• Maximum 32 characters\n"
+        message += "• Use a memorable, unique name\n"
+        message += "• Avoid special characters\n\n"
+    elif parameter_name.lower() == "symbol":
+        message += "💡 **Guidelines:**\n"
+        message += "• Maximum 10 characters\n"
+        message += "• Only letters and numbers\n"
+        message += "• Usually 3-4 characters (e.g., BTC, ETH)\n\n"
+    elif parameter_name.lower() == "description":
+        message += "💡 **Guidelines:**\n"
+        message += "• Maximum 500 characters\n"
+        message += "• Explain your token's purpose\n"
+        message += "• Include key features or use cases\n\n"
+    
+    message += f"Please enter your token {parameter_name.lower()}:"
+    
+    return message
+
+def format_token_creation_preview(token_params: Dict[str, Any]) -> str:
+    """
+    Format token creation preview message.
+    
+    Args:
+        token_params: Dictionary containing token parameters
+        
+    Returns:
+        Formatted preview message
+    """
+    message = "🔍 **Token Creation Preview**\n\n"
+    message += "📝 **Token Details:**\n"
+    message += f"• **Name:** {token_params.get('name', 'N/A')}\n"
+    message += f"• **Symbol:** {token_params.get('symbol', 'N/A')}\n"
+    message += f"• **Description:** {token_params.get('description', 'N/A')}\n"
+    initial_supply = token_params.get('initial_supply', '1000000000')
+    try:
+        # Try to format as number with commas
+        supply_num = int(initial_supply) if isinstance(initial_supply, str) else initial_supply
+        message += f"• **Initial Supply:** {supply_num:,}\n\n"
+    except (ValueError, TypeError):
+        # Fallback to string representation
+        message += f"• **Initial Supply:** {initial_supply}\n\n"
+    
+    message += "🔗 **Social Links:**\n"
+    twitter = token_params.get('twitter', '')
+    telegram = token_params.get('telegram', '')
+    website = token_params.get('website', '')
+    
+    message += f"• **Twitter:** {twitter if twitter else 'Not provided'}\n"
+    message += f"• **Telegram:** {telegram if telegram else 'Not provided'}\n"
+    message += f"• **Website:** {website if website else 'Not provided'}\n\n"
+    
+    message += "🖼️ **Image:** "
+    message += "Uploaded" if token_params.get('image_path') else "Not provided"
+    message += "\n\n"
+    
+    message += "✅ Please review your token details and confirm to proceed with creation."
+    
+    return message
+
+def format_bundle_operation_progress(operation_type: str, progress_data: Dict[str, Any]) -> str:
+    """
+    Format bundle operation progress message.
+    
+    Args:
+        operation_type: Type of operation (e.g., 'token_creation', 'batch_buy', 'batch_sell')
+        progress_data: Progress information
+        
+    Returns:
+        Formatted progress message
+    """
+    current = progress_data.get('current', 0)
+    total = progress_data.get('total', 0)
+    status = progress_data.get('status', 'processing')
+    current_operation = progress_data.get('current_operation', '')
+    
+    operation_emoji = {
+        'token_creation': '🪙',
+        'batch_buy': '🛒',
+        'batch_sell': '💸',
+        'wallet_funding': '💰'
+    }.get(operation_type, '⚙️')
+    
+    operation_title = {
+        'token_creation': 'Token Creation',
+        'batch_buy': 'Batch Buy Operation',
+        'batch_sell': 'Batch Sell Operation',
+        'wallet_funding': 'Wallet Funding'
+    }.get(operation_type, 'Bundle Operation')
+    
+    message = f"{operation_emoji} **{operation_title} Progress**\n\n"
+    
+    if total > 0:
+        progress_bar = "█" * int((current / total) * 10) + "░" * (10 - int((current / total) * 10))
+        message += f"📊 **Progress:** {current}/{total} ({(current/total)*100:.1f}%)\n"
+        message += f"`{progress_bar}`\n\n"
+    
+    message += f"⏳ **Status:** {status.title()}\n"
+    
+    if current_operation:
+        message += f"🔄 **Current:** {current_operation}\n"
+    
+    message += "\n⏱️ Please wait while the operation completes..."
+    
+    return message
+
+def format_bundle_operation_results(results_data: Dict[str, Any]) -> str:
+    """
+    Format bundle operation results message.
+    
+    Args:
+        results_data: Results from bundle operation
+        
+    Returns:
+        Formatted results message
+    """
+    operation_type = results_data.get('operation_type', 'bundle_operation')
+    success = results_data.get('success', False)
+    total_operations = results_data.get('total_operations', 0)
+    successful_operations = results_data.get('successful_operations', 0)
+    failed_operations = results_data.get('failed_operations', 0)
+    bundle_id = results_data.get('bundle_id', '')
+    mint_address = results_data.get('mint_address', '')
+    
+    operation_emoji = {
+        'token_creation': '🪙',
+        'batch_buy': '🛒',
+        'batch_sell': '💸',
+        'wallet_funding': '💰'
+    }.get(operation_type, '⚙️')
+    
+    status_emoji = "✅" if success else "❌"
+    
+    message = f"{operation_emoji} **Bundle Operation Results** {status_emoji}\n\n"
+    
+    message += f"📊 **Operation Summary:**\n"
+    message += f"• Total operations: {total_operations}\n"
+    message += f"• Successful: {successful_operations}\n"
+    message += f"• Failed: {failed_operations}\n"
+    message += f"• Success rate: {(successful_operations/total_operations)*100:.1f}%\n\n" if total_operations > 0 else ""
+    
+    if bundle_id:
+        message += f"📦 **Bundle ID:** `{bundle_id}`\n"
+    
+    if mint_address:
+        message += f"🪙 **Token Address:** `{mint_address}`\n"
+    
+    message += "\n"
+    
+    # Status-specific messaging
+    if success:
+        if operation_type == 'token_creation':
+            message += "🎉 **Token created successfully!**\n"
+            message += "Your token is now live on the blockchain."
+        elif operation_type == 'batch_buy':
+            message += "🎉 **Batch buy completed successfully!**\n"
+            message += "All wallets have purchased your token."
+        elif operation_type == 'batch_sell':
+            message += "🎉 **Batch sell completed successfully!**\n"
+            message += "All specified wallets have sold their tokens."
+    else:
+        message += "⚠️ **Operation completed with issues.**\n"
+        message += "Some transactions may have failed. Check the bundle explorer for details."
+    
+    return message
+
+def format_pumpfun_error_message(error_type: str, error_details: str) -> str:
+    """
+    Format PumpFun-specific error message.
+    
+    Args:
+        error_type: Type of error (validation, network, bundle, etc.)
+        error_details: Detailed error information
+        
+    Returns:
+        Formatted error message
+    """
+    error_emoji = {
+        'validation': '❌',
+        'network': '🌐',
+        'bundle': '📦',
+        'insufficient_balance': '💸',
+        'api': '🔧'
+    }.get(error_type, '⚠️')
+    
+    error_title = {
+        'validation': 'Validation Error',
+        'network': 'Network Error',
+        'bundle': 'Bundle Error',
+        'insufficient_balance': 'Insufficient Balance',
+        'api': 'API Error'
+    }.get(error_type, 'Error')
+    
+    message = f"{error_emoji} **{error_title}**\n\n"
+    message += f"📝 **Details:** {error_details}\n\n"
+    
+    # Provide specific guidance based on error type
+    if error_type == 'validation':
+        message += "💡 **Solution:**\n"
+        message += "• Check your input parameters\n"
+        message += "• Ensure all required fields are filled\n"
+        message += "• Verify format requirements are met\n"
+    elif error_type == 'network':
+        message += "💡 **Solution:**\n"
+        message += "• Check your internet connection\n"
+        message += "• Verify PumpFun API is accessible\n"
+        message += "• Try again in a few moments\n"
+    elif error_type == 'insufficient_balance':
+        message += "💡 **Solution:**\n"
+        message += "• Add SOL to your wallets\n"
+        message += "• Reduce buy amounts\n"
+        message += "• Check wallet balances\n"
+    elif error_type == 'bundle':
+        message += "💡 **Solution:**\n"
+        message += "• Transaction may have failed on-chain\n"
+        message += "• Check Solscan for transaction status\n"
+        message += "• Consider retrying the operation\n"
+    
+    message += "\nTry again or contact support if the issue persists."
+    
+    return message
