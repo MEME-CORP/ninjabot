@@ -2112,7 +2112,8 @@ def register_start_handler(application):
         token_creation_start,
         token_parameter_input,
         execute_token_creation,
-        bundle_operation_progress
+        bundle_operation_progress,
+        wait_and_retry_airdrop
     )
     
     conv_handler = ConversationHandler(
@@ -2177,6 +2178,7 @@ def register_start_handler(application):
                 CallbackQueryHandler(create_airdrop_wallet, pattern=r"^create_airdrop_wallet$"),
                 CallbackQueryHandler(import_airdrop_wallet, pattern=r"^import_airdrop_wallet$"),
                 CallbackQueryHandler(use_existing_airdrop_wallet, pattern=r"^use_existing_airdrop_wallet$"),
+                CallbackQueryHandler(wait_and_retry_airdrop, pattern=r"^wait_and_retry_airdrop$"),
                 CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
             ],
             ConversationState.SELECT_EXISTING_AIRDROP_WALLET: [

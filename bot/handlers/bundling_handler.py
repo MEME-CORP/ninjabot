@@ -67,6 +67,13 @@ async def create_airdrop_wallet(update: Update, context: CallbackContext) -> int
             )
             return ConversationState.ACTIVITY_SELECTION
         
+        # Show initial progress message for cold start scenarios
+        await query.edit_message_text(
+            "🔄 **Creating Airdrop Wallet...**\n\n"
+            "⏳ Initializing wallet creation. This may take a moment if the API is starting up...",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
         # Create airdrop wallet using PumpFun API
         logger.info(f"Creating airdrop wallet for user {user.id}")
         wallet_info = pumpfun_client.create_airdrop_wallet()
@@ -117,16 +124,67 @@ async def create_airdrop_wallet(update: Update, context: CallbackContext) -> int
             extra={"user_id": user.id}
         )
         
-        keyboard = [[build_button("Try Again", "create_airdrop_wallet")],
-                   [build_button("« Back to Activities", "back_to_activities")]]
+        # Enhanced error handling for cold start scenarios
+        is_timeout_error = "timeout" in str(e).lower()
+        is_connection_error = "connection" in str(e).lower()
+        
+        if is_timeout_error or is_connection_error:
+            keyboard = [
+                [build_button("🔄 Retry (Recommended)", "create_airdrop_wallet")],
+                [build_button("Wait & Retry", "wait_and_retry_airdrop")],
+                [build_button("« Back to Activities", "back_to_activities")]
+            ]
+            
+            error_message = (
+                "🕒 **API Cold Start Detected**\n\n"
+                "The PumpFun API appears to be starting up. This is normal for cloud-hosted services.\n\n"
+                "**What happened:** The service was in sleep mode and needs a moment to wake up.\n\n"
+                "**Recommended action:** Click 'Retry' - the service should be ready now.\n\n"
+                f"**Technical details:** {str(e)[:100]}..."
+            )
+        else:
+            keyboard = [
+                [build_button("Try Again", "create_airdrop_wallet")],
+                [build_button("« Back to Activities", "back_to_activities")]
+            ]
+            error_message = format_pumpfun_error_message("airdrop_wallet_creation", str(e))
         
         await query.edit_message_text(
-            format_pumpfun_error_message("airdrop_wallet_creation", str(e)),
+            error_message,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
         
         return ConversationState.BUNDLING_WALLET_SETUP
+
+
+async def wait_and_retry_airdrop(update: Update, context: CallbackContext) -> int:
+    """
+    Handle wait and retry for airdrop wallet creation after cold start.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+    
+    # Show waiting message
+    await query.edit_message_text(
+        "⏳ **Waiting for API to fully initialize...**\n\n"
+        "Giving the service a moment to complete startup. This will take about 10 seconds.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    # Wait for 10 seconds to allow API to fully initialize
+    await asyncio.sleep(10)
+    
+    # Now retry the wallet creation
+    return await create_airdrop_wallet(update, context)
 
 
 async def import_airdrop_wallet(update: Update, context: CallbackContext) -> int:
@@ -181,6 +239,13 @@ async def process_airdrop_wallet_import(update: Update, context: CallbackContext
             )
             return ConversationState.ACTIVITY_SELECTION
         
+        # Show progress message
+        progress_message = await update.message.reply_text(
+            "🔄 **Importing Airdrop Wallet...**\n\n"
+            "⏳ Processing your private key. This may take a moment...",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
         # Import wallet using PumpFun API
         logger.info(f"Importing airdrop wallet for user {user.id}")
         wallet_info = pumpfun_client.create_airdrop_wallet(private_key)
@@ -223,7 +288,7 @@ async def process_airdrop_wallet_import(update: Update, context: CallbackContext
             [build_button("Continue", "continue_to_bundled_count")]
         ])
         
-        await update.message.reply_text(
+        await progress_message.edit_text(
             f"✅ **Airdrop Wallet Imported**\n\n"
             f"**Address:** `{wallet_info['address']}`\n\n"
             f"Wallet imported successfully. Ready to proceed with bundled wallet creation.",
@@ -239,13 +304,30 @@ async def process_airdrop_wallet_import(update: Update, context: CallbackContext
             extra={"user_id": user.id}
         )
         
-        keyboard = InlineKeyboardMarkup([
-            [build_button("Try Again", "import_airdrop_wallet")],
-            [build_button("« Back to Activities", "back_to_activities")]
-        ])
+        # Enhanced error handling for cold start scenarios
+        is_timeout_error = "timeout" in str(e).lower()
+        is_connection_error = "connection" in str(e).lower()
+        
+        if is_timeout_error or is_connection_error:
+            keyboard = InlineKeyboardMarkup([
+                [build_button("🔄 Retry Import", "import_airdrop_wallet")],
+                [build_button("« Back to Activities", "back_to_activities")]
+            ])
+            
+            error_message = (
+                "🕒 **API Cold Start During Import**\n\n"
+                "The API was initializing during your import. Please try importing your wallet again.\n\n"
+                "Your private key was not saved - please re-enter it when you retry."
+            )
+        else:
+            keyboard = InlineKeyboardMarkup([
+                [build_button("Try Again", "import_airdrop_wallet")],
+                [build_button("« Back to Activities", "back_to_activities")]
+            ])
+            error_message = format_pumpfun_error_message("airdrop_wallet_import", str(e))
         
         await update.message.reply_text(
-            format_pumpfun_error_message("airdrop_wallet_import", str(e)),
+            error_message,
             reply_markup=keyboard,
             parse_mode=ParseMode.MARKDOWN
         )

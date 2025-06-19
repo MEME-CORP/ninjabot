@@ -10,6 +10,7 @@ import logging
 import requests
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, asdict
+import random
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -17,9 +18,11 @@ logger = logging.getLogger(__name__)
 
 # API Configuration
 PUMPFUN_API_BASE_URL = "https://pumpfunapibundler-m0ep.onrender.com"  # Default local API server
-DEFAULT_TIMEOUT = 30
-MAX_RETRIES = 3
-INITIAL_BACKOFF = 1.0
+DEFAULT_TIMEOUT = 60  # Increased from 30 to handle cold starts
+MAX_RETRIES = 5  # Increased from 3 for better cold start handling
+INITIAL_BACKOFF = 2.0  # Increased from 1.0 for cold start scenarios
+COLD_START_MAX_RETRIES = 8  # Special retry count for cold starts
+COLD_START_INITIAL_BACKOFF = 5.0  # Longer backoff for cold starts
 
 
 class PumpFunApiError(Exception):
@@ -143,6 +146,7 @@ class PumpFunClient:
                                 initial_backoff: float = INITIAL_BACKOFF, **kwargs) -> Dict[str, Any]:
         """
         Make HTTP request with retry logic for network errors.
+        Enhanced for cold start scenarios on cloud platforms like Render.
         
         Args:
             method: HTTP method
@@ -155,6 +159,13 @@ class PumpFunClient:
             API response as dictionary
         """
         last_exception = None
+        is_cold_start = self._detect_cold_start_scenario()
+        
+        # Use enhanced retry parameters for cold start scenarios
+        if is_cold_start:
+            max_retries = max(max_retries, COLD_START_MAX_RETRIES)
+            initial_backoff = max(initial_backoff, COLD_START_INITIAL_BACKOFF)
+            logger.info(f"Cold start detected, using enhanced retry: max_retries={max_retries}, initial_backoff={initial_backoff}")
         
         for attempt in range(max_retries + 1):
             try:
@@ -162,22 +173,73 @@ class PumpFunClient:
             except PumpFunNetworkError as e:
                 last_exception = e
                 if attempt < max_retries:
-                    backoff_time = initial_backoff * (2 ** attempt)
-                    logger.warning(f"Network error on attempt {attempt + 1}, retrying in {backoff_time}s: {str(e)}")
+                    # Progressive backoff with jitter for cold starts
+                    base_backoff = initial_backoff * (2 ** attempt)
+                    # Add jitter to prevent thundering herd
+                    jitter = random.uniform(0.5, 1.5) if is_cold_start else 1.0
+                    backoff_time = base_backoff * jitter
+                    
+                    if is_cold_start and attempt == 0:
+                        logger.warning(f"Cold start timeout detected, initiating wake-up sequence. Retrying in {backoff_time:.1f}s")
+                    else:
+                        logger.warning(f"Network error on attempt {attempt + 1}/{max_retries + 1}, retrying in {backoff_time:.1f}s: {str(e)}")
+                    
                     time.sleep(backoff_time)
                 else:
-                    logger.error(f"All retry attempts failed: {str(e)}")
+                    logger.error(f"All {max_retries + 1} retry attempts failed: {str(e)}")
             except (PumpFunValidationError, PumpFunApiError) as e:
                 # Don't retry validation or API errors
                 raise e
                 
         raise last_exception
 
+    def _detect_cold_start_scenario(self) -> bool:
+        """
+        Detect if this might be a cold start scenario.
+        
+        Returns:
+            True if cold start is likely
+        """
+        # Simple heuristic: if base_url contains common serverless platforms
+        serverless_indicators = [
+            'render.com',
+            'herokuapp.com', 
+            'vercel.app',
+            'netlify.app',
+            'railway.app'
+        ]
+        
+        for indicator in serverless_indicators:
+            if indicator in self.base_url.lower():
+                return True
+        return False
+
+    def _make_request_for_critical_operations(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
+        """
+        Make request with maximum retry effort for critical operations like wallet creation.
+        
+        Args:
+            method: HTTP method
+            endpoint: API endpoint
+            **kwargs: Additional request parameters
+            
+        Returns:
+            API response as dictionary
+        """
+        return self._make_request_with_retry(
+            method, 
+            endpoint, 
+            max_retries=COLD_START_MAX_RETRIES,
+            initial_backoff=COLD_START_INITIAL_BACKOFF,
+            **kwargs
+        )
+
     # Wallet Management Methods
 
     def create_airdrop_wallet(self, private_key: Optional[str] = None) -> Dict[str, Any]:
         """
         Create or import an airdrop (mother) wallet.
+        Enhanced with robust retry logic for cold start scenarios.
         
         Args:
             private_key: Optional private key for import (base58 string)
@@ -189,8 +251,10 @@ class PumpFunClient:
         data = {}
         if private_key:
             data["privateKey"] = private_key
-            
-        response = self._make_request_with_retry("POST", endpoint, json=data)
+        
+        # Use critical operations retry for wallet creation
+        logger.info("Creating/importing airdrop wallet with enhanced retry logic")
+        response = self._make_request_for_critical_operations("POST", endpoint, json=data)
         
         # Debug logging to understand response structure
         logger.info(f"Airdrop wallet creation response: {response}")
@@ -304,7 +368,8 @@ class PumpFunClient:
         endpoint = "/api/wallets/bundled/create"
         data = {"count": count}
         
-        return self._make_request("POST", endpoint, json=data)
+        # Use enhanced retry for critical wallet operations
+        return self._make_request_for_critical_operations("POST", endpoint, json=data)
 
     def import_bundled_wallets(self, wallets: List[Dict[str, str]]) -> Dict[str, Any]:
         """
@@ -414,7 +479,9 @@ class PumpFunClient:
             "slippageBps": slippage_bps
         }
         
-        return self._make_request_with_retry("POST", endpoint, json=data)
+        # Use enhanced retry for critical token creation operations
+        logger.info("Creating token with enhanced retry logic for cold start handling")
+        return self._make_request_for_critical_operations("POST", endpoint, json=data)
 
     def batch_buy_token(self, mint_address: str, sol_amount_per_wallet: float, 
                        slippage_bps: int = 2500, target_wallet_names: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -541,16 +608,49 @@ class PumpFunClient:
     def health_check(self) -> Dict[str, Any]:
         """
         Check if the PumpFun API is healthy and reachable.
+        Enhanced with cold start detection and wake-up capability.
         
         Returns:
             Dictionary with health status
         """
         try:
-            # Try to get balance of a dummy address to test connectivity
-            response = self._make_request("GET", "/api/wallets/11111111111111111111111111111111/balance")
-            return {"status": "healthy", "api_reachable": True}
+            logger.info("Performing API health check with cold start handling")
+            # Try a simple endpoint first to potentially wake up the service
+            response = self._make_request_with_retry(
+                "GET", 
+                "/api/wallets/11111111111111111111111111111111/balance",
+                max_retries=COLD_START_MAX_RETRIES,
+                initial_backoff=COLD_START_INITIAL_BACKOFF
+            )
+            return {
+                "status": "healthy", 
+                "api_reachable": True,
+                "cold_start_detected": self._detect_cold_start_scenario(),
+                "response_time": "normal"
+            }
+        except PumpFunNetworkError as e:
+            if "timeout" in str(e).lower():
+                return {
+                    "status": "unhealthy", 
+                    "api_reachable": False, 
+                    "error": str(e),
+                    "cold_start_likely": True,
+                    "suggestion": "Service may be in cold start. Please retry in a few moments."
+                }
+            else:
+                return {
+                    "status": "unhealthy", 
+                    "api_reachable": False, 
+                    "error": str(e),
+                    "cold_start_likely": False
+                }
         except Exception as e:
-            return {"status": "unhealthy", "api_reachable": False, "error": str(e)}
+            return {
+                "status": "unhealthy", 
+                "api_reachable": False, 
+                "error": str(e),
+                "cold_start_likely": False
+            }
 
     def get_api_info(self) -> Dict[str, Any]:
         """
