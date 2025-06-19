@@ -190,7 +190,103 @@ class PumpFunClient:
         if private_key:
             data["privateKey"] = private_key
             
-        return self._make_request("POST", endpoint, json=data)
+        response = self._make_request_with_retry("POST", endpoint, json=data)
+        
+        # Debug logging to understand response structure
+        logger.info(f"Airdrop wallet creation response: {response}")
+        
+        # Handle different response formats that might be returned
+        if isinstance(response, dict):
+            # Check if it's a response with data field (expected format)
+            if "data" in response:
+                wallet_data = response["data"]
+                
+                # Normalize the response to expected format
+                normalized_response = {}
+                
+                # Handle different field names that might be used
+                if "address" in wallet_data:
+                    normalized_response["address"] = wallet_data["address"]
+                elif "publicKey" in wallet_data:
+                    normalized_response["address"] = wallet_data["publicKey"]
+                elif "public_key" in wallet_data:
+                    normalized_response["address"] = wallet_data["public_key"]
+                else:
+                    # Log all available fields for debugging
+                    logger.error(f"No address field found in wallet data. Available fields: {list(wallet_data.keys())}")
+                    raise PumpFunApiError(f"Wallet creation response missing address field. Available fields: {list(wallet_data.keys())}")
+                
+                # Handle private key field
+                if "privateKey" in wallet_data:
+                    normalized_response["private_key"] = wallet_data["privateKey"]
+                elif "private_key" in wallet_data:
+                    normalized_response["private_key"] = wallet_data["private_key"]
+                elif "secretKey" in wallet_data:
+                    normalized_response["private_key"] = wallet_data["secretKey"]
+                
+                return normalized_response
+            
+            # Check if it's a success response with data (alternative format)
+            elif response.get("success") and "data" in response:
+                wallet_data = response["data"]
+                
+                # Normalize the response to expected format
+                normalized_response = {}
+                
+                # Handle different field names that might be used
+                if "address" in wallet_data:
+                    normalized_response["address"] = wallet_data["address"]
+                elif "publicKey" in wallet_data:
+                    normalized_response["address"] = wallet_data["publicKey"]
+                elif "public_key" in wallet_data:
+                    normalized_response["address"] = wallet_data["public_key"]
+                else:
+                    # Log all available fields for debugging
+                    logger.error(f"No address field found in wallet data. Available fields: {list(wallet_data.keys())}")
+                    raise PumpFunApiError(f"Wallet creation response missing address field. Available fields: {list(wallet_data.keys())}")
+                
+                # Handle private key field
+                if "privateKey" in wallet_data:
+                    normalized_response["private_key"] = wallet_data["privateKey"]
+                elif "private_key" in wallet_data:
+                    normalized_response["private_key"] = wallet_data["private_key"]
+                elif "secretKey" in wallet_data:
+                    normalized_response["private_key"] = wallet_data["secretKey"]
+                
+                return normalized_response
+            
+            # Handle direct response format (no success wrapper)
+            elif "address" in response or "publicKey" in response or "public_key" in response:
+                normalized_response = {}
+                
+                if "address" in response:
+                    normalized_response["address"] = response["address"]
+                elif "publicKey" in response:
+                    normalized_response["address"] = response["publicKey"]
+                elif "public_key" in response:
+                    normalized_response["address"] = response["public_key"]
+                
+                if "privateKey" in response:
+                    normalized_response["private_key"] = response["privateKey"]
+                elif "private_key" in response:
+                    normalized_response["private_key"] = response["private_key"]
+                elif "secretKey" in response:
+                    normalized_response["private_key"] = response["secretKey"]
+                
+                return normalized_response
+            
+            # Handle error responses
+            elif "error" in response:
+                raise PumpFunApiError(f"Wallet creation failed: {response['error']}")
+            
+            else:
+                # Log unexpected response format
+                logger.error(f"Unexpected response format: {response}")
+                raise PumpFunApiError(f"Unexpected response format. Response: {response}")
+        
+        else:
+            logger.error(f"Invalid response type: {type(response)}")
+            raise PumpFunApiError(f"Invalid response type: {type(response)}")
 
     def create_bundled_wallets(self, count: int) -> Dict[str, Any]:
         """

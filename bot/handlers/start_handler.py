@@ -48,6 +48,7 @@ from bot.api.api_client import api_client, ApiClientError
 from bot.events.event_system import event_system, TransactionConfirmedEvent, TransactionFailedEvent
 from bot.utils.balance_poller import balance_poller
 from bot.state.session_manager import session_manager
+from bot.utils.wallet_storage import airdrop_wallet_storage
 
 
 # Helper function for the background job
@@ -394,17 +395,31 @@ async def start_bundling_workflow(update: Update, context: CallbackContext) -> i
         
         return ConversationState.ACTIVITY_SELECTION
     
+    # Check if user has existing airdrop wallets
+    existing_wallets = airdrop_wallet_storage.list_user_airdrop_wallets(user.id)
+    
     # Build keyboard for airdrop wallet setup
     keyboard = [
         [build_button("Create Airdrop Wallet", "create_airdrop_wallet")],
-        [build_button("Import Airdrop Wallet", "import_airdrop_wallet")],
-        [build_button("« Back to Activities", "back_to_activities")]
+        [build_button("Import Airdrop Wallet", "import_airdrop_wallet")]
     ]
+    
+    # Add option to use existing wallet if available
+    if existing_wallets:
+        keyboard.insert(1, [build_button("Use Existing Airdrop Wallet", "use_existing_airdrop_wallet")])
+    
+    keyboard.append([build_button("« Back to Activities", "back_to_activities")])
+
+    message_text = "🏪 **Airdrop Wallet Setup**\n\n"
+    message_text += "First, let's set up your airdrop (mother) wallet that will fund your bundled wallets.\n\n"
+    
+    if existing_wallets:
+        message_text += f"💡 Found {len(existing_wallets)} existing airdrop wallet(s) for your account.\n\n"
+    
+    message_text += "Choose how you want to set up your airdrop wallet:"
 
     await query.edit_message_text(
-        "🏪 **Airdrop Wallet Setup**\n\n"
-        "First, let's set up your airdrop (mother) wallet that will fund your bundled wallets.\n\n"
-        "Choose how you want to set up your airdrop wallet:",
+        message_text,
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.MARKDOWN
     )
@@ -2091,6 +2106,8 @@ def register_start_handler(application):
         create_airdrop_wallet,
         import_airdrop_wallet,
         process_airdrop_wallet_import,
+        use_existing_airdrop_wallet,
+        select_existing_airdrop_wallet,
         bundled_wallets_count,
         token_creation_start,
         token_parameter_input,
@@ -2159,7 +2176,12 @@ def register_start_handler(application):
             ConversationState.BUNDLING_WALLET_SETUP: [
                 CallbackQueryHandler(create_airdrop_wallet, pattern=r"^create_airdrop_wallet$"),
                 CallbackQueryHandler(import_airdrop_wallet, pattern=r"^import_airdrop_wallet$"),
+                CallbackQueryHandler(use_existing_airdrop_wallet, pattern=r"^use_existing_airdrop_wallet$"),
                 CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.SELECT_EXISTING_AIRDROP_WALLET: [
+                CallbackQueryHandler(select_existing_airdrop_wallet, pattern=r"^select_airdrop_"),
+                CallbackQueryHandler(select_existing_airdrop_wallet, pattern=r"^back_to_bundling_setup$")
             ],
             ConversationState.IMPORT_AIRDROP_WALLET: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, process_airdrop_wallet_import),

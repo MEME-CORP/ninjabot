@@ -34,6 +34,7 @@ from bot.utils.message_utils import (
     format_pumpfun_error_message
 )
 from bot.state.session_manager import session_manager
+from bot.utils.wallet_storage import airdrop_wallet_storage
 
 
 async def create_airdrop_wallet(update: Update, context: CallbackContext) -> int:
@@ -72,7 +73,25 @@ async def create_airdrop_wallet(update: Update, context: CallbackContext) -> int
         
         # Store wallet information in session
         session_manager.update_session_value(user.id, "airdrop_wallet", wallet_info["address"])
-        session_manager.update_session_value(user.id, "airdrop_private_key", wallet_info["private_key"])
+        session_manager.update_session_value(user.id, "airdrop_private_key", wallet_info.get("private_key", ""))
+        
+        # Save airdrop wallet to data folder for persistent storage
+        try:
+            airdrop_wallet_storage.save_airdrop_wallet(
+                wallet_address=wallet_info["address"],
+                wallet_data=wallet_info,
+                user_id=user.id
+            )
+            logger.info(
+                f"Saved airdrop wallet to persistent storage for user {user.id}",
+                extra={"user_id": user.id, "wallet_address": wallet_info["address"]}
+            )
+        except Exception as storage_error:
+            logger.warning(
+                f"Failed to save airdrop wallet to persistent storage: {str(storage_error)}",
+                extra={"user_id": user.id, "wallet_address": wallet_info["address"]}
+            )
+            # Continue execution even if storage fails - session data is still available
         
         logger.info(
             f"Created airdrop wallet for user {user.id}",
@@ -168,7 +187,31 @@ async def process_airdrop_wallet_import(update: Update, context: CallbackContext
         
         # Store wallet information in session
         session_manager.update_session_value(user.id, "airdrop_wallet", wallet_info["address"])
-        session_manager.update_session_value(user.id, "airdrop_private_key", private_key)
+        session_manager.update_session_value(user.id, "airdrop_private_key", wallet_info.get("private_key", private_key))
+        
+        # Save imported airdrop wallet to data folder for persistent storage
+        try:
+            # Include the private key in wallet data for imported wallets
+            wallet_data_with_key = {
+                **wallet_info,
+                "private_key": private_key,
+                "imported": True
+            }
+            airdrop_wallet_storage.save_airdrop_wallet(
+                wallet_address=wallet_info["address"],
+                wallet_data=wallet_data_with_key,
+                user_id=user.id
+            )
+            logger.info(
+                f"Saved imported airdrop wallet to persistent storage for user {user.id}",
+                extra={"user_id": user.id, "wallet_address": wallet_info["address"]}
+            )
+        except Exception as storage_error:
+            logger.warning(
+                f"Failed to save imported airdrop wallet to persistent storage: {str(storage_error)}",
+                extra={"user_id": user.id, "wallet_address": wallet_info["address"]}
+            )
+            # Continue execution even if storage fails - session data is still available
         
         logger.info(
             f"Imported airdrop wallet for user {user.id}",
@@ -630,4 +673,212 @@ async def bundle_operation_progress(update: Update, context: CallbackContext) ->
             parse_mode=ParseMode.MARKDOWN
         )
         
-        return ConversationState.BUNDLE_OPERATION_PROGRESS 
+        return ConversationState.BUNDLE_OPERATION_PROGRESS
+
+
+async def use_existing_airdrop_wallet(update: Update, context: CallbackContext) -> int:
+    """
+    Handle using an existing airdrop wallet.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        # Get existing wallets for this user
+        existing_wallets = airdrop_wallet_storage.list_user_airdrop_wallets(user.id)
+        
+        if not existing_wallets:
+            # No wallets found, redirect to creation
+            await query.edit_message_text(
+                "❌ **No Existing Airdrop Wallets Found**\n\n"
+                "No saved airdrop wallets found for your account. Please create or import one.",
+                reply_markup=InlineKeyboardMarkup([
+                    [build_button("Create Airdrop Wallet", "create_airdrop_wallet")],
+                    [build_button("Import Airdrop Wallet", "import_airdrop_wallet")],
+                    [build_button("« Back to Activities", "back_to_activities")]
+                ]),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return ConversationState.BUNDLING_WALLET_SETUP
+        
+        if len(existing_wallets) == 1:
+            # Only one wallet, use it directly
+            wallet_data = existing_wallets[0]
+            wallet_address = wallet_data["wallet_address"]
+            
+            # Store wallet information in session
+            session_manager.update_session_value(user.id, "airdrop_wallet", wallet_address)
+            # Store private key if available (for created/imported wallets)
+            if wallet_data.get("private_key"):
+                session_manager.update_session_value(user.id, "airdrop_private_key", wallet_data["private_key"])
+            
+            logger.info(
+                f"Using existing airdrop wallet for user {user.id}",
+                extra={"user_id": user.id, "wallet_address": wallet_address}
+            )
+            
+            # Show success message and proceed
+            keyboard = InlineKeyboardMarkup([
+                [build_button("Continue", "continue_to_bundled_count")]
+            ])
+            
+            created_date = wallet_data.get("created_at", "Unknown")
+            wallet_type = "Imported" if wallet_data.get("imported") else "Created"
+            
+            await query.edit_message_text(
+                f"✅ **Using Existing Airdrop Wallet**\n\n"
+                f"**Address:** `{wallet_address}`\n"
+                f"**Type:** {wallet_type}\n"
+                f"**Created:** {created_date[:10] if created_date != 'Unknown' else created_date}\n\n"
+                f"Ready to proceed with bundled wallet creation.",
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            return ConversationState.BUNDLED_WALLETS_COUNT
+        
+        else:
+            # Multiple wallets, let user choose
+            keyboard = []
+            for i, wallet_data in enumerate(existing_wallets[:5]):  # Limit to 5 for UI
+                wallet_address = wallet_data["wallet_address"]
+                created_date = wallet_data.get("created_at", "Unknown")
+                wallet_type = "Imported" if wallet_data.get("imported") else "Created"
+                
+                short_address = f"{wallet_address[:8]}...{wallet_address[-8:]}"
+                button_text = f"{wallet_type}: {short_address}"
+                
+                keyboard.append([build_button(button_text, f"select_airdrop_{i}")])
+            
+            keyboard.append([build_button("« Back to Setup", "back_to_bundling_setup")])
+            
+            # Store wallets in session for selection
+            session_manager.update_session_value(user.id, "available_airdrop_wallets", existing_wallets[:5])
+            
+            await query.edit_message_text(
+                f"📋 **Select Airdrop Wallet**\n\n"
+                f"Found {len(existing_wallets)} airdrop wallet(s). Please select one to use:\n\n"
+                f"💡 Showing most recent 5 wallets.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            return ConversationState.SELECT_EXISTING_AIRDROP_WALLET
+        
+    except Exception as e:
+        logger.error(
+            f"Failed to load existing airdrop wallets for user {user.id}: {str(e)}",
+            extra={"user_id": user.id}
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [build_button("Try Again", "use_existing_airdrop_wallet")],
+            [build_button("« Back to Activities", "back_to_activities")]
+        ])
+        
+        await query.edit_message_text(
+            format_pumpfun_error_message("airdrop_wallet_loading", str(e)),
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.BUNDLING_WALLET_SETUP
+
+
+async def select_existing_airdrop_wallet(update: Update, context: CallbackContext) -> int:
+    """
+    Handle selection of a specific existing airdrop wallet.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        choice = query.data
+        
+        if choice == "back_to_bundling_setup":
+            # Import the start_bundling_workflow function from start_handler
+            from bot.handlers.start_handler import start_bundling_workflow
+            # Return to bundling setup
+            return await start_bundling_workflow(update, context)
+        
+        # Extract wallet index from callback data
+        if choice.startswith("select_airdrop_"):
+            wallet_index = int(choice.replace("select_airdrop_", ""))
+            
+            # Get available wallets from session
+            available_wallets = session_manager.get_session_value(user.id, "available_airdrop_wallets", [])
+            
+            if wallet_index >= len(available_wallets):
+                raise ValueError(f"Invalid wallet index: {wallet_index}")
+            
+            wallet_data = available_wallets[wallet_index]
+            wallet_address = wallet_data["wallet_address"]
+            
+            # Store wallet information in session
+            session_manager.update_session_value(user.id, "airdrop_wallet", wallet_address)
+            # Store private key if available
+            if wallet_data.get("private_key"):
+                session_manager.update_session_value(user.id, "airdrop_private_key", wallet_data["private_key"])
+            
+            logger.info(
+                f"Selected existing airdrop wallet {wallet_index} for user {user.id}",
+                extra={"user_id": user.id, "wallet_address": wallet_address}
+            )
+            
+            # Show success message and proceed
+            keyboard = InlineKeyboardMarkup([
+                [build_button("Continue", "continue_to_bundled_count")]
+            ])
+            
+            created_date = wallet_data.get("created_at", "Unknown")
+            wallet_type = "Imported" if wallet_data.get("imported") else "Created"
+            
+            await query.edit_message_text(
+                f"✅ **Selected Airdrop Wallet**\n\n"
+                f"**Address:** `{wallet_address}`\n"
+                f"**Type:** {wallet_type}\n"
+                f"**Created:** {created_date[:10] if created_date != 'Unknown' else created_date}\n\n"
+                f"Ready to proceed with bundled wallet creation.",
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            return ConversationState.BUNDLED_WALLETS_COUNT
+        
+        else:
+            raise ValueError(f"Unknown choice: {choice}")
+        
+    except Exception as e:
+        logger.error(
+            f"Failed to select existing airdrop wallet for user {user.id}: {str(e)}",
+            extra={"user_id": user.id}
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [build_button("Try Again", "use_existing_airdrop_wallet")],
+            [build_button("« Back to Activities", "back_to_activities")]
+        ])
+        
+        await query.edit_message_text(
+            format_pumpfun_error_message("airdrop_wallet_selection", str(e)),
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.BUNDLING_WALLET_SETUP 
