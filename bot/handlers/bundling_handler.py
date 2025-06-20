@@ -33,7 +33,9 @@ from bot.utils.message_utils import (
     format_bundle_operation_results,
     format_pumpfun_error_message,
     format_bundled_wallets_creation_message,
-    format_bundled_wallets_created_message
+    format_bundled_wallets_created_message,
+
+    format_existing_bundled_wallets_selected_message
 )
 from bot.state.session_manager import session_manager
 from bot.utils.wallet_storage import airdrop_wallet_storage, bundled_wallet_storage
@@ -340,6 +342,7 @@ async def process_airdrop_wallet_import(update: Update, context: CallbackContext
 async def continue_to_bundled_wallets_setup(update: Update, context: CallbackContext) -> int:
     """
     Handle continuation to bundled wallets setup after airdrop wallet selection.
+    Now checks for existing bundled wallets first.
     
     Args:
         update: The update object
@@ -353,33 +356,98 @@ async def continue_to_bundled_wallets_setup(update: Update, context: CallbackCon
     await query.answer()
     
     try:
-        # Show bundled wallets creation message
+        # Get airdrop wallet address from session
+        airdrop_wallet_address = session_manager.get_session_value(user.id, "airdrop_wallet")
+        if not airdrop_wallet_address:
+            raise Exception("Airdrop wallet address not found in session")
+        
+        logger.info(
+            f"Checking for existing bundled wallets for airdrop wallet {airdrop_wallet_address}",
+            extra={"user_id": user.id, "airdrop_wallet": airdrop_wallet_address}
+        )
+        
+        # Debug: Show what files exist in the bundled wallets directory
+        try:
+            import os
+            bundled_dir = "ninjabot/data/bundled_wallets"
+            if os.path.exists(bundled_dir):
+                files = os.listdir(bundled_dir)
+                user_files = [f for f in files if f.startswith(f"bundled_{user.id}_")]
+                logger.info(
+                    f"Debug: Found {len(user_files)} bundled wallet files for user {user.id}: {user_files}",
+                    extra={"user_id": user.id, "files": user_files}
+                )
+            else:
+                logger.warning(f"Debug: Bundled wallets directory does not exist: {bundled_dir}")
+        except Exception as debug_error:
+            logger.warning(f"Debug: Error checking bundled wallets directory: {debug_error}")
+        
+        # Check for existing bundled wallets for this airdrop wallet
+        existing_bundled_wallets = bundled_wallet_storage.load_bundled_wallets(airdrop_wallet_address, user.id)
+        
+        logger.info(
+            f"Found {len(existing_bundled_wallets)} existing bundled wallets",
+            extra={"user_id": user.id, "airdrop_wallet": airdrop_wallet_address, "wallet_count": len(existing_bundled_wallets)}
+        )
+        
+        if existing_bundled_wallets and len(existing_bundled_wallets) > 0:
+            # Store existing wallets in session in the format expected by the system
+            wallet_addresses = [wallet["address"] for wallet in existing_bundled_wallets if "address" in wallet]
+            
+            # Store the wallets in session in the expected format
+            session_manager.update_session_value(user.id, "bundled_wallets", wallet_addresses)
+            session_manager.update_session_value(user.id, "bundled_wallets_data", existing_bundled_wallets)
+            session_manager.update_session_value(user.id, "bundled_wallets_count", len(wallet_addresses))
+            
+            # Also store private keys separately for compatibility
+            wallet_private_keys = [wallet.get("private_key", "") for wallet in existing_bundled_wallets]
+            session_manager.update_session_value(user.id, "bundled_private_keys", wallet_private_keys)
+            
+            logger.info(
+                f"Using {len(wallet_addresses)} existing bundled wallets, proceeding directly to token creation",
+                extra={"user_id": user.id, "airdrop_wallet": airdrop_wallet_address, "wallet_count": len(wallet_addresses)}
+            )
+            
+            # Skip bundled wallet creation and go directly to token creation
+            keyboard = InlineKeyboardMarkup([
+                [build_button("Start Token Creation", "start_token_creation")]
+            ])
+            
+            await query.edit_message_text(
+                format_existing_bundled_wallets_selected_message(len(wallet_addresses), wallet_addresses),
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            return ConversationState.TOKEN_CREATION_START
+        else:
+            # No existing bundled wallets, proceed to creation
+            await query.edit_message_text(
+                format_bundled_wallets_creation_message(),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            logger.info(
+                f"No existing bundled wallets found for user {user.id}, proceeding to creation",
+                extra={"user_id": user.id, "airdrop_wallet": airdrop_wallet_address}
+            )
+            
+            return ConversationState.BUNDLED_WALLETS_COUNT
+        
+    except Exception as e:
+        logger.error(
+            f"Failed to check for existing bundled wallets for user {user.id}: {str(e)}",
+            extra={"user_id": user.id},
+            exc_info=True
+        )
+        
+        # On error, proceed to creation as fallback
         await query.edit_message_text(
             format_bundled_wallets_creation_message(),
             parse_mode=ParseMode.MARKDOWN
         )
         
-        logger.info(
-            f"User {user.id} proceeding to bundled wallets setup",
-            extra={"user_id": user.id}
-        )
-        
         return ConversationState.BUNDLED_WALLETS_COUNT
-        
-    except Exception as e:
-        logger.error(
-            f"Failed to show bundled wallets setup for user {user.id}: {str(e)}",
-            extra={"user_id": user.id}
-        )
-        
-        keyboard = [[build_button("« Back to Activities", "back_to_activities")]]
-        await query.edit_message_text(
-            format_pumpfun_error_message("bundled_wallets_setup", str(e)),
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        return ConversationState.BUNDLING_WALLET_SETUP
 
 
 async def bundled_wallets_count(update: Update, context: CallbackContext) -> int:

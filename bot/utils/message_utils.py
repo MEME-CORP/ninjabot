@@ -1181,3 +1181,53 @@ def format_bundled_wallets_created_message(wallet_count: int, wallet_details: Li
     message += "Ready to proceed with token creation setup!"
     
     return message
+
+def format_existing_bundled_wallets_choice_message(wallet_count: int, airdrop_wallet_address: str) -> str:
+    """
+    Format message for choosing between existing and new bundled wallets.
+    
+    Args:
+        wallet_count: Number of existing bundled wallets
+        airdrop_wallet_address: The airdrop wallet address
+        
+    Returns:
+        Formatted message string
+    """
+    short_address = f"{airdrop_wallet_address[:8]}...{airdrop_wallet_address[-8:]}"
+    
+    return (
+        f"🔍 **Existing Bundled Wallets Found**\n\n"
+        f"**Airdrop Wallet:** `{short_address}`\n"
+        f"**Existing Bundled Wallets:** {wallet_count}\n\n"
+        f"You have {wallet_count} bundled wallets already created for this airdrop wallet.\n\n"
+        f"Would you like to:"
+    )
+
+def format_existing_bundled_wallets_selected_message(wallet_count: int, wallet_addresses: List[str]) -> str:
+    """
+    Format message confirming selection of existing bundled wallets.
+    
+    Args:
+        wallet_count: Number of selected bundled wallets
+        wallet_addresses: List of wallet addresses
+        
+    Returns:
+        Formatted message string
+    """
+    message = (
+        f"✅ **Using Existing Bundled Wallets**\n\n"
+        f"**Count:** {wallet_count} wallets\n\n"
+        f"**Wallet Addresses:**\n"
+    )
+    
+    # Show first few wallet addresses
+    for i, address in enumerate(wallet_addresses[:5]):
+        short_address = f"{address[:8]}...{address[-8:]}"
+        message += f"  {i+1}. `{short_address}`\n"
+    
+    if len(wallet_addresses) > 5:
+        message += f"  ... and {len(wallet_addresses) - 5} more\n"
+    
+    message += f"\nReady to proceed with token creation!"
+    
+    return message

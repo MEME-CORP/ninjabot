@@ -89,6 +89,7 @@ class ConversationState:
     TOKEN_CREATION_EXECUTION = 47
     BUNDLE_OPERATION_PROGRESS = 48
     BUNDLE_OPERATION_COMPLETE = 49
+    BUNDLED_WALLETS_CHOICE = "bundled_wallets_choice"
 
 # Volume generation strategies
 class VolumeStrategy:

@@ -2220,7 +2220,9 @@ def register_start_handler(application):
             ConversationState.BUNDLE_OPERATION_COMPLETE: [
                 CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$"),
                 CallbackQueryHandler(bundle_operation_progress, pattern=r"^view_transaction_details$")
-            ]
+            ],
+            
+
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         conversation_timeout=CONVERSATION_TIMEOUT,

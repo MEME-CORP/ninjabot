@@ -222,6 +222,16 @@ class BundledWalletStorage:
             The file path where the wallets were saved
         """
         try:
+            logger.info(
+                f"Saving {wallet_count} bundled wallets for airdrop wallet {airdrop_wallet_address}",
+                extra={
+                    "user_id": user_id,
+                    "airdrop_wallet_address": airdrop_wallet_address,
+                    "wallet_count": wallet_count,
+                    "data_keys": list(bundled_wallets_data.keys()) if bundled_wallets_data else []
+                }
+            )
+            
             # Create filename with timestamp and user ID for uniqueness
             timestamp = int(time.time())
             filename = f"bundled_{user_id}_{timestamp}_{airdrop_wallet_address[:8]}.json"
@@ -239,12 +249,23 @@ class BundledWalletStorage:
                 **bundled_wallets_data  # Include all original wallet data from API
             }
             
+            # Log the structure being saved for debugging
+            logger.debug(
+                f"Saving bundled wallets with structure: {list(storage_data.keys())}",
+                extra={
+                    "user_id": user_id,
+                    "airdrop_wallet_address": airdrop_wallet_address,
+                    "has_wallets_key": "wallets" in storage_data,
+                    "wallets_count_in_data": len(storage_data.get("wallets", [])) if "wallets" in storage_data else 0
+                }
+            )
+            
             # Save to file
             with open(file_path, 'w', encoding='utf-8') as f:
                 json.dump(storage_data, f, indent=2, ensure_ascii=False)
             
             logger.info(
-                f"Saved {wallet_count} bundled wallets for user {user_id}",
+                f"Successfully saved {wallet_count} bundled wallets for user {user_id} to {filename}",
                 extra={
                     "user_id": user_id,
                     "airdrop_wallet_address": airdrop_wallet_address,
@@ -258,7 +279,8 @@ class BundledWalletStorage:
         except Exception as e:
             logger.error(
                 f"Failed to save bundled wallets for user {user_id}: {str(e)}",
-                extra={"user_id": user_id, "airdrop_wallet_address": airdrop_wallet_address}
+                extra={"user_id": user_id, "airdrop_wallet_address": airdrop_wallet_address},
+                exc_info=True
             )
             raise
     
@@ -344,6 +366,119 @@ class BundledWalletStorage:
                 extra={"user_id": user_id, "airdrop_wallet_address": airdrop_wallet_address}
             )
             return None
+    
+    def load_bundled_wallets(self, airdrop_wallet_address: str, user_id: int) -> List[Dict[str, Any]]:
+        """
+        Load bundled wallets for a specific airdrop wallet and user.
+        
+        Args:
+            airdrop_wallet_address: The airdrop wallet address
+            user_id: The user ID
+            
+        Returns:
+            List of bundled wallet data dictionaries
+        """
+        try:
+            logger.info(
+                f"Loading bundled wallets for airdrop wallet {airdrop_wallet_address}",
+                extra={"user_id": user_id, "airdrop_wallet_address": airdrop_wallet_address}
+            )
+            
+            # Use the existing method to get bundled wallets by airdrop wallet
+            wallet_record = self.get_bundled_wallets_by_airdrop(user_id, airdrop_wallet_address)
+            
+            if not wallet_record:
+                logger.info(
+                    f"No bundled wallets found for airdrop wallet {airdrop_wallet_address}",
+                    extra={"user_id": user_id, "airdrop_wallet_address": airdrop_wallet_address}
+                )
+                return []
+            
+            logger.debug(
+                f"Found wallet record with keys: {list(wallet_record.keys())}",
+                extra={"user_id": user_id, "airdrop_wallet_address": airdrop_wallet_address}
+            )
+            
+            # Extract the wallets from the record - the actual structure uses "data" key
+            wallets = []
+            
+            # The actual saved files use "data" as the key for wallet list
+            if "data" in wallet_record and isinstance(wallet_record["data"], list):
+                wallets = wallet_record["data"]
+                logger.debug(
+                    f"Found wallets in 'data' key: {len(wallets)} wallets",
+                    extra={"user_id": user_id, "airdrop_wallet_address": airdrop_wallet_address}
+                )
+            # Fallback to other possible keys for backward compatibility
+            elif "wallets" in wallet_record and isinstance(wallet_record["wallets"], list):
+                wallets = wallet_record["wallets"]
+                logger.debug(
+                    f"Found wallets in 'wallets' key: {len(wallets)} wallets",
+                    extra={"user_id": user_id, "airdrop_wallet_address": airdrop_wallet_address}
+                )
+            
+            if not wallets:
+                logger.warning(
+                    f"No wallet data found in record for airdrop wallet {airdrop_wallet_address}",
+                    extra={"user_id": user_id, "airdrop_wallet_address": airdrop_wallet_address, "record_keys": list(wallet_record.keys())}
+                )
+                return []
+            
+            # Normalize wallet structure - the actual files use "publicKey" and "privateKey"
+            valid_wallets = []
+            for i, wallet in enumerate(wallets):
+                if isinstance(wallet, dict):
+                    normalized_wallet = {}
+                    
+                    # Handle address field - actual files use "publicKey"
+                    if "publicKey" in wallet:
+                        normalized_wallet["address"] = wallet["publicKey"]
+                        normalized_wallet["public_key"] = wallet["publicKey"]  # Keep original too
+                    elif "address" in wallet:
+                        normalized_wallet["address"] = wallet["address"]
+                    elif "public_key" in wallet:
+                        normalized_wallet["address"] = wallet["public_key"]
+                    else:
+                        logger.warning(
+                            f"Wallet {i} missing address/publicKey field, skipping",
+                            extra={"user_id": user_id, "wallet_keys": list(wallet.keys())}
+                        )
+                        continue
+                    
+                    # Handle private key field - actual files use "privateKey"
+                    if "privateKey" in wallet:
+                        normalized_wallet["private_key"] = wallet["privateKey"]
+                    elif "private_key" in wallet:
+                        normalized_wallet["private_key"] = wallet["private_key"]
+                    elif "secretKey" in wallet:
+                        normalized_wallet["private_key"] = wallet["secretKey"]
+                    
+                    # Keep other fields as-is (name, etc.)
+                    for k, v in wallet.items():
+                        if k not in ["address", "publicKey", "public_key", "privateKey", "private_key", "secretKey"]:
+                            normalized_wallet[k] = v
+                    
+                    valid_wallets.append(normalized_wallet)
+                else:
+                    logger.warning(
+                        f"Wallet {i} is not a dictionary, skipping: {type(wallet)}",
+                        extra={"user_id": user_id}
+                    )
+            
+            logger.info(
+                f"Successfully loaded {len(valid_wallets)} bundled wallets for airdrop wallet {airdrop_wallet_address}",
+                extra={"user_id": user_id, "airdrop_wallet_address": airdrop_wallet_address, "wallet_count": len(valid_wallets)}
+            )
+            
+            return valid_wallets
+            
+        except Exception as e:
+            logger.error(
+                f"Error loading bundled wallets for airdrop wallet {airdrop_wallet_address}: {str(e)}",
+                extra={"user_id": user_id, "airdrop_wallet_address": airdrop_wallet_address},
+                exc_info=True
+            )
+            return []
 
 
 # Global instances for use in handlers
