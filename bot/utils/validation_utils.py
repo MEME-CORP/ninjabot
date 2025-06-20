@@ -1,5 +1,5 @@
 import re
-from typing import Tuple, Union
+from typing import Tuple, Union, Any
 from loguru import logger
 from bot.config import MIN_CHILD_WALLETS, MAX_CHILD_WALLETS, MIN_VOLUME, SOLANA_ADDRESS_LENGTH
 
@@ -256,6 +256,41 @@ def validate_token_supply(text: str) -> Tuple[bool, Union[int, str]]:
         return False, "Please enter a valid number for token supply (e.g., 1000000 for 1 million tokens)."
 
 
+def validate_buy_amount(amount_input: str) -> tuple[bool, Any]:
+    """
+    Validate buy amount input for token purchases.
+    
+    Args:
+        amount_input: User input for buy amount
+        
+    Returns:
+        Tuple of (is_valid, validated_amount_or_error_message)
+    """
+    try:
+        # Strip whitespace and convert to float
+        amount_str = amount_input.strip()
+        amount = float(amount_str)
+        
+        # Check minimum amount
+        if amount < 0.001:
+            return False, "Buy amount must be at least 0.001 SOL"
+        
+        # Check maximum amount
+        if amount > 10.0:
+            return False, "Buy amount cannot exceed 10 SOL per wallet"
+        
+        # Check for reasonable precision (max 6 decimal places)
+        if len(amount_str.split('.')[-1]) > 6 if '.' in amount_str else False:
+            return False, "Buy amount cannot have more than 6 decimal places"
+        
+        return True, amount
+        
+    except ValueError:
+        return False, "Invalid buy amount. Please enter a valid number (e.g., 0.01, 0.1, 1.0)"
+    except Exception as e:
+        return False, f"Error validating buy amount: {str(e)}"
+
+
 def log_validation_result(validation_type: str, input_value: str, is_valid: bool, error_message: str, user_id: int = None):
     """
     Log validation results for metrics and debugging.
@@ -283,6 +318,6 @@ def log_validation_result(validation_type: str, input_value: str, is_valid: bool
                 "user_id": user_id,
                 "validation_type": validation_type,
                 "input_value": input_value[:50] + "..." if len(str(input_value)) > 50 else input_value,
-                "error": error_message
+                "error_message": error_message
             }
         ) 

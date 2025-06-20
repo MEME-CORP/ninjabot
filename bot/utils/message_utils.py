@@ -1231,3 +1231,291 @@ def format_existing_bundled_wallets_selected_message(wallet_count: int, wallet_a
     message += f"\nReady to proceed with token creation!"
     
     return message
+
+def format_buy_amounts_config_message(token_address: str) -> str:
+    """
+    Format message for configuring buy amounts after token creation.
+    
+    Args:
+        token_address: The created token address
+        
+    Returns:
+        Formatted message string
+    """
+    short_token = f"{token_address[:8]}...{token_address[-8:]}" if len(token_address) > 16 else token_address
+    
+    return (
+        f"🪙 **Token Created Successfully!**\n\n"
+        f"**Token Address:** `{short_token}`\n\n"
+        f"💰 **Configure Initial Buy Amounts**\n\n"
+        f"Now let's configure how much SOL each wallet should use to buy your new token:\n\n"
+        f"📝 **Wallets that will buy:**\n"
+        f"• **DevWallet** - Main development wallet\n"
+        f"• **First Bundled Wallet 1** - Trading wallet\n"
+        f"• **First Bundled Wallet 2** - Trading wallet\n"
+        f"• **First Bundled Wallet 3** - Trading wallet\n"
+        f"• **First Bundled Wallet 4** - Trading wallet\n\n"
+        f"💡 **Guidelines:**\n"
+        f"• Minimum: 0.001 SOL per wallet\n"
+        f"• Maximum: 10 SOL per wallet\n"
+        f"• Total buy amounts will create initial liquidity\n\n"
+        f"Let's start with the **DevWallet** buy amount..."
+    )
+
+def format_buy_amount_request(wallet_name: str, wallet_index: int, total_wallets: int) -> str:
+    """
+    Format message requesting buy amount for a specific wallet.
+    
+    Args:
+        wallet_name: Name of the wallet
+        wallet_index: Current wallet index (1-based)
+        total_wallets: Total number of wallets
+        
+    Returns:
+        Formatted message string
+    """
+    return (
+        f"💰 **Buy Amount Configuration ({wallet_index}/{total_wallets})**\n\n"
+        f"**Wallet:** {wallet_name}\n\n"
+        f"How much SOL should this wallet use to buy your token?\n\n"
+        f"💡 **Guidelines:**\n"
+        f"• Enter amount in SOL (e.g., 0.1, 0.05, 1.0)\n"
+        f"• Minimum: 0.001 SOL\n"
+        f"• Maximum: 10 SOL\n"
+        f"• Recommended: 0.01 - 0.1 SOL per wallet\n\n"
+        f"Please enter the SOL amount for **{wallet_name}**:"
+    )
+
+def format_buy_amounts_preview(buy_amounts: Dict[str, float], token_address: str) -> str:
+    """
+    Format preview of configured buy amounts before execution.
+    
+    Args:
+        buy_amounts: Dictionary of wallet names to buy amounts
+        token_address: The token address
+        
+    Returns:
+        Formatted preview message
+    """
+    short_token = f"{token_address[:8]}...{token_address[-8:]}" if len(token_address) > 16 else token_address
+    total_sol = sum(buy_amounts.values())
+    
+    message = (
+        f"📊 **Buy Amounts Preview**\n\n"
+        f"**Token:** `{short_token}`\n\n"
+        f"**Configured Buy Amounts:**\n"
+    )
+    
+    for wallet_name, amount in buy_amounts.items():
+        message += f"• **{wallet_name}**: {amount:.4f} SOL\n"
+    
+    message += (
+        f"\n**Total SOL Required:** {total_sol:.4f} SOL\n\n"
+        f"⚠️ **Important:** Make sure your wallets have sufficient SOL balance for these purchases plus transaction fees.\n\n"
+        f"✅ Proceed with these buy amounts?"
+    )
+    
+    return message
+
+def format_buy_amounts_execution_progress(progress_data: Dict[str, Any]) -> str:
+    """
+    Format buy amounts execution progress message.
+    
+    Args:
+        progress_data: Progress information
+        
+    Returns:
+        Formatted progress message
+    """
+    processed = progress_data.get('processed', 0)
+    total = progress_data.get('total', 0)
+    successful = progress_data.get('successful', 0)
+    failed = progress_data.get('failed', 0)
+    current_wallet = progress_data.get('current_wallet', '')
+    
+    progress_percentage = int((processed / total) * 100) if total > 0 else 0
+    bar_length = 10
+    filled_length = int(bar_length * progress_percentage / 100)
+    progress_bar = "█" * filled_length + "░" * (bar_length - filled_length)
+    
+    message = (
+        f"🛒 **Initial Token Purchase Progress**\n\n"
+        f"Progress: {progress_percentage}% [{progress_bar}]\n"
+        f"Wallets: {processed}/{total}\n\n"
+        f"✅ Successful: {successful}\n"
+        f"❌ Failed: {failed}\n"
+    )
+    
+    if current_wallet:
+        message += f"\n🔄 Current: **{current_wallet}**"
+    
+    return message
+
+def format_wallet_balance_check_message(airdrop_wallet: str, buy_amounts: Dict[str, float]) -> str:
+    """
+    Format message for checking wallet balance before token creation.
+    
+    Args:
+        airdrop_wallet: The airdrop wallet address
+        buy_amounts: Dictionary of wallet names to buy amounts
+        
+    Returns:
+        Formatted message string
+    """
+    short_wallet = f"{airdrop_wallet[:8]}...{airdrop_wallet[-8:]}" if len(airdrop_wallet) > 16 else airdrop_wallet
+    total_sol_needed = sum(buy_amounts.values())
+    
+    return (
+        f"💰 **Checking Airdrop Wallet Balance**\n\n"
+        f"**Airdrop Wallet:** `{short_wallet}`\n\n"
+        f"**Required SOL for Initial Buys:**\n"
+        f"• Total SOL needed: {total_sol_needed:.4f} SOL\n"
+        f"• Plus gas fees: ~{total_sol_needed * 0.05:.4f} SOL\n"
+        f"• **Total estimated:** {total_sol_needed * 1.05:.4f} SOL\n\n"
+        f"🔍 Checking wallet balance..."
+    )
+
+def format_wallet_balance_result_message(wallet_address: str, current_balance: float, 
+                                       required_balance: float, has_sufficient: bool) -> str:
+    """
+    Format wallet balance check result message.
+    
+    Args:
+        wallet_address: The wallet address
+        current_balance: Current SOL balance
+        required_balance: Required SOL balance
+        has_sufficient: Whether wallet has sufficient balance
+        
+    Returns:
+        Formatted message string
+    """
+    short_wallet = f"{wallet_address[:8]}...{wallet_address[-8:]}" if len(wallet_address) > 16 else wallet_address
+    status_emoji = "✅" if has_sufficient else "❌"
+    
+    message = (
+        f"{status_emoji} **Balance Check Result**\n\n"
+        f"**Wallet:** `{short_wallet}`\n"
+        f"**Current Balance:** {current_balance:.6f} SOL\n"
+        f"**Required Balance:** {required_balance:.6f} SOL\n\n"
+    )
+    
+    if has_sufficient:
+        message += (
+            f"🎉 **Sufficient Balance!**\n\n"
+            f"Your airdrop wallet has enough SOL for token creation and initial purchases.\n\n"
+            f"**Next Steps:**\n"
+            f"• Fund bundled wallets with SOL\n"
+            f"• Create token with configured buy amounts"
+        )
+    else:
+        shortage = required_balance - current_balance
+        message += (
+            f"⚠️ **Insufficient Balance**\n\n"
+            f"You need an additional {shortage:.6f} SOL in your airdrop wallet.\n\n"
+            f"**How to fix:**\n"
+            f"• Send {shortage:.6f} SOL to your airdrop wallet\n"
+            f"• Or reduce your buy amounts\n"
+            f"• Then check balance again"
+        )
+    
+    return message
+
+def format_wallet_funding_required_message(airdrop_wallet: str, bundled_wallets_count: int) -> str:
+    """
+    Format message explaining bundled wallet funding requirement.
+    
+    Args:
+        airdrop_wallet: The airdrop wallet address
+        bundled_wallets_count: Number of bundled wallets to fund
+        
+    Returns:
+        Formatted message string
+    """
+    short_wallet = f"{airdrop_wallet[:8]}...{airdrop_wallet[-8:]}" if len(airdrop_wallet) > 16 else airdrop_wallet
+    
+    return (
+        f"💰 **Fund Bundled Wallets**\n\n"
+        f"**Airdrop Wallet:** `{short_wallet}`\n"
+        f"**Bundled Wallets:** {bundled_wallets_count}\n\n"
+        f"Before creating your token, we need to fund your bundled wallets with SOL.\n\n"
+        f"**Why funding is needed:**\n"
+        f"• Bundled wallets need SOL for transaction fees\n"
+        f"• Gas fees for token purchases\n"
+        f"• Rent for token accounts\n\n"
+        f"**Recommended funding:** 0.01 SOL per wallet\n"
+        f"**Total needed:** {bundled_wallets_count * 0.01:.3f} SOL\n\n"
+        f"💡 This will be deducted from your airdrop wallet balance."
+    )
+
+def format_wallet_funding_progress_message(progress_data: Dict[str, Any]) -> str:
+    """
+    Format wallet funding progress message.
+    
+    Args:
+        progress_data: Progress information
+        
+    Returns:
+        Formatted progress message
+    """
+    processed = progress_data.get('processed', 0)
+    total = progress_data.get('total', 0)
+    successful = progress_data.get('successful', 0)
+    failed = progress_data.get('failed', 0)
+    current_wallet = progress_data.get('current_wallet', '')
+    
+    progress_percentage = int((processed / total) * 100) if total > 0 else 0
+    bar_length = 10
+    filled_length = int(bar_length * progress_percentage / 100)
+    progress_bar = "█" * filled_length + "░" * (bar_length - filled_length)
+    
+    message = (
+        f"💰 **Funding Bundled Wallets**\n\n"
+        f"Progress: {progress_percentage}% [{progress_bar}]\n"
+        f"Wallets: {processed}/{total}\n\n"
+        f"✅ Funded: {successful}\n"
+        f"❌ Failed: {failed}\n"
+    )
+    
+    if current_wallet:
+        message += f"\n🔄 Current: `{current_wallet[:8]}...{current_wallet[-8:]}`"
+    
+    return message
+
+def format_wallet_funding_complete_message(results: Dict[str, Any]) -> str:
+    """
+    Format wallet funding completion message.
+    
+    Args:
+        results: Funding results
+        
+    Returns:
+        Formatted completion message
+    """
+    total_wallets = results.get('total_wallets', 0)
+    successful = results.get('successful_transfers', 0)
+    failed = results.get('failed_transfers', 0)
+    total_sol_spent = results.get('total_sol_spent', 0)
+    
+    status_emoji = "✅" if failed == 0 else "⚠️"
+    
+    message = (
+        f"{status_emoji} **Bundled Wallet Funding Complete**\n\n"
+        f"**Results:**\n"
+        f"• Total Wallets: {total_wallets}\n"
+        f"• Successfully Funded: {successful}\n"
+        f"• Failed: {failed}\n"
+        f"• Total SOL Spent: {total_sol_spent:.6f} SOL\n\n"
+    )
+    
+    if failed == 0:
+        message += (
+            f"🎉 **All wallets funded successfully!**\n\n"
+            f"Ready to create your token with the configured buy amounts."
+        )
+    else:
+        message += (
+            f"⚠️ **Some wallets failed to fund**\n\n"
+            f"You can retry funding or proceed with {successful} funded wallets."
+        )
+    
+    return message

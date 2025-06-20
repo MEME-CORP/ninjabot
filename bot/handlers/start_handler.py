@@ -2112,7 +2112,17 @@ def register_start_handler(application):
         bundled_wallets_count,
         token_creation_start,
         token_parameter_input,
-        execute_token_creation,
+        configure_buy_amounts,
+        start_buy_amounts_input,
+        buy_amounts_input,
+        edit_buy_amounts,
+        back_to_token_preview,
+        edit_token_parameters,
+        check_wallet_balance,
+        fund_bundled_wallets_now,
+        start_wallet_funding,
+        create_token_final,
+        retry_wallet_funding,
         bundle_operation_progress,
         wait_and_retry_airdrop
     )
@@ -2205,12 +2215,40 @@ def register_start_handler(application):
                 CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
             ],
             ConversationState.TOKEN_CREATION_PREVIEW: [
-                CallbackQueryHandler(execute_token_creation, pattern=r"^confirm_token_creation$"),
-                CallbackQueryHandler(token_creation_start, pattern=r"^edit_token_parameters$"),
+                CallbackQueryHandler(configure_buy_amounts, pattern=r"^configure_buy_amounts$"),
+                CallbackQueryHandler(back_to_token_preview, pattern=r"^back_to_token_preview$"),
+                CallbackQueryHandler(edit_token_parameters, pattern=r"^edit_token_parameters$"),
                 CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
             ],
-            ConversationState.TOKEN_CREATION_EXECUTION: [
-                CallbackQueryHandler(bundle_operation_progress, pattern=r"^execute_token_creation$"),
+            ConversationState.BUY_AMOUNTS_CONFIG: [
+                CallbackQueryHandler(start_buy_amounts_input, pattern=r"^start_buy_amounts_input$"),
+                CallbackQueryHandler(back_to_token_preview, pattern=r"^back_to_token_preview$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.BUY_AMOUNTS_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, buy_amounts_input),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.BUY_AMOUNTS_PREVIEW: [
+                CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
+                CallbackQueryHandler(edit_buy_amounts, pattern=r"^edit_buy_amounts$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.WALLET_BALANCE_CHECK: [
+                CallbackQueryHandler(fund_bundled_wallets_now, pattern=r"^fund_bundled_wallets_now$"),
+                CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
+                CallbackQueryHandler(edit_buy_amounts, pattern=r"^edit_buy_amounts$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.WALLET_FUNDING_REQUIRED: [
+                CallbackQueryHandler(start_wallet_funding, pattern=r"^start_wallet_funding$"),
+                CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.WALLET_FUNDING_PROGRESS: [
+                CallbackQueryHandler(create_token_final, pattern=r"^create_token_final$"),
+                CallbackQueryHandler(retry_wallet_funding, pattern=r"^retry_wallet_funding$"),
+                CallbackQueryHandler(bundle_operation_progress, pattern=r"^view_funding_details$"),
                 CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
             ],
             ConversationState.BUNDLE_OPERATION_PROGRESS: [
@@ -2219,7 +2257,8 @@ def register_start_handler(application):
             ],
             ConversationState.BUNDLE_OPERATION_COMPLETE: [
                 CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$"),
-                CallbackQueryHandler(bundle_operation_progress, pattern=r"^view_transaction_details$")
+                CallbackQueryHandler(bundle_operation_progress, pattern=r"^view_transaction_details$"),
+                CallbackQueryHandler(bundle_operation_progress, pattern=r"^view_final_details$")
             ],
             
 
