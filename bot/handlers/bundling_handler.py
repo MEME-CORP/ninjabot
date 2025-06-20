@@ -31,10 +31,12 @@ from bot.utils.message_utils import (
     format_token_creation_preview,
     format_bundle_operation_progress,
     format_bundle_operation_results,
-    format_pumpfun_error_message
+    format_pumpfun_error_message,
+    format_bundled_wallets_creation_message,
+    format_bundled_wallets_created_message
 )
 from bot.state.session_manager import session_manager
-from bot.utils.wallet_storage import airdrop_wallet_storage
+from bot.utils.wallet_storage import airdrop_wallet_storage, bundled_wallet_storage
 
 
 async def create_airdrop_wallet(update: Update, context: CallbackContext) -> int:
@@ -335,6 +337,51 @@ async def process_airdrop_wallet_import(update: Update, context: CallbackContext
         return ConversationState.BUNDLING_WALLET_SETUP
 
 
+async def continue_to_bundled_wallets_setup(update: Update, context: CallbackContext) -> int:
+    """
+    Handle continuation to bundled wallets setup after airdrop wallet selection.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        # Show bundled wallets creation message
+        await query.edit_message_text(
+            format_bundled_wallets_creation_message(),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        logger.info(
+            f"User {user.id} proceeding to bundled wallets setup",
+            extra={"user_id": user.id}
+        )
+        
+        return ConversationState.BUNDLED_WALLETS_COUNT
+        
+    except Exception as e:
+        logger.error(
+            f"Failed to show bundled wallets setup for user {user.id}: {str(e)}",
+            extra={"user_id": user.id}
+        )
+        
+        keyboard = [[build_button("« Back to Activities", "back_to_activities")]]
+        await query.edit_message_text(
+            format_pumpfun_error_message("bundled_wallets_setup", str(e)),
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.BUNDLING_WALLET_SETUP
+
+
 async def bundled_wallets_count(update: Update, context: CallbackContext) -> int:
     """
     Handle bundled wallets count input.
@@ -366,7 +413,7 @@ async def bundled_wallets_count(update: Update, context: CallbackContext) -> int
         
         await update.message.reply_text(
             f"❌ **Invalid Wallet Count**\n\n{error_msg}\n\n"
-            f"Please enter a number between 2 and 20:",
+            f"Please enter a number between 5 and 50:",
             reply_markup=keyboard,
             parse_mode=ParseMode.MARKDOWN
         )
@@ -380,18 +427,90 @@ async def bundled_wallets_count(update: Update, context: CallbackContext) -> int
         extra={"user_id": user.id, "wallet_count": wallet_count}
     )
     
-    # Proceed to token creation start
-    keyboard = InlineKeyboardMarkup([
-        [build_button("Start Token Creation", "start_token_creation")]
-    ])
-    
-    await update.message.reply_text(
-        format_token_creation_start_message(),
-        reply_markup=keyboard,
-        parse_mode=ParseMode.MARKDOWN
-    )
-    
-    return ConversationState.TOKEN_CREATION_START
+    try:
+        # Get PumpFun client from session
+        pumpfun_client = session_manager.get_session_value(user.id, "pumpfun_client")
+        if not pumpfun_client:
+            raise Exception("PumpFun client not found in session")
+        
+        # Show progress message
+        progress_message = await update.message.reply_text(
+            "🔄 **Creating Bundled Wallets...**\n\n"
+            f"Creating {wallet_count} bundled wallets for token operations.\n"
+            "⏳ This may take a moment...",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Create bundled wallets using PumpFun API
+        logger.info(f"Creating {wallet_count} bundled wallets for user {user.id}")
+        bundled_wallets_result = pumpfun_client.create_bundled_wallets(count=wallet_count)
+        
+        # Store bundled wallets in session
+        session_manager.update_session_value(user.id, "bundled_wallets", bundled_wallets_result.get("wallets", []))
+        session_manager.update_session_value(user.id, "bundled_private_keys", bundled_wallets_result.get("private_keys", []))
+        
+        # Save bundled wallets to persistent storage
+        try:
+            airdrop_wallet_address = session_manager.get_session_value(user.id, "airdrop_wallet")
+            if airdrop_wallet_address:
+                bundled_wallet_storage.save_bundled_wallets(
+                    airdrop_wallet_address=airdrop_wallet_address,
+                    bundled_wallets_data=bundled_wallets_result,
+                    user_id=user.id,
+                    wallet_count=wallet_count
+                )
+                logger.info(
+                    f"Saved {wallet_count} bundled wallets to persistent storage for user {user.id}",
+                    extra={"user_id": user.id, "airdrop_wallet_address": airdrop_wallet_address, "wallet_count": wallet_count}
+                )
+            else:
+                logger.warning(
+                    f"No airdrop wallet address found in session for user {user.id}, skipping persistent storage",
+                    extra={"user_id": user.id}
+                )
+        except Exception as storage_error:
+            logger.warning(
+                f"Failed to save bundled wallets to persistent storage: {str(storage_error)}",
+                extra={"user_id": user.id, "wallet_count": wallet_count}
+            )
+            # Continue execution even if storage fails - session data is still available
+        
+        # Import the message formatter from utils
+        from bot.utils.message_utils import format_bundled_wallets_created_message
+        
+        # Show success message and proceed to token creation
+        keyboard = InlineKeyboardMarkup([
+            [build_button("Start Token Creation", "start_token_creation")]
+        ])
+        
+        wallet_details = bundled_wallets_result.get("wallets", [])
+        
+        await progress_message.edit_text(
+            format_bundled_wallets_created_message(wallet_count, wallet_details),
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.TOKEN_CREATION_START
+        
+    except Exception as e:
+        logger.error(
+            f"Failed to create bundled wallets for user {user.id}: {str(e)}",
+            extra={"user_id": user.id, "wallet_count": wallet_count}
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [build_button("Try Again", "retry_bundled_wallets")],
+            [build_button("« Back to Activities", "back_to_activities")]
+        ])
+        
+        await update.message.reply_text(
+            format_pumpfun_error_message("bundled_wallets_creation", str(e)),
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.BUNDLED_WALLETS_COUNT
 
 
 async def token_creation_start(update: Update, context: CallbackContext) -> int:
@@ -581,7 +700,7 @@ async def execute_token_creation(update: Update, context: CallbackContext) -> in
             name=token_params["name"],
             symbol=token_params["ticker"],
             description=token_params["description"],
-            image_file_name=token_params.get("image_url", "")
+            image_url=token_params.get("image_url", "")
         )
         
         buy_amounts = BuyAmounts(

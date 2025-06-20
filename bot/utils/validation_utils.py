@@ -110,16 +110,16 @@ def validate_bundled_wallets_count(text: str) -> Tuple[bool, Union[int, str]]:
     try:
         count = int(text.strip())
         
-        if count < 2:
-            return False, "Minimum 2 bundled wallets required for effective bundling."
+        if count < 5:
+            return False, "Minimum 5 bundled wallets required for effective bundling (1 Dev + 4 Initial)."
             
-        if count > 20:
-            return False, "Maximum 20 bundled wallets allowed per operation."
+        if count > 50:
+            return False, "Maximum 50 bundled wallets allowed per operation."
             
         return True, count
         
     except ValueError:
-        return False, "Please enter a valid number of wallets (2-20)."
+        return False, "Please enter a valid number of wallets (5-50)."
 
 
 def validate_token_name(text: str) -> Tuple[bool, Union[str, str]]:

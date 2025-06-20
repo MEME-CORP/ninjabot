@@ -959,7 +959,7 @@ def format_token_creation_preview(token_params: Dict[str, Any]) -> str:
     message += f"• **Website:** {website if website else 'Not provided'}\n\n"
     
     message += "🖼️ **Image:** "
-    message += "Uploaded" if token_params.get('image_path') else "Not provided"
+    message += "Uploaded" if token_params.get('image_url') else "Not provided"
     message += "\n\n"
     
     message += "✅ Please review your token details and confirm to proceed with creation."
@@ -1125,5 +1125,59 @@ def format_pumpfun_error_message(error_type: str, error_details: str) -> str:
         message += "• Consider retrying the operation\n"
     
     message += "\nTry again or contact support if the issue persists."
+    
+    return message
+
+def format_bundled_wallets_creation_message() -> str:
+    """
+    Format message for bundled wallets creation step in token bundling flow.
+    
+    Returns:
+        Formatted bundled wallets creation message
+    """
+    message = "👥 **Bundled Wallets Setup**\n\n"
+    message += "Before creating your token, we need to set up the bundled wallets that will participate in the trading.\n\n"
+    message += "📝 **What we'll create:**\n"
+    message += "• **DevWallet** - Main development wallet for token operations\n"
+    message += "• **First Bundled Wallet 1-4** - Initial trading wallets for coordinated buys\n"
+    message += "• **Additional Bundled Wallets** - Extra wallets for enhanced trading activity\n\n"
+    message += "💡 **Recommended Setup:**\n"
+    message += "• Minimum: 5 wallets (1 Dev + 4 Initial)\n"
+    message += "• Optimal: 10-20 wallets for better distribution\n"
+    message += "• Maximum: 50 wallets for extensive coordination\n\n"
+    message += "How many bundled wallets would you like to create? (minimum 5)"
+    
+    return message
+
+def format_bundled_wallets_created_message(wallet_count: int, wallet_details: List[Dict[str, Any]] = None) -> str:
+    """
+    Format message confirming bundled wallets creation.
+    
+    Args:
+        wallet_count: Number of wallets created
+        wallet_details: Optional list of wallet details
+        
+    Returns:
+        Formatted confirmation message
+    """
+    message = f"✅ **{wallet_count} Bundled Wallets Created Successfully!**\n\n"
+    
+    if wallet_details and len(wallet_details) <= 10:  # Show details for small numbers
+        message += "📋 **Wallet Overview:**\n"
+        for i, wallet in enumerate(wallet_details[:10]):
+            name = wallet.get('name', f'Wallet {i+1}')
+            address = wallet.get('address', wallet.get('publicKey', 'N/A'))
+            short_addr = f"{address[:6]}...{address[-4:]}" if len(address) > 10 else address
+            message += f"• **{name}**: `{short_addr}`\n"
+        
+        if len(wallet_details) > 10:
+            message += f"• ... and {len(wallet_details) - 10} more wallets\n"
+        message += "\n"
+    
+    message += "🎯 **Next Steps:**\n"
+    message += "• Fund these wallets with SOL for trading operations\n"
+    message += "• Configure token parameters for creation\n"
+    message += "• Execute coordinated buy/sell operations\n\n"
+    message += "Ready to proceed with token creation setup!"
     
     return message

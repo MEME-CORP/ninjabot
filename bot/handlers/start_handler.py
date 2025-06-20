@@ -2108,6 +2108,7 @@ def register_start_handler(application):
         process_airdrop_wallet_import,
         use_existing_airdrop_wallet,
         select_existing_airdrop_wallet,
+        continue_to_bundled_wallets_setup,
         bundled_wallets_count,
         token_creation_start,
         token_parameter_input,
@@ -2191,7 +2192,7 @@ def register_start_handler(application):
             ],
             ConversationState.BUNDLED_WALLETS_COUNT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bundled_wallets_count),
-                CallbackQueryHandler(token_creation_start, pattern=r"^continue_to_bundled_count$"),
+                CallbackQueryHandler(continue_to_bundled_wallets_setup, pattern=r"^continue_to_bundled_count$"),
                 CallbackQueryHandler(token_creation_start, pattern=r"^start_token_creation$"),
                 CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
             ],

@@ -56,7 +56,7 @@ class TokenCreationParams:
     website: str = ""
     show_name: bool = True
     initial_supply_amount: str = "1000000000"
-    image_file_name: str = ""
+    image_url: str = ""
 
 
 @dataclass
