@@ -650,8 +650,6 @@ async def token_parameter_input(update: Update, context: CallbackContext) -> int
         is_valid, value_or_error = validate_token_description(parameter_value)
     elif current_param == "image_url":
         is_valid, value_or_error = validate_image_url(parameter_value)
-    elif current_param == "initial_supply":
-        is_valid, value_or_error = validate_token_supply(parameter_value)
     else:
         is_valid, value_or_error = False, "Unknown parameter"
     
@@ -683,7 +681,7 @@ async def token_parameter_input(update: Update, context: CallbackContext) -> int
     session_manager.update_session_value(user.id, "token_params", token_params)
     
     # Determine next parameter or proceed to preview
-    parameter_order = ["name", "ticker", "description", "image_url", "initial_supply"]
+    parameter_order = ["name", "ticker", "description", "image_url"]
     current_index = parameter_order.index(current_param)
     
     if current_index + 1 < len(parameter_order):
@@ -699,8 +697,7 @@ async def token_parameter_input(update: Update, context: CallbackContext) -> int
         param_descriptions = {
             "ticker": "the token symbol/ticker (e.g., 'MAT')",
             "description": "a description of your token and its purpose",
-            "image_url": "the URL of your token's image/logo (optional)",
-            "initial_supply": "the initial token supply (e.g., 1000000)"
+            "image_url": "the URL of your token's image/logo (optional)"
         }
         
         await update.message.reply_text(
@@ -711,7 +708,10 @@ async def token_parameter_input(update: Update, context: CallbackContext) -> int
         
         return ConversationState.TOKEN_PARAMETER_INPUT
     else:
-        # All parameters collected, show preview
+        # All parameters collected, add standard supply and show preview
+        token_params["initial_supply"] = 1000000000  # Standard supply
+        session_manager.update_session_value(user.id, "token_params", token_params)
+        
         keyboard = InlineKeyboardMarkup([
             [build_button("💰 Configure Buy Amounts", "configure_buy_amounts")],
             [build_button("✏️ Edit Parameters", "edit_token_parameters")],

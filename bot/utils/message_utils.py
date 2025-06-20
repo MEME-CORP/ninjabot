@@ -940,14 +940,8 @@ def format_token_creation_preview(token_params: Dict[str, Any]) -> str:
     message += f"• **Name:** {token_params.get('name', 'N/A')}\n"
     message += f"• **Symbol:** {token_params.get('symbol', 'N/A')}\n"
     message += f"• **Description:** {token_params.get('description', 'N/A')}\n"
-    initial_supply = token_params.get('initial_supply', '1000000000')
-    try:
-        # Try to format as number with commas
-        supply_num = int(initial_supply) if isinstance(initial_supply, str) else initial_supply
-        message += f"• **Initial Supply:** {supply_num:,}\n\n"
-    except (ValueError, TypeError):
-        # Fallback to string representation
-        message += f"• **Initial Supply:** {initial_supply}\n\n"
+    # Standard supply - always 1,000,000,000
+    message += f"• **Initial Supply:** 1,000,000,000 (Standard)\n\n"
     
     message += "🔗 **Social Links:**\n"
     twitter = token_params.get('twitter', '')
