@@ -429,20 +429,271 @@ class PumpFunClient:
 
     def get_wallet_balance(self, public_key: str) -> Dict[str, Any]:
         """
-        Get wallet balance.
+        Get wallet SOL balance (updated to use enhanced balance endpoint with fallback).
         
         Args:
             public_key: Wallet public key
             
         Returns:
-            Dictionary with balance information
+            Dictionary with SOL balance information
         """
         if not public_key:
             raise PumpFunValidationError("Public key cannot be empty")
             
-        endpoint = f"/api/wallets/{public_key}/balance"
+        # First try the enhanced endpoint
+        endpoint = f"/api/wallets/{public_key}/balance/sol"
         
-        return self._make_request_with_retry("GET", endpoint)
+        try:
+            response = self._make_request_with_retry("GET", endpoint)
+            
+            # Extract SOL balance from new response format
+            if "data" in response and "sol" in response["data"]:
+                sol_data = response["data"]["sol"]
+                # Return in backward-compatible format
+                return {
+                    "message": response.get("message", "Balance retrieved successfully."),
+                    "data": {
+                        "publicKey": response["data"]["publicKey"],
+                        "balance": sol_data["balance"],
+                        "lamports": sol_data["lamports"]
+                    }
+                }
+            else:
+                # Fallback for unexpected response format
+                return response
+                
+        except PumpFunApiError as e:
+            # If 404 or similar error, fall back to legacy endpoint
+            if "404" in str(e) or "Cannot GET" in str(e):
+                logger.warning(f"Enhanced balance endpoint not available, falling back to legacy endpoint: {str(e)}")
+                return self._get_wallet_balance_legacy(public_key)
+            else:
+                # Re-raise other API errors
+                raise e
+
+    def _get_wallet_balance_legacy(self, public_key: str) -> Dict[str, Any]:
+        """
+        Get wallet SOL balance using legacy endpoint.
+        
+        Args:
+            public_key: Wallet public key
+            
+        Returns:
+            Dictionary with SOL balance information in standardized format
+        """
+        legacy_endpoint = f"/api/wallets/{public_key}/balance"
+        
+        try:
+            response = self._make_request_with_retry("GET", legacy_endpoint)
+            
+            # Transform legacy response to match enhanced format
+            if "data" in response:
+                data = response["data"]
+                balance = data.get("balance", 0)
+                lamports = int(balance * 1_000_000_000) if balance else 0
+                
+                return {
+                    "message": response.get("message", "Balance retrieved successfully."),
+                    "data": {
+                        "publicKey": data.get("publicKey", public_key),
+                        "balance": balance,
+                        "lamports": lamports
+                    }
+                }
+            else:
+                # Handle direct balance response
+                balance = response.get("balance", 0)
+                lamports = int(balance * 1_000_000_000) if balance else 0
+                
+                return {
+                    "message": "Balance retrieved successfully.",
+                    "data": {
+                        "publicKey": public_key,
+                        "balance": balance,
+                        "lamports": lamports
+                    }
+                }
+                
+        except Exception as e:
+            logger.error(f"Legacy balance endpoint also failed: {str(e)}")
+            # Return zero balance as last resort
+            return {
+                "message": "Balance check failed, returning zero balance",
+                "data": {
+                    "publicKey": public_key,
+                    "balance": 0,
+                    "lamports": 0
+                },
+                "error": str(e)
+            }
+
+    def get_wallet_sol_balance(self, public_key: str) -> Dict[str, Any]:
+        """
+        Get wallet SOL balance using enhanced endpoint with fallback.
+        
+        Args:
+            public_key: Wallet public key
+            
+        Returns:
+            Dictionary with detailed SOL balance information
+        """
+        if not public_key:
+            raise PumpFunValidationError("Public key cannot be empty")
+            
+        endpoint = f"/api/wallets/{public_key}/balance/sol"
+        
+        try:
+            return self._make_request_with_retry("GET", endpoint)
+        except PumpFunApiError as e:
+            # If 404 or similar error, fall back to legacy endpoint
+            if "404" in str(e) or "Cannot GET" in str(e):
+                logger.warning(f"Enhanced SOL balance endpoint not available, falling back to legacy: {str(e)}")
+                return self._get_wallet_balance_legacy(public_key)
+            else:
+                # Re-raise other API errors
+                raise e
+
+    def get_wallet_token_balance(self, public_key: str, mint_address: str) -> Dict[str, Any]:
+        """
+        Get specific SPL token balance for a wallet with fallback.
+        
+        Args:
+            public_key: Wallet public key
+            mint_address: Token mint address
+            
+        Returns:
+            Dictionary with token balance information
+        """
+        if not public_key:
+            raise PumpFunValidationError("Public key cannot be empty")
+        if not mint_address:
+            raise PumpFunValidationError("Mint address cannot be empty")
+            
+        endpoint = f"/api/wallets/{public_key}/balance/token/{mint_address}"
+        
+        try:
+            return self._make_request_with_retry("GET", endpoint)
+        except PumpFunApiError as e:
+            # If 404 or similar error, provide a fallback response
+            if "404" in str(e) or "Cannot GET" in str(e):
+                logger.warning(f"Enhanced token balance endpoint not available: {str(e)}")
+                return {
+                    "message": "Token balance endpoint not available",
+                    "data": {
+                        "publicKey": public_key,
+                        "token": {
+                            "mint": mint_address,
+                            "balance": 0,
+                            "decimals": 6,
+                            "uiAmount": 0.0,
+                            "symbol": None,
+                            "usdValue": None
+                        },
+                        "metadata": {
+                            "status": "fallback",
+                            "error": "Enhanced token balance endpoint not implemented"
+                        }
+                    }
+                }
+            else:
+                # Re-raise other API errors
+                raise e
+
+    def get_wallet_complete_balance(self, public_key: str) -> Dict[str, Any]:
+        """
+        Get complete wallet balance (SOL + all SPL tokens) with fallback.
+        
+        Args:
+            public_key: Wallet public key
+            
+        Returns:
+            Dictionary with complete balance information
+        """
+        if not public_key:
+            raise PumpFunValidationError("Public key cannot be empty")
+            
+        endpoint = f"/api/wallets/{public_key}/balance/all"
+        
+        try:
+            return self._make_request_with_retry("GET", endpoint)
+        except PumpFunApiError as e:
+            # If 404 or similar error, fall back to SOL balance only
+            if "404" in str(e) or "Cannot GET" in str(e):
+                logger.warning(f"Enhanced complete balance endpoint not available, falling back to SOL only: {str(e)}")
+                sol_balance = self._get_wallet_balance_legacy(public_key)
+                
+                # Transform to complete balance format
+                sol_data = sol_balance.get("data", {})
+                balance = sol_data.get("balance", 0)
+                lamports = sol_data.get("lamports", 0)
+                
+                return {
+                    "message": "Complete wallet balance retrieved (SOL only due to API limitations)",
+                    "data": {
+                        "publicKey": public_key,
+                        "sol": {
+                            "balance": balance,
+                            "lamports": lamports,
+                            "usdValue": None
+                        },
+                        "tokens": [],
+                        "summary": {
+                            "totalAssets": 1,
+                            "solBalance": balance,
+                            "tokenCount": 0,
+                            "hasTokens": False,
+                            "lastUpdated": None
+                        },
+                        "metadata": {
+                            "status": "fallback",
+                            "error": "Enhanced balance endpoints not implemented"
+                        }
+                    }
+                }
+            else:
+                # Re-raise other API errors
+                raise e
+
+    def get_wallet_tokens_balance(self, public_key: str) -> Dict[str, Any]:
+        """
+        Get all SPL token balances for a wallet (without SOL) with fallback.
+        
+        Args:
+            public_key: Wallet public key
+            
+        Returns:
+            Dictionary with all token balance information
+        """
+        if not public_key:
+            raise PumpFunValidationError("Public key cannot be empty")
+            
+        endpoint = f"/api/wallets/{public_key}/balance/tokens"
+        
+        try:
+            return self._make_request_with_retry("GET", endpoint)
+        except PumpFunApiError as e:
+            # If 404 or similar error, return empty tokens response
+            if "404" in str(e) or "Cannot GET" in str(e):
+                logger.warning(f"Enhanced tokens balance endpoint not available: {str(e)}")
+                return {
+                    "message": "Token balances endpoint not available",
+                    "data": {
+                        "publicKey": public_key,
+                        "tokens": [],
+                        "summary": {
+                            "tokenCount": 0,
+                            "hasTokens": False,
+                            "totalTokenAccounts": 0
+                        },
+                        "metadata": {
+                            "status": "fallback",
+                            "error": "Enhanced token balance endpoints not implemented"
+                        }
+                    }
+                }
+            else:
+                # Re-raise other API errors
+                raise e
 
     # Pump Portal Trading Methods
 

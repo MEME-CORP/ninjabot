@@ -712,6 +712,9 @@ async def token_parameter_input(update: Update, context: CallbackContext) -> int
         token_params["initial_supply"] = 1000000000  # Standard supply
         session_manager.update_session_value(user.id, "token_params", token_params)
         
+        # Get bundled wallets count for the buy amounts config
+        bundled_wallets_count = session_manager.get_session_value(user.id, "bundled_wallets_count", 0)
+        
         keyboard = InlineKeyboardMarkup([
             [build_button("💰 Configure Buy Amounts", "configure_buy_amounts")],
             [build_button("✏️ Edit Parameters", "edit_token_parameters")],
@@ -742,13 +745,33 @@ async def configure_buy_amounts(update: Update, context: CallbackContext) -> int
     query = update.callback_query
     await query.answer()
     
-    # Initialize buy amounts configuration
-    wallet_names = ["DevWallet", "First Bundled Wallet 1", "First Bundled Wallet 2", 
-                   "First Bundled Wallet 3", "First Bundled Wallet 4"]
+    # Get total bundled wallets count from session
+    bundled_wallets_count = session_manager.get_session_value(user.id, "bundled_wallets_count", 0)
     
-    session_manager.update_session_value(user.id, "buy_amounts_wallets", wallet_names)
-    session_manager.update_session_value(user.id, "current_buy_wallet_index", 0)
+    # Initialize buy amounts configuration for wallet groups
+    wallet_groups = ["DevWallet"]
+    
+    if bundled_wallets_count > 0:
+        # Always add first bundled wallets group (up to 4 wallets)
+        first_four_count = min(4, bundled_wallets_count)
+        wallet_groups.append("First Bundled Wallets")
+        
+        # Add additional child wallets group if more than 4 bundled wallets
+        if bundled_wallets_count > 4:
+            wallet_groups.append("Additional Child Wallets")
+    
+    # Store wallet groups configuration
+    session_manager.update_session_value(user.id, "buy_amounts_wallet_groups", wallet_groups)
+    session_manager.update_session_value(user.id, "current_buy_group_index", 0)
     session_manager.update_session_value(user.id, "buy_amounts", {})
+    
+    # Store wallet counts for each group
+    wallet_group_counts = {
+        "DevWallet": 1,
+        "First Bundled Wallets": min(4, bundled_wallets_count),
+        "Additional Child Wallets": max(0, bundled_wallets_count - 4)
+    }
+    session_manager.update_session_value(user.id, "wallet_group_counts", wallet_group_counts)
     
     # Show the buy amounts configuration intro
     keyboard = InlineKeyboardMarkup([
@@ -761,11 +784,12 @@ async def configure_buy_amounts(update: Update, context: CallbackContext) -> int
     
     await query.edit_message_text(
         f"💰 **Configure Buy Amounts**\n\n"
-        f"Now let's configure how much SOL each wallet should spend to buy **{token_name}** during token creation.\n\n"
-        f"**Wallets to configure:**\n"
-        f"• DevWallet (main development wallet)\n"
-        f"• First Bundled Wallet 1-4 (trading wallets)\n\n"
-        f"💡 **Important:** Configure these amounts before we check your airdrop wallet balance and fund the bundled wallets.",
+        f"Now let's configure how much SOL each wallet group should spend to buy **{token_name}** during token creation.\n\n"
+        f"**Wallet Groups:**\n"
+        f"• **DevWallet** (1 wallet) - Main development wallet\n"
+        f"• **First Bundled Wallets** ({min(4, bundled_wallets_count)} wallets) - Primary trading wallets\n" +
+        (f"• **Additional Child Wallets** ({max(0, bundled_wallets_count - 4)} wallets) - Extra trading wallets\n" if bundled_wallets_count > 4 else "") +
+        f"\n💡 **Important:** Configure these amounts before we check your airdrop wallet balance and fund the bundled wallets.",
         reply_markup=keyboard,
         parse_mode=ParseMode.MARKDOWN
     )
@@ -773,9 +797,143 @@ async def configure_buy_amounts(update: Update, context: CallbackContext) -> int
     return ConversationState.BUY_AMOUNTS_CONFIG
 
 
+async def start_buy_amounts_input(update: Update, context: CallbackContext) -> int:
+    """
+    Start the actual buy amounts input process for wallet groups.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+    
+    # Get wallet groups from session
+    wallet_groups = session_manager.get_session_value(user.id, "buy_amounts_wallet_groups")
+    
+    if not wallet_groups:
+        # Initialize default groups if not in session
+        bundled_wallets_count = session_manager.get_session_value(user.id, "bundled_wallets_count", 0)
+        wallet_groups = ["DevWallet"]
+        
+        if bundled_wallets_count > 0:
+            wallet_groups.append("First Bundled Wallets")
+            if bundled_wallets_count > 4:
+                wallet_groups.append("Additional Child Wallets")
+        
+        session_manager.update_session_value(user.id, "buy_amounts_wallet_groups", wallet_groups)
+        
+        # Store wallet counts for each group
+        wallet_group_counts = {
+            "DevWallet": 1,
+            "First Bundled Wallets": min(4, bundled_wallets_count),
+            "Additional Child Wallets": max(0, bundled_wallets_count - 4)
+        }
+        session_manager.update_session_value(user.id, "wallet_group_counts", wallet_group_counts)
+    
+    # Reset to first wallet group
+    session_manager.update_session_value(user.id, "current_buy_group_index", 0)
+    
+    # Get group description for better context
+    group_descriptions = {
+        "DevWallet": "Main development wallet",
+        "First Bundled Wallets": "Primary trading wallets (First Bundled Wallet 1-4)",
+        "Additional Child Wallets": "Extra trading wallets (remaining bundled wallets)"
+    }
+    
+    # Request first wallet group buy amount
+    keyboard = InlineKeyboardMarkup([
+        [build_button("« Back to Activities", "back_to_activities")]
+    ])
+    
+    await query.edit_message_text(
+        format_buy_amount_request(
+            wallet_groups[0], 
+            1, 
+            len(wallet_groups),
+            group_descriptions.get(wallet_groups[0], "")
+        ),
+        reply_markup=keyboard,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    return ConversationState.BUY_AMOUNTS_INPUT
+
+
+async def back_to_token_preview(update: Update, context: CallbackContext) -> int:
+    """
+    Go back to token creation preview.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+    
+    # Get token params from session
+    token_params = session_manager.get_session_value(user.id, "token_params") or {}
+    
+    # Show preview again
+    keyboard = InlineKeyboardMarkup([
+        [build_button("💰 Configure Buy Amounts", "configure_buy_amounts")],
+        [build_button("✏️ Edit Parameters", "edit_token_parameters")],
+        [build_button("« Back to Activities", "back_to_activities")]
+    ])
+    
+    await query.edit_message_text(
+        format_token_creation_preview(token_params),
+        reply_markup=keyboard,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    return ConversationState.TOKEN_CREATION_PREVIEW
+
+
+async def edit_token_parameters(update: Update, context: CallbackContext) -> int:
+    """
+    Allow user to edit token parameters by restarting parameter input.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+    
+    # Reset to first parameter
+    session_manager.update_session_value(user.id, "current_token_parameter", "name")
+    session_manager.update_session_value(user.id, "token_params", {})
+    
+    # Request first parameter (token name)
+    keyboard = InlineKeyboardMarkup([
+        [build_button("« Back to Activities", "back_to_activities")]
+    ])
+    
+    await query.edit_message_text(
+        format_token_parameter_request("name", "the name of your token (e.g., 'MyAwesomeToken')"),
+        reply_markup=keyboard,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    return ConversationState.TOKEN_PARAMETER_INPUT
+
+
 async def buy_amounts_input(update: Update, context: CallbackContext) -> int:
     """
-    Handle buy amount input from user.
+    Handle buy amount input from user for wallet groups.
     
     Args:
         update: The update object
@@ -788,22 +946,23 @@ async def buy_amounts_input(update: Update, context: CallbackContext) -> int:
     amount_input = update.message.text.strip()
     
     # Get current configuration
-    wallet_names = session_manager.get_session_value(user.id, "buy_amounts_wallets")
-    current_index = session_manager.get_session_value(user.id, "current_buy_wallet_index")
+    wallet_groups = session_manager.get_session_value(user.id, "buy_amounts_wallet_groups")
+    current_index = session_manager.get_session_value(user.id, "current_buy_group_index")
     buy_amounts = session_manager.get_session_value(user.id, "buy_amounts") or {}
+    wallet_group_counts = session_manager.get_session_value(user.id, "wallet_group_counts") or {}
     
-    if not wallet_names or current_index is None:
+    if not wallet_groups or current_index is None:
         await update.message.reply_text(
             "❌ Configuration error. Please restart the process.",
             parse_mode=ParseMode.MARKDOWN
         )
         return ConversationState.ACTIVITY_SELECTION
     
-    current_wallet = wallet_names[current_index]
+    current_group = wallet_groups[current_index]
     
     # Validate buy amount
     is_valid, amount_or_error = validate_buy_amount(amount_input)
-    log_validation_result(f"buy_amount_{current_wallet}", amount_input, is_valid, 
+    log_validation_result(f"buy_amount_{current_group}", amount_input, is_valid, 
                          "" if is_valid else amount_or_error, user.id)
     
     if not is_valid:
@@ -819,22 +978,35 @@ async def buy_amounts_input(update: Update, context: CallbackContext) -> int:
         )
         return ConversationState.BUY_AMOUNTS_INPUT
     
-    # Store validated amount
-    buy_amounts[current_wallet] = amount_or_error
+    # Store validated amount for the wallet group
+    buy_amounts[current_group] = amount_or_error
     session_manager.update_session_value(user.id, "buy_amounts", buy_amounts)
     
-    # Check if we need to ask for more wallets
-    if current_index + 1 < len(wallet_names):
-        # Move to next wallet
+    # Check if we need to ask for more wallet groups
+    if current_index + 1 < len(wallet_groups):
+        # Move to next wallet group
         next_index = current_index + 1
-        session_manager.update_session_value(user.id, "current_buy_wallet_index", next_index)
+        session_manager.update_session_value(user.id, "current_buy_group_index", next_index)
+        next_group = wallet_groups[next_index]
+        
+        # Get group description for better context
+        group_descriptions = {
+            "DevWallet": "Main development wallet",
+            "First Bundled Wallets": "Primary trading wallets (First Bundled Wallet 1-4)",
+            "Additional Child Wallets": "Extra trading wallets (remaining bundled wallets)"
+        }
         
         keyboard = InlineKeyboardMarkup([
             [build_button("« Back to Activities", "back_to_activities")]
         ])
         
         await update.message.reply_text(
-            format_buy_amount_request(wallet_names[next_index], next_index + 1, len(wallet_names)),
+            format_buy_amount_request(
+                next_group, 
+                next_index + 1, 
+                len(wallet_groups),
+                group_descriptions.get(next_group, "")
+            ),
             reply_markup=keyboard,
             parse_mode=ParseMode.MARKDOWN
         )
@@ -849,15 +1021,12 @@ async def buy_amounts_input(update: Update, context: CallbackContext) -> int:
         ])
         
         await update.message.reply_text(
-            format_buy_amounts_preview(buy_amounts, "Token will be created after funding"),
+            format_buy_amounts_preview(buy_amounts, "Token will be created after funding", wallet_group_counts),
             reply_markup=keyboard,
             parse_mode=ParseMode.MARKDOWN
         )
         
         return ConversationState.BUY_AMOUNTS_PREVIEW
-
-
-
 
 
 async def edit_buy_amounts(update: Update, context: CallbackContext) -> int:
@@ -877,328 +1046,6 @@ async def edit_buy_amounts(update: Update, context: CallbackContext) -> int:
     
     # Reset buy amounts configuration
     return await configure_buy_amounts(update, context)
-
-
-
-
-
-async def bundle_operation_progress(update: Update, context: CallbackContext) -> int:
-    """
-    Execute bundle operations and track progress.
-    
-    Args:
-        update: The update object
-        context: The context object
-        
-    Returns:
-        The next state
-    """
-    user = update.callback_query.from_user
-    query = update.callback_query
-    await query.answer()
-    
-    try:
-        # Get required data from session
-        pumpfun_client = session_manager.get_session_value(user.id, "pumpfun_client")
-        bundled_wallets = session_manager.get_session_value(user.id, "bundled_wallets")
-        bundled_private_keys = session_manager.get_session_value(user.id, "bundled_private_keys")
-        token_address = session_manager.get_session_value(user.id, "token_address")
-        
-        if not all([pumpfun_client, bundled_wallets, bundled_private_keys, token_address]):
-            raise Exception("Missing required data for bundle operations")
-        
-        # Calculate buy amounts (equal distribution)
-        base_amount = 0.05  # 0.05 SOL per wallet
-        buy_amounts = [base_amount] * len(bundled_wallets)
-        
-        # Show progress message
-        await query.edit_message_text(
-            format_bundle_operation_progress("starting", {
-                "total_wallets": len(bundled_wallets),
-                "total_sol": sum(buy_amounts),
-                "token_address": token_address
-            }),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        # Execute batch buy operations
-        logger.info(f"Starting bundle operations for user {user.id}")
-        start_time = time.time()
-        
-        # Use the actual batch_buy_token method signature
-        batch_result = pumpfun_client.batch_buy_token(
-            mint_address=token_address,
-            sol_amount_per_wallet=base_amount,
-            slippage_bps=2500
-        )
-        
-        execution_time = time.time() - start_time
-        
-        # Store operation results
-        operation_results = {
-            "successful_buys": batch_result["successful_buys"],
-            "failed_buys": batch_result["failed_buys"],
-            "total_sol_spent": batch_result["total_sol_spent"],
-            "signatures": batch_result["signatures"],
-            "execution_time": execution_time
-        }
-        
-        session_manager.update_session_value(user.id, "bundle_operation_results", operation_results)
-        
-        logger.info(
-            f"Bundle operations completed for user {user.id}",
-            extra={
-                "user_id": user.id,
-                "successful_buys": batch_result["successful_buys"],
-                "failed_buys": batch_result["failed_buys"],
-                "execution_time": execution_time
-            }
-        )
-        
-        # Show results
-        keyboard = InlineKeyboardMarkup([
-            [build_button("🎉 Start New Bundle", "back_to_activities")],
-            [build_button("📊 View Transaction Details", "view_transaction_details")]
-        ])
-        
-        # Prepare results data with token address included
-        results_with_token = operation_results.copy()
-        results_with_token["token_address"] = token_address
-        
-        await query.edit_message_text(
-            format_bundle_operation_results(results_with_token),
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        return ConversationState.BUNDLE_OPERATION_COMPLETE
-        
-    except Exception as e:
-        logger.error(
-            f"Bundle operations failed for user {user.id}: {str(e)}",
-            extra={"user_id": user.id}
-        )
-        
-        keyboard = InlineKeyboardMarkup([
-            [build_button("Try Again", "start_bundle_operations")],
-            [build_button("« Back to Activities", "back_to_activities")]
-        ])
-        
-        await query.edit_message_text(
-            format_pumpfun_error_message("bundle_operations", str(e)),
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        return ConversationState.BUNDLE_OPERATION_PROGRESS
-
-
-async def use_existing_airdrop_wallet(update: Update, context: CallbackContext) -> int:
-    """
-    Handle using an existing airdrop wallet.
-    
-    Args:
-        update: The update object
-        context: The context object
-        
-    Returns:
-        The next state
-    """
-    user = update.callback_query.from_user
-    query = update.callback_query
-    await query.answer()
-    
-    try:
-        # Get existing wallets for this user
-        existing_wallets = airdrop_wallet_storage.list_user_airdrop_wallets(user.id)
-        
-        if not existing_wallets:
-            # No wallets found, redirect to creation
-            await query.edit_message_text(
-                "❌ **No Existing Airdrop Wallets Found**\n\n"
-                "No saved airdrop wallets found for your account. Please create or import one.",
-                reply_markup=InlineKeyboardMarkup([
-                    [build_button("Create Airdrop Wallet", "create_airdrop_wallet")],
-                    [build_button("Import Airdrop Wallet", "import_airdrop_wallet")],
-                    [build_button("« Back to Activities", "back_to_activities")]
-                ]),
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return ConversationState.BUNDLING_WALLET_SETUP
-        
-        if len(existing_wallets) == 1:
-            # Only one wallet, use it directly
-            wallet_data = existing_wallets[0]
-            wallet_address = wallet_data["wallet_address"]
-            
-            # Store wallet information in session
-            session_manager.update_session_value(user.id, "airdrop_wallet", wallet_address)
-            # Store private key if available (for created/imported wallets)
-            if wallet_data.get("private_key"):
-                session_manager.update_session_value(user.id, "airdrop_private_key", wallet_data["private_key"])
-            
-            logger.info(
-                f"Using existing airdrop wallet for user {user.id}",
-                extra={"user_id": user.id, "wallet_address": wallet_address}
-            )
-            
-            # Show success message and proceed
-            keyboard = InlineKeyboardMarkup([
-                [build_button("Continue", "continue_to_bundled_count")]
-            ])
-            
-            created_date = wallet_data.get("created_at", "Unknown")
-            wallet_type = "Imported" if wallet_data.get("imported") else "Created"
-            
-            await query.edit_message_text(
-                f"✅ **Using Existing Airdrop Wallet**\n\n"
-                f"**Address:** `{wallet_address}`\n"
-                f"**Type:** {wallet_type}\n"
-                f"**Created:** {created_date[:10] if created_date != 'Unknown' else created_date}\n\n"
-                f"Ready to proceed with bundled wallet creation.",
-                reply_markup=keyboard,
-                parse_mode=ParseMode.MARKDOWN
-            )
-            
-            return ConversationState.BUNDLED_WALLETS_COUNT
-        
-        else:
-            # Multiple wallets, let user choose
-            keyboard = []
-            for i, wallet_data in enumerate(existing_wallets[:5]):  # Limit to 5 for UI
-                wallet_address = wallet_data["wallet_address"]
-                created_date = wallet_data.get("created_at", "Unknown")
-                wallet_type = "Imported" if wallet_data.get("imported") else "Created"
-                
-                short_address = f"{wallet_address[:8]}...{wallet_address[-8:]}"
-                button_text = f"{wallet_type}: {short_address}"
-                
-                keyboard.append([build_button(button_text, f"select_airdrop_{i}")])
-            
-            keyboard.append([build_button("« Back to Setup", "back_to_bundling_setup")])
-            
-            # Store wallets in session for selection
-            session_manager.update_session_value(user.id, "available_airdrop_wallets", existing_wallets[:5])
-            
-            await query.edit_message_text(
-                f"📋 **Select Airdrop Wallet**\n\n"
-                f"Found {len(existing_wallets)} airdrop wallet(s). Please select one to use:\n\n"
-                f"💡 Showing most recent 5 wallets.",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode=ParseMode.MARKDOWN
-            )
-            
-            return ConversationState.SELECT_EXISTING_AIRDROP_WALLET
-        
-    except Exception as e:
-        logger.error(
-            f"Failed to load existing airdrop wallets for user {user.id}: {str(e)}",
-            extra={"user_id": user.id}
-        )
-        
-        keyboard = InlineKeyboardMarkup([
-            [build_button("Try Again", "use_existing_airdrop_wallet")],
-            [build_button("« Back to Activities", "back_to_activities")]
-        ])
-        
-        await query.edit_message_text(
-            format_pumpfun_error_message("airdrop_wallet_loading", str(e)),
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        return ConversationState.BUNDLING_WALLET_SETUP
-
-
-async def select_existing_airdrop_wallet(update: Update, context: CallbackContext) -> int:
-    """
-    Handle selection of a specific existing airdrop wallet.
-    
-    Args:
-        update: The update object
-        context: The context object
-        
-    Returns:
-        The next state
-    """
-    user = update.callback_query.from_user
-    query = update.callback_query
-    await query.answer()
-    
-    try:
-        choice = query.data
-        
-        if choice == "back_to_bundling_setup":
-            # Import the start_bundling_workflow function from start_handler
-            from bot.handlers.start_handler import start_bundling_workflow
-            # Return to bundling setup
-            return await start_bundling_workflow(update, context)
-        
-        # Extract wallet index from callback data
-        if choice.startswith("select_airdrop_"):
-            wallet_index = int(choice.replace("select_airdrop_", ""))
-            
-            # Get available wallets from session
-            available_wallets = session_manager.get_session_value(user.id, "available_airdrop_wallets", [])
-            
-            if wallet_index >= len(available_wallets):
-                raise ValueError(f"Invalid wallet index: {wallet_index}")
-            
-            wallet_data = available_wallets[wallet_index]
-            wallet_address = wallet_data["wallet_address"]
-            
-            # Store wallet information in session
-            session_manager.update_session_value(user.id, "airdrop_wallet", wallet_address)
-            # Store private key if available
-            if wallet_data.get("private_key"):
-                session_manager.update_session_value(user.id, "airdrop_private_key", wallet_data["private_key"])
-            
-            logger.info(
-                f"Selected existing airdrop wallet {wallet_index} for user {user.id}",
-                extra={"user_id": user.id, "wallet_address": wallet_address}
-            )
-            
-            # Show success message and proceed
-            keyboard = InlineKeyboardMarkup([
-                [build_button("Continue", "continue_to_bundled_count")]
-            ])
-            
-            created_date = wallet_data.get("created_at", "Unknown")
-            wallet_type = "Imported" if wallet_data.get("imported") else "Created"
-            
-            await query.edit_message_text(
-                f"✅ **Selected Airdrop Wallet**\n\n"
-                f"**Address:** `{wallet_address}`\n"
-                f"**Type:** {wallet_type}\n"
-                f"**Created:** {created_date[:10] if created_date != 'Unknown' else created_date}\n\n"
-                f"Ready to proceed with bundled wallet creation.",
-                reply_markup=keyboard,
-                parse_mode=ParseMode.MARKDOWN
-            )
-            
-            return ConversationState.BUNDLED_WALLETS_COUNT
-        
-        else:
-            raise ValueError(f"Unknown choice: {choice}")
-        
-    except Exception as e:
-        logger.error(
-            f"Failed to select existing airdrop wallet for user {user.id}: {str(e)}",
-            extra={"user_id": user.id}
-        )
-        
-        keyboard = InlineKeyboardMarkup([
-            [build_button("Try Again", "use_existing_airdrop_wallet")],
-            [build_button("« Back to Activities", "back_to_activities")]
-        ])
-        
-        await query.edit_message_text(
-            format_pumpfun_error_message("airdrop_wallet_selection", str(e)),
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        return ConversationState.BUNDLING_WALLET_SETUP
 
 
 async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
@@ -1221,23 +1068,35 @@ async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
         pumpfun_client = session_manager.get_session_value(user.id, "pumpfun_client")
         airdrop_wallet = session_manager.get_session_value(user.id, "airdrop_wallet")
         buy_amounts = session_manager.get_session_value(user.id, "buy_amounts")
+        wallet_group_counts = session_manager.get_session_value(user.id, "wallet_group_counts") or {}
         
         if not all([pumpfun_client, airdrop_wallet, buy_amounts]):
             raise Exception("Missing required session data for balance check")
         
+        # Calculate total required SOL based on wallet groups
+        total_buy_amount = 0
+        for group, amount in buy_amounts.items():
+            count = wallet_group_counts.get(group, 1)
+            total_buy_amount += amount * count
+        
         # Show checking message
         await query.edit_message_text(
-            format_wallet_balance_check_message(airdrop_wallet, buy_amounts),
+            format_wallet_balance_check_message(airdrop_wallet, {"total_estimated": total_buy_amount}),
             parse_mode=ParseMode.MARKDOWN
         )
         
         # Check wallet balance using PumpFun client
         logger.info(f"Checking airdrop wallet balance for user {user.id}")
         balance_info = pumpfun_client.get_wallet_balance(airdrop_wallet)
-        current_balance = balance_info.get("balance", 0)
+        
+        # Handle new response format
+        if "data" in balance_info and "balance" in balance_info["data"]:
+            current_balance = balance_info["data"]["balance"]
+        else:
+            # Fallback for legacy format
+            current_balance = balance_info.get("balance", 0)
         
         # Calculate required balance (buy amounts + gas fees + buffer)
-        total_buy_amount = sum(buy_amounts.values())
         gas_fees_estimate = total_buy_amount * 0.05  # 5% for gas fees
         buffer = 0.01  # Small buffer
         required_balance = total_buy_amount + gas_fees_estimate + buffer
@@ -1460,6 +1319,7 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
 async def create_token_final(update: Update, context: CallbackContext) -> int:
     """
     Create the token with configured buy amounts after all preparation is complete.
+    Now handles the new wallet group structure.
     
     Args:
         update: The update object
@@ -1477,6 +1337,7 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
         pumpfun_client = session_manager.get_session_value(user.id, "pumpfun_client")
         token_params = session_manager.get_session_value(user.id, "token_params")
         buy_amounts = session_manager.get_session_value(user.id, "buy_amounts")
+        wallet_group_counts = session_manager.get_session_value(user.id, "wallet_group_counts") or {}
         
         if not all([pumpfun_client, token_params, buy_amounts]):
             raise Exception("Missing required session data for token creation")
@@ -1498,13 +1359,17 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             image_url=token_params.get("image_url", "")
         )
         
-        # Use the user-configured buy amounts
+        # Convert wallet group amounts to individual wallet amounts
+        dev_wallet_amount = buy_amounts.get("DevWallet", 0.01)
+        first_bundled_amount = buy_amounts.get("First Bundled Wallets", 0.01)
+        
+        # Use the wallet group amounts for the first 4 bundled wallets
         buy_amounts_obj = BuyAmounts(
-            dev_wallet_buy_sol=buy_amounts.get("DevWallet", 0.01),
-            first_bundled_wallet_1_buy_sol=buy_amounts.get("First Bundled Wallet 1", 0.01),
-            first_bundled_wallet_2_buy_sol=buy_amounts.get("First Bundled Wallet 2", 0.01),
-            first_bundled_wallet_3_buy_sol=buy_amounts.get("First Bundled Wallet 3", 0.01),
-            first_bundled_wallet_4_buy_sol=buy_amounts.get("First Bundled Wallet 4", 0.01)
+            dev_wallet_buy_sol=dev_wallet_amount,
+            first_bundled_wallet_1_buy_sol=first_bundled_amount,
+            first_bundled_wallet_2_buy_sol=first_bundled_amount,
+            first_bundled_wallet_3_buy_sol=first_bundled_amount,
+            first_bundled_wallet_4_buy_sol=first_bundled_amount
         )
         
         logger.info(f"Creating final token with configured buy amounts for user {user.id}")
@@ -1519,15 +1384,32 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
         execution_time = time.time() - start_time
         
         # Store final results
-        session_manager.update_session_value(user.id, "token_address", token_result["token_address"])
-        session_manager.update_session_value(user.id, "token_creation_signature", token_result["signature"])
+        session_manager.update_session_value(user.id, "token_address", token_result["mint_address"])
+        session_manager.update_session_value(user.id, "token_creation_signature", token_result.get("bundle_id", ""))
         session_manager.update_session_value(user.id, "final_creation_results", token_result)
+        
+        # Execute additional buys for remaining child wallets if configured
+        additional_child_amount = buy_amounts.get("Additional Child Wallets")
+        if additional_child_amount and additional_child_amount > 0:
+            additional_count = wallet_group_counts.get("Additional Child Wallets", 0)
+            if additional_count > 0:
+                logger.info(f"Executing additional buys for {additional_count} remaining child wallets")
+                try:
+                    # Execute batch buy for remaining wallets
+                    additional_result = pumpfun_client.batch_buy_token(
+                        mint_address=token_result["mint_address"],
+                        sol_amount_per_wallet=additional_child_amount,
+                        slippage_bps=2500
+                    )
+                    logger.info(f"Additional buys completed: {additional_result}")
+                except Exception as additional_error:
+                    logger.warning(f"Additional buys failed: {str(additional_error)}")
         
         logger.info(
             f"Final token creation completed for user {user.id}",
             extra={
                 "user_id": user.id,
-                "token_address": token_result["token_address"],
+                "token_address": token_result["mint_address"],
                 "execution_time": execution_time
             }
         )
@@ -1538,16 +1420,20 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             [build_button("📊 View Transaction Details", "view_final_details")]
         ])
         
+        # Calculate total participating wallets
+        total_participating_wallets = sum(wallet_group_counts.values())
+        
         # Prepare results data for display
         results_with_token = {
             "operation_type": "token_creation_with_buys",
             "success": True,
-            "token_address": token_result["token_address"],
-            "total_operations": len(buy_amounts),
-            "successful_operations": len(buy_amounts),  # Assume all successful for now
+            "token_address": token_result["mint_address"],
+            "total_operations": total_participating_wallets,
+            "successful_operations": total_participating_wallets,  # Assume all successful for now
             "failed_operations": 0,
             "execution_time": execution_time,
-            "buy_amounts": buy_amounts
+            "buy_amounts": buy_amounts,
+            "wallet_group_counts": wallet_group_counts
         }
         
         await query.edit_message_text(
@@ -1597,9 +1483,9 @@ async def retry_wallet_funding(update: Update, context: CallbackContext) -> int:
     return await start_wallet_funding(update, context)
 
 
-async def start_buy_amounts_input(update: Update, context: CallbackContext) -> int:
+async def use_existing_airdrop_wallet(update: Update, context: CallbackContext) -> int:
     """
-    Start the actual buy amounts input process.
+    Handle using an existing airdrop wallet.
     
     Args:
         update: The update object
@@ -1612,35 +1498,111 @@ async def start_buy_amounts_input(update: Update, context: CallbackContext) -> i
     query = update.callback_query
     await query.answer()
     
-    # Get wallet names from session
-    wallet_names = session_manager.get_session_value(user.id, "buy_amounts_wallets")
-    
-    if not wallet_names:
-        # Fallback if not in session
-        wallet_names = ["DevWallet", "First Bundled Wallet 1", "First Bundled Wallet 2", 
-                       "First Bundled Wallet 3", "First Bundled Wallet 4"]
-        session_manager.update_session_value(user.id, "buy_amounts_wallets", wallet_names)
-    
-    # Reset to first wallet
-    session_manager.update_session_value(user.id, "current_buy_wallet_index", 0)
-    
-    # Request first wallet buy amount
-    keyboard = InlineKeyboardMarkup([
-        [build_button("« Back to Activities", "back_to_activities")]
-    ])
-    
-    await query.edit_message_text(
-        format_buy_amount_request(wallet_names[0], 1, len(wallet_names)),
-        reply_markup=keyboard,
-        parse_mode=ParseMode.MARKDOWN
-    )
-    
-    return ConversationState.BUY_AMOUNTS_INPUT
+    try:
+        # Get existing wallets for this user
+        existing_wallets = airdrop_wallet_storage.list_user_airdrop_wallets(user.id)
+        
+        if not existing_wallets:
+            # No wallets found, redirect to creation
+            await query.edit_message_text(
+                "❌ **No Existing Airdrop Wallets Found**\n\n"
+                "No saved airdrop wallets found for your account. Please create or import one.",
+                reply_markup=InlineKeyboardMarkup([
+                    [build_button("Create Airdrop Wallet", "create_airdrop_wallet")],
+                    [build_button("Import Airdrop Wallet", "import_airdrop_wallet")],
+                    [build_button("« Back to Activities", "back_to_activities")]
+                ]),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return ConversationState.BUNDLING_WALLET_SETUP
+        
+        if len(existing_wallets) == 1:
+            # Only one wallet, use it directly
+            wallet_data = existing_wallets[0]
+            wallet_address = wallet_data["wallet_address"]
+            
+            # Store wallet information in session
+            session_manager.update_session_value(user.id, "airdrop_wallet", wallet_address)
+            # Store private key if available (for created/imported wallets)
+            if wallet_data.get("private_key"):
+                session_manager.update_session_value(user.id, "airdrop_private_key", wallet_data["private_key"])
+            
+            logger.info(
+                f"Using existing airdrop wallet for user {user.id}",
+                extra={"user_id": user.id, "wallet_address": wallet_address}
+            )
+            
+            # Show success message and proceed
+            keyboard = InlineKeyboardMarkup([
+                [build_button("Continue", "continue_to_bundled_count")]
+            ])
+            
+            created_date = wallet_data.get("created_at", "Unknown")
+            wallet_type = "Imported" if wallet_data.get("imported") else "Created"
+            
+            await query.edit_message_text(
+                f"✅ **Using Existing Airdrop Wallet**\n\n"
+                f"**Address:** `{wallet_address}`\n"
+                f"**Type:** {wallet_type}\n"
+                f"**Created:** {created_date[:10] if created_date != 'Unknown' else created_date}\n\n"
+                f"Ready to proceed with bundled wallet creation.",
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            return ConversationState.BUNDLED_WALLETS_COUNT
+        
+        else:
+            # Multiple wallets, let user choose
+            keyboard = []
+            for i, wallet_data in enumerate(existing_wallets[:5]):  # Limit to 5 for UI
+                wallet_address = wallet_data["wallet_address"]
+                created_date = wallet_data.get("created_at", "Unknown")
+                wallet_type = "Imported" if wallet_data.get("imported") else "Created"
+                
+                short_address = f"{wallet_address[:8]}...{wallet_address[-8:]}"
+                button_text = f"{wallet_type}: {short_address}"
+                
+                keyboard.append([build_button(button_text, f"select_airdrop_{i}")])
+            
+            keyboard.append([build_button("« Back to Setup", "back_to_bundling_setup")])
+            
+            # Store wallets in session for selection
+            session_manager.update_session_value(user.id, "available_airdrop_wallets", existing_wallets[:5])
+            
+            await query.edit_message_text(
+                f"📋 **Select Airdrop Wallet**\n\n"
+                f"Found {len(existing_wallets)} airdrop wallet(s). Please select one to use:\n\n"
+                f"💡 Showing most recent 5 wallets.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            return ConversationState.SELECT_EXISTING_AIRDROP_WALLET
+        
+    except Exception as e:
+        logger.error(
+            f"Failed to load existing airdrop wallets for user {user.id}: {str(e)}",
+            extra={"user_id": user.id}
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [build_button("Try Again", "use_existing_airdrop_wallet")],
+            [build_button("« Back to Activities", "back_to_activities")]
+        ])
+        
+        await query.edit_message_text(
+            format_pumpfun_error_message("airdrop_wallet_loading", str(e)),
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.BUNDLING_WALLET_SETUP
 
 
-async def back_to_token_preview(update: Update, context: CallbackContext) -> int:
+async def select_existing_airdrop_wallet(update: Update, context: CallbackContext) -> int:
     """
-    Go back to token creation preview.
+    Handle selection of a specific existing airdrop wallet.
     
     Args:
         update: The update object
@@ -1653,28 +1615,85 @@ async def back_to_token_preview(update: Update, context: CallbackContext) -> int
     query = update.callback_query
     await query.answer()
     
-    # Get token params from session
-    token_params = session_manager.get_session_value(user.id, "token_params") or {}
-    
-    # Show preview again
-    keyboard = InlineKeyboardMarkup([
-        [build_button("💰 Configure Buy Amounts", "configure_buy_amounts")],
-        [build_button("✏️ Edit Parameters", "edit_token_parameters")],
-        [build_button("« Back to Activities", "back_to_activities")]
-    ])
-    
-    await query.edit_message_text(
-        format_token_creation_preview(token_params),
-        reply_markup=keyboard,
-        parse_mode=ParseMode.MARKDOWN
-    )
-    
-    return ConversationState.TOKEN_CREATION_PREVIEW
+    try:
+        choice = query.data
+        
+        if choice == "back_to_bundling_setup":
+            # Import the start_bundling_workflow function from start_handler
+            from bot.handlers.start_handler import start_bundling_workflow
+            # Return to bundling setup
+            return await start_bundling_workflow(update, context)
+        
+        # Extract wallet index from callback data
+        if choice.startswith("select_airdrop_"):
+            wallet_index = int(choice.replace("select_airdrop_", ""))
+            
+            # Get available wallets from session
+            available_wallets = session_manager.get_session_value(user.id, "available_airdrop_wallets", [])
+            
+            if wallet_index >= len(available_wallets):
+                raise ValueError(f"Invalid wallet index: {wallet_index}")
+            
+            wallet_data = available_wallets[wallet_index]
+            wallet_address = wallet_data["wallet_address"]
+            
+            # Store wallet information in session
+            session_manager.update_session_value(user.id, "airdrop_wallet", wallet_address)
+            # Store private key if available
+            if wallet_data.get("private_key"):
+                session_manager.update_session_value(user.id, "airdrop_private_key", wallet_data["private_key"])
+            
+            logger.info(
+                f"Selected existing airdrop wallet {wallet_index} for user {user.id}",
+                extra={"user_id": user.id, "wallet_address": wallet_address}
+            )
+            
+            # Show success message and proceed
+            keyboard = InlineKeyboardMarkup([
+                [build_button("Continue", "continue_to_bundled_count")]
+            ])
+            
+            created_date = wallet_data.get("created_at", "Unknown")
+            wallet_type = "Imported" if wallet_data.get("imported") else "Created"
+            
+            await query.edit_message_text(
+                f"✅ **Selected Airdrop Wallet**\n\n"
+                f"**Address:** `{wallet_address}`\n"
+                f"**Type:** {wallet_type}\n"
+                f"**Created:** {created_date[:10] if created_date != 'Unknown' else created_date}\n\n"
+                f"Ready to proceed with bundled wallet creation.",
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            return ConversationState.BUNDLED_WALLETS_COUNT
+        
+        else:
+            raise ValueError(f"Unknown choice: {choice}")
+        
+    except Exception as e:
+        logger.error(
+            f"Failed to select existing airdrop wallet for user {user.id}: {str(e)}",
+            extra={"user_id": user.id}
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [build_button("Try Again", "use_existing_airdrop_wallet")],
+            [build_button("« Back to Activities", "back_to_activities")]
+        ])
+        
+        await query.edit_message_text(
+            format_pumpfun_error_message("airdrop_wallet_selection", str(e)),
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.BUNDLING_WALLET_SETUP
 
 
-async def edit_token_parameters(update: Update, context: CallbackContext) -> int:
+async def bundle_operation_progress(update: Update, context: CallbackContext) -> int:
     """
-    Allow user to edit token parameters by restarting parameter input.
+    Handle bundle operation progress viewing and details display.
     
     Args:
         update: The update object
@@ -1687,19 +1706,178 @@ async def edit_token_parameters(update: Update, context: CallbackContext) -> int
     query = update.callback_query
     await query.answer()
     
-    # Reset to first parameter
-    session_manager.update_session_value(user.id, "current_token_parameter", "name")
-    session_manager.update_session_value(user.id, "token_params", {})
-    
-    # Request first parameter (token name)
-    keyboard = InlineKeyboardMarkup([
-        [build_button("« Back to Activities", "back_to_activities")]
-    ])
-    
-    await query.edit_message_text(
-        format_token_parameter_request("name", "the name of your token (e.g., 'MyAwesomeToken')"),
-        reply_markup=keyboard,
-        parse_mode=ParseMode.MARKDOWN
-    )
-    
-    return ConversationState.TOKEN_PARAMETER_INPUT 
+    try:
+        choice = query.data
+        
+        if choice == "view_funding_details":
+            # Show funding operation details
+            funding_results = session_manager.get_session_value(user.id, "funding_results", {})
+            
+            if not funding_results:
+                await query.edit_message_text(
+                    "❌ **No Funding Details Available**\n\n"
+                    "No funding operation results found in session.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return ConversationState.WALLET_FUNDING_PROGRESS
+            
+            # Format funding details message
+            successful = funding_results.get("successful_transfers", 0)
+            failed = funding_results.get("failed_transfers", 0)
+            total = successful + failed
+            
+            details_message = (
+                f"💰 **Wallet Funding Details**\n\n"
+                f"📊 **Summary:**\n"
+                f"• Total wallets: {total}\n"
+                f"• Successfully funded: {successful}\n"
+                f"• Failed to fund: {failed}\n"
+                f"• Success rate: {(successful/total)*100:.1f}%\n\n" if total > 0 else ""
+            )
+            
+            if funding_results.get("bundle_id"):
+                details_message += f"📦 **Bundle ID:** `{funding_results['bundle_id']}`\n"
+            
+            if funding_results.get("amount_per_wallet"):
+                details_message += f"💵 **Amount per wallet:** {funding_results['amount_per_wallet']} SOL\n"
+            
+            keyboard = InlineKeyboardMarkup([
+                [build_button("🚀 Continue to Token Creation", "create_token_final")],
+                [build_button("« Back", "start_wallet_funding")]
+            ])
+            
+            await query.edit_message_text(
+                details_message,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            return ConversationState.WALLET_FUNDING_PROGRESS
+            
+        elif choice == "view_transaction_details":
+            # Show transaction details from token creation
+            final_results = session_manager.get_session_value(user.id, "final_creation_results", {})
+            
+            if not final_results:
+                await query.edit_message_text(
+                    "❌ **No Transaction Details Available**\n\n"
+                    "No token creation results found in session.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return ConversationState.BUNDLE_OPERATION_COMPLETE
+            
+            # Format transaction details
+            details_message = (
+                f"📊 **Transaction Details**\n\n"
+                f"🪙 **Token Address:** `{final_results.get('mint_address', 'N/A')}`\n"
+                f"📦 **Bundle ID:** `{final_results.get('bundle_id', 'N/A')}`\n"
+                f"⏱️ **Status:** {final_results.get('status', 'Unknown')}\n\n"
+            )
+            
+            if final_results.get("transaction_signatures"):
+                signatures = final_results["transaction_signatures"]
+                details_message += f"📝 **Transaction Signatures:**\n"
+                for i, sig in enumerate(signatures[:5]):  # Show first 5
+                    details_message += f"• `{sig[:8]}...{sig[-8:]}`\n"
+                if len(signatures) > 5:
+                    details_message += f"• ... and {len(signatures) - 5} more\n"
+            
+            keyboard = InlineKeyboardMarkup([
+                [build_button("🎉 Start New Bundle", "back_to_activities")],
+                [build_button("« Back", "view_final_details")]
+            ])
+            
+            await query.edit_message_text(
+                details_message,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            return ConversationState.BUNDLE_OPERATION_COMPLETE
+            
+        elif choice == "view_final_details":
+            # Show final operation summary
+            final_results = session_manager.get_session_value(user.id, "final_creation_results", {})
+            buy_amounts = session_manager.get_session_value(user.id, "buy_amounts", {})
+            wallet_group_counts = session_manager.get_session_value(user.id, "wallet_group_counts", {})
+            
+            if not final_results:
+                await query.edit_message_text(
+                    "❌ **No Final Details Available**\n\n"
+                    "No operation results found in session.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return ConversationState.BUNDLE_OPERATION_COMPLETE
+            
+            # Format final details message
+            details_message = (
+                f"🎉 **Operation Complete - Final Summary**\n\n"
+                f"🪙 **Token Created:** `{final_results.get('mint_address', 'N/A')}`\n"
+                f"📦 **Bundle ID:** `{final_results.get('bundle_id', 'N/A')}`\n"
+                f"⏱️ **Status:** {final_results.get('status', 'Success')}\n\n"
+            )
+            
+            # Add buy amounts summary
+            if buy_amounts:
+                details_message += f"💰 **Buy Amounts Executed:**\n"
+                for group, amount in buy_amounts.items():
+                    count = wallet_group_counts.get(group, 1)
+                    total_spent = amount * count
+                    details_message += f"• {group}: {amount} SOL × {count} = {total_spent} SOL\n"
+                
+                total_spent = sum(amount * wallet_group_counts.get(group, 1) for group, amount in buy_amounts.items())
+                details_message += f"\n**Total SOL Spent:** {total_spent} SOL\n"
+            
+            keyboard = InlineKeyboardMarkup([
+                [build_button("📊 View Transaction Details", "view_transaction_details")],
+                [build_button("🎉 Start New Bundle", "back_to_activities")]
+            ])
+            
+            await query.edit_message_text(
+                details_message,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            return ConversationState.BUNDLE_OPERATION_COMPLETE
+            
+        elif choice == "start_bundle_operations":
+            # Start bundle operations (placeholder for future implementation)
+            await query.edit_message_text(
+                "🚀 **Bundle Operations**\n\n"
+                "Bundle operations feature is under development. "
+                "Please use the individual token creation workflow for now.",
+                reply_markup=InlineKeyboardMarkup([
+                    [build_button("« Back to Activities", "back_to_activities")]
+                ]),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            return ConversationState.BUNDLE_OPERATION_PROGRESS
+            
+        else:
+            # Unknown choice, redirect to activities
+            logger.warning(f"Unknown bundle operation progress choice: {choice} from user {user.id}")
+            
+            # Import the start function from start_handler to redirect to activities
+            from bot.handlers.start_handler import start
+            return await start(update, context)
+        
+    except Exception as e:
+        logger.error(
+            f"Error in bundle operation progress for user {user.id}: {str(e)}",
+            extra={"user_id": user.id, "choice": query.data},
+            exc_info=True
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [build_button("« Back to Activities", "back_to_activities")]
+        ])
+        
+        await query.edit_message_text(
+            format_pumpfun_error_message("bundle_operation_progress", str(e)),
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.BUNDLE_OPERATION_COMPLETE 

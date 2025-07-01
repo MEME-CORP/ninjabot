@@ -920,6 +920,24 @@ def format_token_parameter_request(parameter_name: str, description: str, option
         message += "• Maximum 500 characters\n"
         message += "• Explain your token's purpose\n"
         message += "• Include key features or use cases\n\n"
+    elif parameter_name.lower() == "image":
+        message += "🖼️ **Image Upload Guidelines:**\n"
+        message += "• **Supported formats**: JPG, JPEG, PNG, GIF, WEBP\n"
+        message += "• **Maximum file size**: 10 MB\n"
+        message += "• **Recommended dimensions**: 512x512 pixels (square)\n"
+        message += "• **Aspect ratio**: 1:1 (square) for best results\n"
+        message += "• **Quality**: High resolution, clear and professional\n\n"
+        message += "📱 **How to upload:**\n"
+        message += "• Click the attachment button (📎) in your chat\n"
+        message += "• Select 'Upload Image' or 'Browse Files'\n"
+        message += "• Choose your token image from your computer\n"
+        message += "• Wait for upload confirmation\n\n"
+        message += "💡 **Tips:**\n"
+        message += "• Use eye-catching designs that represent your token\n"
+        message += "• Avoid copyrighted images\n"
+        message += "• Test visibility at small sizes (tokens show as small icons)\n\n"
+        message += "Please upload your token image file:"
+        return message
     
     message += f"Please enter your token {parameter_name.lower()}:"
     
@@ -953,12 +971,104 @@ def format_token_creation_preview(token_params: Dict[str, Any]) -> str:
     message += f"• **Website:** {website if website else 'Not provided'}\n\n"
     
     message += "🖼️ **Image:** "
-    message += "Uploaded" if token_params.get('image_url') else "Not provided"
+    if token_params.get('image_url'):
+        image_name = token_params.get('image_name', 'Uploaded image')
+        message += f"✅ {image_name} (uploaded successfully)"
+    else:
+        message += "Not provided"
     message += "\n\n"
     
     message += "✅ Please review your token details and confirm to proceed with creation."
     
     return message
+
+def format_image_upload_confirmation(image_name: str, file_size: str, file_type: str) -> str:
+    """
+    Format image upload confirmation message.
+    
+    Args:
+        image_name: Name of the uploaded image file
+        file_size: Size of the uploaded file (e.g., "2.3 MB")
+        file_type: Type/format of the uploaded file (e.g., "PNG")
+        
+    Returns:
+        Formatted confirmation message
+    """
+    return (
+        f"✅ **Image Upload Successful**\n\n"
+        f"📁 **File:** {image_name}\n"
+        f"📏 **Size:** {file_size}\n"
+        f"🖼️ **Format:** {file_type}\n\n"
+        f"Your token image has been uploaded and validated successfully.\n\n"
+        f"Ready to proceed to the next step!"
+    )
+
+def format_image_upload_error(error_type: str, details: str, max_size: str = "10 MB") -> str:
+    """
+    Format image upload error message.
+    
+    Args:
+        error_type: Type of error (file_size, format, upload, etc.)
+        details: Detailed error information
+        max_size: Maximum allowed file size
+        
+    Returns:
+        Formatted error message
+    """
+    error_emojis = {
+        'file_size': '📏',
+        'format': '🖼️',
+        'upload': '📤',
+        'validation': '🔍',
+        'network': '🌐'
+    }
+    
+    emoji = error_emojis.get(error_type, '❌')
+    
+    message = f"{emoji} **Image Upload Error**\n\n"
+    message += f"**Error:** {details}\n\n"
+    
+    if error_type == 'file_size':
+        message += f"💡 **Solution:**\n"
+        message += f"• Compress your image to under {max_size}\n"
+        message += f"• Use online image compressors\n"
+        message += f"• Reduce image dimensions if too large\n"
+    elif error_type == 'format':
+        message += f"💡 **Solution:**\n"
+        message += f"• Use supported formats: JPG, JPEG, PNG, GIF, WEBP\n"
+        message += f"• Convert your image to a supported format\n"
+        message += f"• Ensure file extension matches content type\n"
+    elif error_type == 'upload':
+        message += f"💡 **Solution:**\n"
+        message += f"• Check your internet connection\n"
+        message += f"• Try uploading again\n"
+        message += f"• Ensure the file isn't corrupted\n"
+    
+    message += f"\nPlease try uploading a different image or fix the issue above."
+    
+    return message
+
+def format_image_upload_progress(filename: str, progress_percent: int = 0) -> str:
+    """
+    Format image upload progress message.
+    
+    Args:
+        filename: Name of the file being uploaded
+        progress_percent: Upload progress percentage (0-100)
+        
+    Returns:
+        Formatted progress message
+    """
+    bar_length = 10
+    filled_length = int(bar_length * progress_percent / 100)
+    progress_bar = "█" * filled_length + "░" * (bar_length - filled_length)
+    
+    return (
+        f"📤 **Uploading Image**\n\n"
+        f"📁 **File:** {filename}\n"
+        f"📊 **Progress:** {progress_percent}% [{progress_bar}]\n\n"
+        f"Please wait while your image is being uploaded and processed..."
+    )
 
 def format_bundle_operation_progress(operation_type: str, progress_data: Dict[str, Any]) -> str:
     """
@@ -1226,52 +1336,72 @@ def format_existing_bundled_wallets_selected_message(wallet_count: int, wallet_a
     
     return message
 
-def format_buy_amounts_config_message(token_address: str) -> str:
+def format_buy_amounts_config_message(token_address: str, total_bundled_wallets: int = 0) -> str:
     """
     Format message for configuring buy amounts after token creation.
     
     Args:
         token_address: The created token address
+        total_bundled_wallets: Total number of bundled wallets created
         
     Returns:
         Formatted message string
     """
     short_token = f"{token_address[:8]}...{token_address[-8:]}" if len(token_address) > 16 else token_address
     
-    return (
+    message = (
         f"🪙 **Token Created Successfully!**\n\n"
         f"**Token Address:** `{short_token}`\n\n"
         f"💰 **Configure Initial Buy Amounts**\n\n"
         f"Now let's configure how much SOL each wallet should use to buy your new token:\n\n"
-        f"📝 **Wallets that will buy:**\n"
-        f"• **DevWallet** - Main development wallet\n"
-        f"• **First Bundled Wallet 1** - Trading wallet\n"
-        f"• **First Bundled Wallet 2** - Trading wallet\n"
-        f"• **First Bundled Wallet 3** - Trading wallet\n"
-        f"• **First Bundled Wallet 4** - Trading wallet\n\n"
-        f"💡 **Guidelines:**\n"
-        f"• Minimum: 0.001 SOL per wallet\n"
-        f"• Maximum: 10 SOL per wallet\n"
-        f"• Total buy amounts will create initial liquidity\n\n"
-        f"Let's start with the **DevWallet** buy amount..."
     )
+    
+    if total_bundled_wallets > 0:
+        first_four_count = min(4, total_bundled_wallets)
+        remaining_count = max(0, total_bundled_wallets - 4)
+        
+        message += f"📋 **Wallet Groups to Configure:**\n\n"
+        message += f"**1. DevWallet** (1 wallet)\n"
+        message += f"   • Main development wallet for token operations\n\n"
+        message += f"**2. First Bundled Wallets** ({first_four_count} wallets)\n"
+        message += f"   • Primary trading wallets (First Bundled Wallet 1-{first_four_count})\n\n"
+        
+        if remaining_count > 0:
+            message += f"**3. Additional Child Wallets** ({remaining_count} wallets)\n"
+            message += f"   • Extra trading wallets (Bundled Wallet 5-{total_bundled_wallets})\n\n"
+    else:
+        message += f"📝 **Wallets to configure:**\n"
+        message += f"• **DevWallet** - Main development wallet\n"
+        message += f"• **First Bundled Wallets 1-4** - Primary trading wallets\n\n"
+    
+    message += f"💡 **Guidelines:**\n"
+    message += f"• Minimum: 0.001 SOL per wallet\n"
+    message += f"• Maximum: 10 SOL per wallet\n"
+    message += f"• Different amounts for different wallet groups\n"
+    message += f"• Total buy amounts will create initial liquidity\n\n"
+    message += f"Let's start with the **DevWallet** configuration..."
+    
+    return message
 
-def format_buy_amount_request(wallet_name: str, wallet_index: int, total_wallets: int) -> str:
+def format_buy_amount_request(wallet_name: str, wallet_index: int, total_wallets: int, wallet_group: str = "") -> str:
     """
-    Format message requesting buy amount for a specific wallet.
+    Format message requesting buy amount for a specific wallet or wallet group.
     
     Args:
-        wallet_name: Name of the wallet
-        wallet_index: Current wallet index (1-based)
-        total_wallets: Total number of wallets
+        wallet_name: Name of the wallet or wallet group
+        wallet_index: Current wallet/group index (1-based)
+        total_wallets: Total number of wallets/groups
+        wallet_group: Optional group description for better context
         
     Returns:
         Formatted message string
     """
+    group_info = f" - {wallet_group}" if wallet_group else ""
+    
     return (
         f"💰 **Buy Amount Configuration ({wallet_index}/{total_wallets})**\n\n"
-        f"**Wallet:** {wallet_name}\n\n"
-        f"How much SOL should this wallet use to buy your token?\n\n"
+        f"**Wallet Group:** {wallet_name}{group_info}\n\n"
+        f"How much SOL should {'this wallet' if 'DevWallet' in wallet_name else 'each wallet in this group'} use to buy your token?\n\n"
         f"💡 **Guidelines:**\n"
         f"• Enter amount in SOL (e.g., 0.1, 0.05, 1.0)\n"
         f"• Minimum: 0.001 SOL\n"
@@ -1280,19 +1410,19 @@ def format_buy_amount_request(wallet_name: str, wallet_index: int, total_wallets
         f"Please enter the SOL amount for **{wallet_name}**:"
     )
 
-def format_buy_amounts_preview(buy_amounts: Dict[str, float], token_address: str) -> str:
+def format_buy_amounts_preview(buy_amounts: Dict[str, float], token_address: str, wallet_counts: Dict[str, int] = None) -> str:
     """
     Format preview of configured buy amounts before execution.
     
     Args:
-        buy_amounts: Dictionary of wallet names to buy amounts
+        buy_amounts: Dictionary of wallet names/groups to buy amounts
         token_address: The token address
+        wallet_counts: Optional dictionary with counts for each wallet group
         
     Returns:
         Formatted preview message
     """
     short_token = f"{token_address[:8]}...{token_address[-8:]}" if len(token_address) > 16 else token_address
-    total_sol = sum(buy_amounts.values())
     
     message = (
         f"📊 **Buy Amounts Preview**\n\n"
@@ -1300,12 +1430,26 @@ def format_buy_amounts_preview(buy_amounts: Dict[str, float], token_address: str
         f"**Configured Buy Amounts:**\n"
     )
     
-    for wallet_name, amount in buy_amounts.items():
-        message += f"• **{wallet_name}**: {amount:.4f} SOL\n"
+    total_sol = 0
+    total_participating_wallets = 0
+    
+    for wallet_group, amount in buy_amounts.items():
+        if wallet_counts and wallet_group in wallet_counts:
+            count = wallet_counts[wallet_group]
+            group_total = amount * count
+            total_sol += group_total
+            total_participating_wallets += count
+            message += f"• **{wallet_group}**: {amount:.4f} SOL each × {count} wallets = {group_total:.4f} SOL\n"
+        else:
+            total_sol += amount
+            total_participating_wallets += 1
+            message += f"• **{wallet_group}**: {amount:.4f} SOL\n"
     
     message += (
-        f"\n**Total SOL Required:** {total_sol:.4f} SOL\n\n"
-        f"⚠️ **Important:** Make sure your wallets have sufficient SOL balance for these purchases plus transaction fees.\n\n"
+        f"\n**Summary:**\n"
+        f"• **Total Participating Wallets:** {total_participating_wallets}\n"
+        f"• **Total SOL Required:** {total_sol:.4f} SOL\n\n"
+        f"⚠️ **Important:** Make sure your airdrop wallet has sufficient SOL balance for these purchases plus transaction fees.\n\n"
         f"✅ Proceed with these buy amounts?"
     )
     
