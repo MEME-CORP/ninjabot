@@ -408,6 +408,18 @@ async def continue_to_bundled_wallets_setup(update: Update, context: CallbackCon
             session_manager.update_session_value(user.id, "bundled_wallets_data", existing_bundled_wallets)
             session_manager.update_session_value(user.id, "bundled_wallets_count", len(wallet_addresses))
             
+            # CRITICAL FIX: Also load and store the original JSON file data for API import
+            # The load_bundled_wallets() normalizes the data, but we need the original privateKey format
+            try:
+                original_json_data = bundled_wallet_storage.get_bundled_wallets_by_airdrop(user.id, airdrop_wallet_address)
+                if original_json_data:
+                    session_manager.update_session_value(user.id, "bundled_wallets_original_json", original_json_data)
+                    logger.info(f"Stored original JSON data for API import for user {user.id}")
+                else:
+                    logger.warning(f"Could not load original JSON data for user {user.id}")
+            except Exception as json_load_error:
+                logger.warning(f"Failed to load original JSON data: {str(json_load_error)}")
+            
             # Also store private keys separately for compatibility
             wallet_private_keys = [wallet.get("private_key", "") for wallet in existing_bundled_wallets]
             session_manager.update_session_value(user.id, "bundled_private_keys", wallet_private_keys)
@@ -1235,12 +1247,37 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
     await query.answer()
     
     try:
-        # Get required data from session
+        # Get required data from session with validation
         pumpfun_client = session_manager.get_session_value(user.id, "pumpfun_client")
         bundled_wallets_count = session_manager.get_session_value(user.id, "bundled_wallets_count")
+        airdrop_wallet = session_manager.get_session_value(user.id, "airdrop_wallet")
+        bundled_wallets = session_manager.get_session_value(user.id, "bundled_wallets")
         
-        if not all([pumpfun_client, bundled_wallets_count]):
-            raise Exception("Missing required session data for wallet funding")
+        # Validate all required data is present
+        if not pumpfun_client:
+            raise Exception("PumpFun client not found in session - please restart the workflow")
+        if not bundled_wallets_count:
+            raise Exception("Bundled wallets count not found in session")
+        if not airdrop_wallet:
+            raise Exception("Airdrop wallet not found in session")
+        if not bundled_wallets or len(bundled_wallets) == 0:
+            raise Exception("No bundled wallets found - please create bundled wallets first")
+        
+        # Validate bundled wallets count matches actual wallets
+        if len(bundled_wallets) != bundled_wallets_count:
+            logger.warning(f"Bundled wallets count mismatch: expected {bundled_wallets_count}, found {len(bundled_wallets)}")
+            bundled_wallets_count = len(bundled_wallets)  # Use actual count
+            session_manager.update_session_value(user.id, "bundled_wallets_count", bundled_wallets_count)
+        
+        logger.info(
+            f"Starting wallet funding validation for user {user.id}",
+            extra={
+                "user_id": user.id,
+                "airdrop_wallet": airdrop_wallet,
+                "bundled_wallets_count": bundled_wallets_count,
+                "bundled_wallets_addresses": bundled_wallets[:3] if bundled_wallets else []  # Log first 3 for reference
+            }
+        )
         
         # Show progress message
         await query.edit_message_text(
@@ -1249,66 +1286,364 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
                 "total": bundled_wallets_count,
                 "successful": 0,
                 "failed": 0,
-                "current_wallet": "Initializing..."
+                "current_wallet": "Initializing and validating prerequisites..."
             }),
             parse_mode=ParseMode.MARKDOWN
         )
         
-        # Calculate funding amount per wallet
-        amount_per_wallet = 0.01  # 0.01 SOL per wallet
-        
-        # Execute funding using PumpFun API
-        logger.info(f"Starting wallet funding for user {user.id}: {bundled_wallets_count} wallets, {amount_per_wallet} SOL each")
-        funding_result = pumpfun_client.fund_bundled_wallets(amount_per_wallet)
-        
-        # Store funding results
-        session_manager.update_session_value(user.id, "funding_results", funding_result)
-        
-        logger.info(
-            f"Wallet funding completed for user {user.id}",
-            extra={
-                "user_id": user.id,
-                "successful_transfers": funding_result.get("successful_transfers", 0),
-                "failed_transfers": funding_result.get("failed_transfers", 0)
-            }
-        )
-        
-        # Show completion message and next steps
-        failed_transfers = funding_result.get("failed_transfers", 0)
-        
-        if failed_transfers == 0:
-            keyboard = InlineKeyboardMarkup([
-                [build_button("🚀 Create Token & Buy", "create_token_final")],
-                [build_button("📊 View Funding Details", "view_funding_details")]
-            ])
+        # Ensure airdrop wallet is imported to API before funding
+        airdrop_private_key = session_manager.get_session_value(user.id, "airdrop_private_key")
+        if airdrop_private_key:
+            try:
+                logger.info(f"Importing airdrop wallet to API for user {user.id}")
+                await query.edit_message_text(
+                    format_wallet_funding_progress_message({
+                        "processed": 0,
+                        "total": bundled_wallets_count,
+                        "successful": 0,
+                        "failed": 0,
+                        "current_wallet": "Importing airdrop wallet to API..."
+                    }),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                
+                # Import airdrop wallet to API
+                pumpfun_client.create_airdrop_wallet(airdrop_private_key)
+                logger.info(f"Successfully imported airdrop wallet to API for user {user.id}")
+                
+            except Exception as import_error:
+                logger.warning(f"Failed to import airdrop wallet to API: {str(import_error)}")
+                # Continue with funding - the wallet might already exist on API
         else:
+            logger.warning(f"No airdrop private key found for user {user.id}, proceeding without import")
+        
+        # Ensure bundled wallets are imported to API before funding
+        bundled_wallets_data = session_manager.get_session_value(user.id, "bundled_wallets_data")
+        bundled_wallets_original_json = session_manager.get_session_value(user.id, "bundled_wallets_original_json")
+        
+        # DEBUG: Add comprehensive logging for systematic debugging
+        logger.info(f"DEBUG: Checking bundled_wallets_data for user {user.id}")
+        logger.info(f"DEBUG: bundled_wallets_data type: {type(bundled_wallets_data)}")
+        logger.info(f"DEBUG: bundled_wallets_data is None: {bundled_wallets_data is None}")
+        logger.info(f"DEBUG: bundled_wallets_original_json type: {type(bundled_wallets_original_json)}")
+        logger.info(f"DEBUG: bundled_wallets_original_json is None: {bundled_wallets_original_json is None}")
+        
+        # Prefer original JSON data for API import (preserves privateKey format)
+        data_source = bundled_wallets_original_json if bundled_wallets_original_json else bundled_wallets_data
+        data_source_name = "original_json" if bundled_wallets_original_json else "normalized_data"
+        
+        if data_source:
+            logger.info(f"DEBUG: Using {data_source_name} as data source")
+            logger.info(f"DEBUG: data_source keys: {list(data_source.keys()) if isinstance(data_source, dict) else 'Not a dict'}")
+            logger.info(f"DEBUG: data_source length: {len(data_source) if hasattr(data_source, '__len__') else 'No length'}")
+            
+            try:
+                # Extract wallets from data structure - could be a list or dict with "data" key
+                wallets_to_import = []
+                
+                if isinstance(data_source, list):
+                    # Direct list of wallets
+                    wallets_to_import = data_source
+                    logger.info(f"DEBUG: Using direct list format with {len(wallets_to_import)} wallets")
+                elif isinstance(data_source, dict) and "data" in data_source:
+                    # JSON file format with "data" array (THIS IS THE EXPECTED FORMAT)
+                    wallets_to_import = data_source["data"]
+                    logger.info(f"DEBUG: Using dict.data format with {len(wallets_to_import)} wallets")
+                elif isinstance(data_source, dict) and "wallets" in data_source:
+                    # Alternative format with "wallets" array
+                    wallets_to_import = data_source["wallets"]
+                    logger.info(f"DEBUG: Using dict.wallets format with {len(wallets_to_import)} wallets")
+                else:
+                    logger.error(f"DEBUG: Unknown data_source format: {data_source}")
+                
+                if wallets_to_import and len(wallets_to_import) > 0:
+                    logger.info(f"Importing {len(wallets_to_import)} bundled wallets to API for user {user.id}")
+                    
+                    # DEBUG: Log first wallet structure for analysis
+                    first_wallet = wallets_to_import[0] if wallets_to_import else None
+                    if first_wallet:
+                        logger.info(f"DEBUG: First wallet structure: {first_wallet}")
+                        logger.info(f"DEBUG: First wallet keys: {list(first_wallet.keys()) if isinstance(first_wallet, dict) else 'Not a dict'}")
+                    
+                    await query.edit_message_text(
+                        format_wallet_funding_progress_message({
+                            "processed": 0,
+                            "total": bundled_wallets_count,
+                            "successful": 0,
+                            "failed": 0,
+                            "current_wallet": "Importing bundled wallets to API..."
+                        }),
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    
+                    # Format bundled wallets for API import (name and privateKey fields)
+                    api_wallets = []
+                    for i, wallet in enumerate(wallets_to_import):
+                        if isinstance(wallet, dict):
+                            # Handle different key formats (privateKey vs private_key)
+                            private_key = wallet.get("privateKey") or wallet.get("private_key")
+                            name = wallet.get("name", f"Wallet_{len(api_wallets) + 1}")
+                            
+                            logger.info(f"DEBUG: Processing wallet {i}: name='{name}', has_privateKey={bool(wallet.get('privateKey'))}, has_private_key={bool(wallet.get('private_key'))}")
+                            
+                            if private_key:
+                                api_wallets.append({
+                                    "name": name,
+                                    "privateKey": private_key
+                                })
+                                logger.info(f"DEBUG: Added wallet '{name}' to API import list")
+                            else:
+                                logger.warning(f"Bundled wallet missing private key, skipping: {wallet.get('name', 'Unknown')}")
+                                logger.warning(f"DEBUG: Wallet {i} keys: {list(wallet.keys())}")
+                    
+                    logger.info(f"DEBUG: Prepared {len(api_wallets)} wallets for API import")
+                    
+                    if api_wallets:
+                        # DEBUG: Log what we're about to send to API
+                        logger.info(f"DEBUG: Sending {len(api_wallets)} wallets to API import")
+                        for i, api_wallet in enumerate(api_wallets):
+                            logger.info(f"DEBUG: API wallet {i}: name='{api_wallet['name']}', privateKey_length={len(api_wallet['privateKey']) if api_wallet.get('privateKey') else 0}")
+                        
+                        # PHASE 2 FIX: Separate API operation from UI operation
+                        api_import_success = False
+                        api_import_error = None
+                        
+                        try:
+                            # Import bundled wallets to API (CRITICAL OPERATION)
+                            import_result = pumpfun_client.import_bundled_wallets(api_wallets)
+                            logger.info(f"Successfully imported {len(api_wallets)} bundled wallets to API for user {user.id}")
+                            logger.info(f"DEBUG: Import result: {import_result}")
+                            api_import_success = True
+                            
+                        except Exception as api_import_error:
+                            logger.error(f"API import failed: {str(api_import_error)}")
+                            logger.error(f"DEBUG: API import error type: {type(api_import_error)}")
+                            logger.error(f"DEBUG: API import error details: {repr(api_import_error)}")
+                            api_import_success = False
+                            # Store the error for later decision making
+                            api_import_error = api_import_error
+                        
+                        # Only update UI after API operation completes (success or failure)
+                        try:
+                            if api_import_success:
+                                await query.edit_message_text(
+                                    format_wallet_funding_progress_message({
+                                        "processed": 0,
+                                        "total": bundled_wallets_count,
+                                        "successful": 0,
+                                        "failed": 0,
+                                        "current_wallet": "✅ Bundled wallets imported successfully. Verifying..."
+                                    }),
+                                    parse_mode=ParseMode.MARKDOWN
+                                )
+                            else:
+                                await query.edit_message_text(
+                                    format_wallet_funding_progress_message({
+                                        "processed": 0,
+                                        "total": bundled_wallets_count,
+                                        "successful": 0,
+                                        "failed": 0,
+                                        "current_wallet": f"⚠️ Import issue detected. Attempting verification..."
+                                    }),
+                                    parse_mode=ParseMode.MARKDOWN
+                                )
+                        except Exception as ui_error:
+                            # UI errors should not stop the process
+                            logger.warning(f"UI update failed but API operation status: {api_import_success}, continuing: {ui_error}")
+                        
+                        # PHASE 2 FIX: Add verification step
+                        verification_result = pumpfun_client.verify_bundled_wallets_exist()
+                        wallets_verified = verification_result.get("wallets_exist", False)
+                        
+                        logger.info(f"Wallet verification result: {verification_result}")
+                        
+                        if not wallets_verified and not api_import_success:
+                            # Both import and verification failed - this is a critical error
+                            logger.error(f"CRITICAL: Bundled wallet import failed AND verification failed")
+                            
+                            # Try a recovery mechanism: attempt import one more time
+                            logger.info("Attempting recovery: retrying wallet import once...")
+                            
+                            try:
+                                await query.edit_message_text(
+                                    format_wallet_funding_progress_message({
+                                        "processed": 0,
+                                        "total": bundled_wallets_count,
+                                        "successful": 0,
+                                        "failed": 0,
+                                        "current_wallet": "🔄 Retrying wallet import (recovery attempt)..."
+                                    }),
+                                    parse_mode=ParseMode.MARKDOWN
+                                )
+                            except Exception:
+                                pass  # Ignore UI errors during recovery
+                            
+                            # Recovery attempt
+                            recovery_result = pumpfun_client.import_bundled_wallets(api_wallets)
+                            recovery_verification = pumpfun_client.verify_bundled_wallets_exist()
+                            
+                            if not recovery_verification.get("wallets_exist", False):
+                                # Recovery failed - raise error to stop the process
+                                error_msg = f"Bundled wallet import failed repeatedly. Original error: {api_import_error}. Recovery also failed."
+                                logger.error(error_msg)
+                                raise Exception(error_msg)
+                            else:
+                                logger.info("✅ Recovery successful - wallets imported on second attempt")
+                                wallets_verified = True
+                        
+                        elif not wallets_verified and api_import_success:
+                            # Import seemed to succeed but verification failed - log warning but continue
+                            logger.warning("Import reported success but verification failed - proceeding with caution")
+                            
+                        elif wallets_verified:
+                            logger.info("✅ Bundled wallets verified successfully on API server")
+                            
+                    else:
+                        logger.warning(f"No valid bundled wallets found to import for user {user.id}")
+                        logger.warning(f"DEBUG: Original wallets_to_import count: {len(wallets_to_import)}")
+                        for i, wallet in enumerate(wallets_to_import):
+                            logger.warning(f"DEBUG: Original wallet {i}: {wallet}")
+                        
+                        # No wallets to import is a critical error
+                        raise Exception("No valid bundled wallets found for import - check wallet data format")
+                        
+                else:
+                    logger.warning(f"No wallets found in bundled_wallets_data for user {user.id}")
+                    logger.warning(f"DEBUG: wallets_to_import: {wallets_to_import}")
+                    
+                    # No wallet data is a critical error  
+                    raise Exception("No bundled wallet data found - please create bundled wallets first")
+                
+            except Exception as import_error:
+                logger.error(f"Failed to import bundled wallets to API: {str(import_error)}")
+                logger.error(f"DEBUG: Import process error type: {type(import_error)}")
+                logger.error(f"DEBUG: Import process error details: {repr(import_error)}")
+                
+                # PHASE 2 FIX: Don't continue with funding if import failed
+                # Instead, provide specific error handling and recovery options
+                
+                error_msg = str(import_error)
+                if "no valid bundled wallets" in error_msg.lower():
+                    keyboard = InlineKeyboardMarkup([
+                        [build_button("🔄 Recreate Bundled Wallets", "retry_bundled_wallets")],
+                        [build_button("📋 Check Wallet Data", "debug_wallet_data")],
+                        [build_button("« Back to Setup", "back_to_activities")]
+                    ])
+                    
+                    error_response = (
+                        "❌ **Bundled Wallet Import Failed**\n\n"
+                        "No valid bundled wallets were found for import to the API.\n\n"
+                        "**Possible causes:**\n"
+                        "• Wallet data files are corrupted or missing\n"
+                        "• Private keys are not in the expected format\n"
+                        "• Wallet creation process was incomplete\n\n"
+                        "**Recommended action:** Recreate bundled wallets from scratch."
+                    )
+                else:
+                    keyboard = InlineKeyboardMarkup([
+                        [build_button("🔄 Retry Import", "retry_wallet_import")],
+                        [build_button("📊 Check API Status", "check_api_status")],
+                        [build_button("« Back to Balance Check", "check_wallet_balance")]
+                    ])
+                    
+                    error_response = (
+                        "❌ **Wallet Import Process Failed**\n\n"
+                        f"The bundled wallet import to the API failed:\n\n"
+                        f"**Error:** {error_msg}\n\n"
+                        "**Next Steps:**\n"
+                        "1. Try importing again (temporary API issue)\n"
+                        "2. Check API service status\n"
+                        "3. Return to balance check and restart process\n\n"
+                        "The funding process cannot continue without successful wallet import."
+                    )
+                
+                await query.edit_message_text(
+                    error_response,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                
+                return ConversationState.WALLET_FUNDING_REQUIRED
+                
+        else:
+            logger.warning(f"No bundled wallets data found for user {user.id}, proceeding without import")
+            logger.warning(f"DEBUG: bundled_wallets_data: {bundled_wallets_data}")
+            logger.warning(f"DEBUG: bundled_wallets_original_json: {bundled_wallets_original_json}")
+            logger.warning(f"DEBUG: Session keys for user {user.id}: {list(session_manager.get_session_data(user.id).keys()) if hasattr(session_manager, 'get_session_data') else 'Cannot get session keys'}")
+            
+            # No wallet data found is a critical error - don't continue
             keyboard = InlineKeyboardMarkup([
-                [build_button("🔄 Retry Failed Wallets", "retry_wallet_funding")],
-                [build_button("🚀 Proceed with Funded Wallets", "create_token_final")],
-                [build_button("📊 View Funding Details", "view_funding_details")]
+                [build_button("🔄 Create Bundled Wallets", "back_to_bundled_setup")],
+                [build_button("« Back to Activities", "back_to_activities")]
             ])
-        
-        await query.edit_message_text(
-            format_wallet_funding_complete_message(funding_result),
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        return ConversationState.WALLET_FUNDING_PROGRESS
+            
+            await query.edit_message_text(
+                "❌ **No Bundled Wallets Found**\n\n"
+                "No bundled wallet data was found in your session.\n\n"
+                "**Required Action:** Create bundled wallets before attempting to fund them.\n\n"
+                "Click 'Create Bundled Wallets' to set up your wallets first.",
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            return ConversationState.BUNDLED_WALLETS_COUNT
         
     except Exception as e:
         logger.error(
             f"Wallet funding failed for user {user.id}: {str(e)}",
-            extra={"user_id": user.id}
+            extra={"user_id": user.id},
+            exc_info=True
         )
         
-        keyboard = InlineKeyboardMarkup([
-            [build_button("Try Again", "start_wallet_funding")],
-            [build_button("« Back to Balance Check", "check_wallet_balance")]
-        ])
+        # Enhanced error handling with specific guidance
+        error_msg = str(e)
+        is_validation_error = "validation" in error_msg.lower()
+        is_prerequisite_error = any(keyword in error_msg.lower() for keyword in 
+                                   ["not found", "missing", "airdrop wallet", "bundled wallets"])
+        
+        if is_prerequisite_error:
+            keyboard = InlineKeyboardMarkup([
+                [build_button("🔄 Restart Setup", "back_to_activities")],
+                [build_button("📋 Check Prerequisites", "check_funding_prerequisites")]
+            ])
+            
+            error_message = (
+                "❌ **Setup Prerequisites Missing**\n\n"
+                f"The wallet funding process failed because some required setup is missing:\n\n"
+                f"**Error:** {error_msg}\n\n"
+                f"**Next Steps:**\n"
+                f"1. Ensure you have created/imported an airdrop wallet\n"
+                f"2. Ensure you have created bundled wallets\n"
+                f"3. Ensure your airdrop wallet has sufficient SOL balance\n\n"
+                f"Click 'Restart Setup' to go through the complete process again."
+            )
+        elif is_validation_error:
+            keyboard = InlineKeyboardMarkup([
+                [build_button("🔄 Retry Funding", "start_wallet_funding")],
+                [build_button("📊 Check Balance", "check_wallet_balance")],
+                [build_button("« Back to Balance Check", "check_wallet_balance")]
+            ])
+            
+            error_message = (
+                "❌ **API Validation Error**\n\n"
+                f"The funding request was rejected by the API:\n\n"
+                f"**Error:** {error_msg}\n\n"
+                f"**Possible Causes:**\n"
+                f"• API format requirements differ from documentation\n"
+                f"• Airdrop wallet not properly configured on API side\n"
+                f"• Bundled wallets not properly created on API side\n"
+                f"• Insufficient SOL balance in airdrop wallet\n\n"
+                f"Click 'Check Balance' to verify your wallet status, or 'Retry Funding' to try again."
+            )
+        else:
+            keyboard = InlineKeyboardMarkup([
+                [build_button("Try Again", "start_wallet_funding")],
+                [build_button("« Back to Balance Check", "check_wallet_balance")]
+            ])
+            error_message = format_pumpfun_error_message("wallet_funding", str(e))
         
         await query.edit_message_text(
-            format_pumpfun_error_message("wallet_funding", str(e)),
+            error_message,
             reply_markup=keyboard,
             parse_mode=ParseMode.MARKDOWN
         )
@@ -1337,7 +1672,7 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
         pumpfun_client = session_manager.get_session_value(user.id, "pumpfun_client")
         token_params = session_manager.get_session_value(user.id, "token_params")
         buy_amounts = session_manager.get_session_value(user.id, "buy_amounts")
-        wallet_group_counts = session_manager.get_session_value(user.id, "wallet_group_counts") or {}
+        wallet_group_counts = session_manager.get_session_value(user.id, "wallet_group_counts", {})
         
         if not all([pumpfun_client, token_params, buy_amounts]):
             raise Exception("Missing required session data for token creation")
@@ -1881,3 +2216,423 @@ async def bundle_operation_progress(update: Update, context: CallbackContext) ->
         )
         
         return ConversationState.BUNDLE_OPERATION_COMPLETE 
+
+
+async def check_funding_prerequisites(update: Update, context: CallbackContext) -> int:
+    """
+    Check and display funding prerequisites to help users debug setup issues.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        # Check all required session data
+        pumpfun_client = session_manager.get_session_value(user.id, "pumpfun_client")
+        airdrop_wallet = session_manager.get_session_value(user.id, "airdrop_wallet")
+        bundled_wallets_count = session_manager.get_session_value(user.id, "bundled_wallets_count")
+        bundled_wallets = session_manager.get_session_value(user.id, "bundled_wallets")
+        
+        # Build prerequisites status message
+        status_message = "🔍 **Funding Prerequisites Check**\n\n"
+        
+        # Check PumpFun client
+        if pumpfun_client:
+            status_message += "✅ **PumpFun API Client:** Connected\n"
+        else:
+            status_message += "❌ **PumpFun API Client:** Not found - restart workflow\n"
+        
+        # Check airdrop wallet
+        if airdrop_wallet:
+            status_message += f"✅ **Airdrop Wallet:** `{airdrop_wallet[:8]}...{airdrop_wallet[-8:]}`\n"
+            
+            # Try to check balance if client is available
+            if pumpfun_client:
+                try:
+                    balance_info = pumpfun_client.get_wallet_balance(airdrop_wallet)
+                    if "data" in balance_info and "balance" in balance_info["data"]:
+                        current_balance = balance_info["data"]["balance"]
+                    else:
+                        current_balance = balance_info.get("balance", 0)
+                    
+                    status_message += f"   • **Balance:** {current_balance:.6f} SOL\n"
+                    
+                    if current_balance > 0.1:
+                        status_message += "   • **Status:** ✅ Sufficient for funding\n"
+                    else:
+                        status_message += "   • **Status:** ⚠️ Low balance - may need more SOL\n"
+                        
+                except Exception as balance_error:
+                    status_message += f"   • **Balance Check:** ❌ Failed - {str(balance_error)[:50]}...\n"
+            
+        else:
+            status_message += "❌ **Airdrop Wallet:** Not configured\n"
+        
+        # Check bundled wallets count
+        if bundled_wallets_count and bundled_wallets_count > 0:
+            status_message += f"✅ **Bundled Wallets Count:** {bundled_wallets_count}\n"
+        else:
+            status_message += "❌ **Bundled Wallets Count:** Not set or zero\n"
+        
+        # Check actual bundled wallets
+        if bundled_wallets and len(bundled_wallets) > 0:
+            status_message += f"✅ **Bundled Wallets Created:** {len(bundled_wallets)} wallets\n"
+            status_message += f"   • **First wallet:** `{bundled_wallets[0][:8]}...{bundled_wallets[0][-8:]}`\n"
+            
+            # Check for count mismatch
+            if bundled_wallets_count and len(bundled_wallets) != bundled_wallets_count:
+                status_message += f"   • ⚠️ **Count mismatch:** Expected {bundled_wallets_count}, found {len(bundled_wallets)}\n"
+            
+        else:
+            status_message += "❌ **Bundled Wallets Created:** None found\n"
+        
+        # Provide next steps based on what's missing
+        status_message += "\n💡 **Recommended Actions:**\n"
+        
+        if not pumpfun_client:
+            status_message += "1. Restart the bundling workflow to initialize API client\n"
+        elif not airdrop_wallet:
+            status_message += "1. Create or import an airdrop wallet\n"
+        elif not bundled_wallets or len(bundled_wallets) == 0:
+            status_message += "1. Create bundled wallets (5-50 wallets recommended)\n"
+        elif airdrop_wallet and pumpfun_client:
+            status_message += "1. All prerequisites appear to be met\n"
+            status_message += "2. Try the funding process again\n"
+        
+        # Determine appropriate keyboard based on status
+        if pumpfun_client and airdrop_wallet and bundled_wallets and len(bundled_wallets) > 0:
+            keyboard = InlineKeyboardMarkup([
+                [build_button("🔄 Retry Funding", "start_wallet_funding")],
+                [build_button("📊 Check Balance Again", "check_wallet_balance")],
+                [build_button("« Back to Activities", "back_to_activities")]
+            ])
+        else:
+            keyboard = InlineKeyboardMarkup([
+                [build_button("🔄 Restart Setup", "back_to_activities")],
+                [build_button("📋 Check Again", "check_funding_prerequisites")]
+            ])
+        
+        await query.edit_message_text(
+            status_message,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.WALLET_FUNDING_REQUIRED
+        
+    except Exception as e:
+        logger.error(
+            f"Prerequisites check failed for user {user.id}: {str(e)}",
+            extra={"user_id": user.id},
+            exc_info=True
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [build_button("🔄 Restart Setup", "back_to_activities")]
+        ])
+        
+        await query.edit_message_text(
+            f"❌ **Prerequisites Check Failed**\n\n"
+            f"Error checking prerequisites: {str(e)}\n\n"
+            f"Please restart the bundling workflow.",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.WALLET_FUNDING_REQUIRED
+
+async def retry_wallet_import(update: Update, context: CallbackContext) -> int:
+    """
+    Retry the wallet import process after a failure.
+    Phase 3 recovery mechanism.
+    """
+    user = get_user(update, context)
+    query = get_query(update)
+    
+    try:
+        await query.edit_message_text(
+            "🔄 **Retrying Wallet Import**\n\n"
+            "Attempting to import bundled wallets to the API again...\n\n"
+            "Please wait while we retry the import process.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Call the main funding process which includes import
+        return await start_wallet_funding(update, context)
+        
+    except Exception as e:
+        logger.error(f"Retry wallet import failed for user {user.id}: {str(e)}")
+        
+        keyboard = InlineKeyboardMarkup([
+            [build_button("« Back to Balance Check", "check_wallet_balance")],
+            [build_button("« Back to Activities", "back_to_activities")]
+        ])
+        
+        await query.edit_message_text(
+            "❌ **Retry Import Failed**\n\n"
+            f"The retry attempt also failed: {str(e)}\n\n"
+            "Please check your wallet setup and try again from the beginning.",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.WALLET_FUNDING_REQUIRED
+
+async def debug_wallet_data(update: Update, context: CallbackContext) -> int:
+    """
+    Debug wallet data to help diagnose import issues.
+    Phase 3 recovery mechanism.
+    """
+    user = get_user(update, context)
+    query = get_query(update)
+    
+    try:
+        # Get wallet data from session
+        bundled_wallets_data = session_manager.get_session_value(user.id, "bundled_wallets_data", {})
+        bundled_wallets_original_json = session_manager.get_session_value(user.id, "bundled_wallets_original_json", None)
+        
+        debug_info = []
+        debug_info.append("🔍 **Wallet Data Debug Information**\n")
+        
+        # Check session data
+        if bundled_wallets_data:
+            wallets_to_import = bundled_wallets_data.get("data", [])
+            debug_info.append(f"✅ Session data found: {len(wallets_to_import)} wallets")
+            
+            # Check first wallet structure
+            if wallets_to_import:
+                first_wallet = wallets_to_import[0]
+                required_fields = ["name", "privateKey"]
+                missing_fields = [field for field in required_fields if field not in first_wallet]
+                
+                if missing_fields:
+                    debug_info.append(f"❌ Missing fields in wallet data: {missing_fields}")
+                else:
+                    debug_info.append("✅ Wallet data structure looks correct")
+                    debug_info.append(f"   • Name: {first_wallet.get('name', 'N/A')}")
+                    debug_info.append(f"   • Has privateKey: {bool(first_wallet.get('privateKey'))}")
+            else:
+                debug_info.append("❌ No wallets found in session data")
+        else:
+            debug_info.append("❌ No bundled wallet data found in session")
+        
+        # Check file data
+        if bundled_wallets_original_json:
+            debug_info.append(f"✅ Original JSON data available")
+        else:
+            debug_info.append("❌ No original JSON data found")
+        
+        # Add recommendations
+        debug_info.append("\n**Recommendations:**")
+        if not bundled_wallets_data:
+            debug_info.append("• Recreate bundled wallets from scratch")
+        elif not wallets_to_import:
+            debug_info.append("• Check wallet creation process")
+        else:
+            debug_info.append("• Wallet data appears valid - try import again")
+            debug_info.append("• Check API server status")
+        
+        keyboard = InlineKeyboardMarkup([
+            [build_button("🔄 Retry Import", "retry_wallet_import")],
+            [build_button("🔄 Recreate Wallets", "retry_bundled_wallets")],
+            [build_button("« Back to Balance Check", "check_wallet_balance")]
+        ])
+        
+        await query.edit_message_text(
+            "\n".join(debug_info),
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.WALLET_FUNDING_REQUIRED
+        
+    except Exception as e:
+        logger.error(f"Debug wallet data failed for user {user.id}: {str(e)}")
+        
+        keyboard = InlineKeyboardMarkup([
+            [build_button("« Back to Balance Check", "check_wallet_balance")]
+        ])
+        
+        await query.edit_message_text(
+            "❌ **Debug Failed**\n\n"
+            f"Could not retrieve debug information: {str(e)}",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.WALLET_FUNDING_REQUIRED
+
+async def check_api_status(update: Update, context: CallbackContext) -> int:
+    """
+    Check the API server status and connectivity.
+    Phase 3 recovery mechanism.
+    """
+    user = get_user(update, context)
+    query = get_query(update)
+    
+    try:
+        await query.edit_message_text(
+            "🔍 **Checking API Status**\n\n"
+            "Testing connection to the PumpFun API server...\n\n"
+            "This may take a moment.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Perform API health check
+        health_result = pumpfun_client.health_check()
+        
+        status_info = []
+        status_info.append("📊 **API Status Report**\n")
+        
+        # Parse health check results
+        if health_result.get("status") == "healthy":
+            status_info.append("✅ **API Server: HEALTHY**")
+            status_info.append(f"   • API reachable: {health_result.get('api_reachable', 'Unknown')}")
+            if health_result.get("cold_start_detected"):
+                status_info.append("   • Cold start detected (longer initial response times)")
+            
+        elif health_result.get("status") == "unhealthy":
+            status_info.append("❌ **API Server: UNHEALTHY**")
+            status_info.append(f"   • Error: {health_result.get('error', 'Unknown error')}")
+            if health_result.get("cold_start_likely"):
+                status_info.append("   • Likely cause: Cold start (server sleeping)")
+                status_info.append("   • Recommendation: Wait 30 seconds and try again")
+        
+        # Test wallet verification
+        try:
+            verification_result = pumpfun_client.verify_bundled_wallets_exist()
+            status_info.append(f"\n✅ **Wallet Verification: WORKING**")
+            status_info.append(f"   • Wallets exist: {verification_result.get('wallets_exist', 'Unknown')}")
+            status_info.append(f"   • Method: {verification_result.get('verification_method', 'Unknown')}")
+        except Exception as verify_error:
+            status_info.append(f"\n❌ **Wallet Verification: FAILED**")
+            status_info.append(f"   • Error: {str(verify_error)}")
+        
+        keyboard = InlineKeyboardMarkup([
+            [build_button("🔄 Retry Import", "retry_wallet_import")],
+            [build_button("⏱️ Wait & Retry", "wait_and_retry_import")], 
+            [build_button("« Back to Balance Check", "check_wallet_balance")]
+        ])
+        
+        await query.edit_message_text(
+            "\n".join(status_info),
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.WALLET_FUNDING_REQUIRED
+        
+    except Exception as e:
+        logger.error(f"API status check failed for user {user.id}: {str(e)}")
+        
+        keyboard = InlineKeyboardMarkup([
+            [build_button("🔄 Try Again", "check_api_status")],
+            [build_button("« Back to Balance Check", "check_wallet_balance")]
+        ])
+        
+        await query.edit_message_text(
+            "❌ **Status Check Failed**\n\n"
+            f"Could not check API status: {str(e)}\n\n"
+            "The API server may be temporarily unavailable.",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.WALLET_FUNDING_REQUIRED
+
+async def wait_and_retry_import(update: Update, context: CallbackContext) -> int:
+    """
+    Wait for potential cold start to resolve, then retry import.
+    Phase 3 recovery mechanism for cold start scenarios.
+    """
+    user = get_user(update, context)
+    query = get_query(update)
+    
+    try:
+        # Show waiting message
+        await query.edit_message_text(
+            "⏱️ **Waiting for API Wake-up**\n\n"
+            "The API server may be in cold start mode.\n"
+            "Waiting 30 seconds for the server to fully initialize...\n\n"
+            "🔄 Please wait...",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Wait for cold start resolution
+        import asyncio
+        await asyncio.sleep(30)
+        
+        # Update message
+        await query.edit_message_text(
+            "🔄 **Retrying Import After Wait**\n\n"
+            "The wait period is complete.\n"
+            "Now retrying the wallet import process...",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Retry the import
+        return await start_wallet_funding(update, context)
+        
+    except Exception as e:
+        logger.error(f"Wait and retry import failed for user {user.id}: {str(e)}")
+        
+        keyboard = InlineKeyboardMarkup([
+            [build_button("🔄 Try Again", "retry_wallet_import")],
+            [build_button("« Back to Balance Check", "check_wallet_balance")]
+        ])
+        
+        await query.edit_message_text(
+            "❌ **Wait and Retry Failed**\n\n"
+            f"The retry after waiting also failed: {str(e)}\n\n"
+            "Please try again or return to balance check.",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.WALLET_FUNDING_REQUIRED
+
+async def back_to_bundled_setup(update: Update, context: CallbackContext) -> int:
+    """
+    Return to bundled wallet setup process.
+    Phase 3 recovery mechanism.
+    """
+    user = get_user(update, context)
+    query = get_query(update)
+    
+    try:
+        await query.edit_message_text(
+            "🔄 **Returning to Bundled Wallet Setup**\n\n"
+            "You will now be taken back to the bundled wallet creation process.\n\n"
+            "This will create fresh bundled wallets.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Clear existing wallet data to start fresh
+        session_manager.update_session_value(user.id, "bundled_wallets_data", None)
+        session_manager.update_session_value(user.id, "bundled_wallets_original_json", None)
+        
+        # Return to bundled wallet count selection
+        return await bundled_wallets_count(update, context)
+        
+    except Exception as e:
+        logger.error(f"Back to bundled setup failed for user {user.id}: {str(e)}")
+        
+        keyboard = InlineKeyboardMarkup([
+            [build_button("« Back to Activities", "back_to_activities")]
+        ])
+        
+        await query.edit_message_text(
+            "❌ **Navigation Failed**\n\n"
+            f"Could not return to bundled wallet setup: {str(e)}",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.BUNDLED_WALLETS_COUNT

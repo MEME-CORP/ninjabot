@@ -114,6 +114,10 @@ class PumpFunClient:
             if 'timeout' not in kwargs:
                 kwargs['timeout'] = self.timeout
                 
+            # Log request details for debugging
+            if 'json' in kwargs:
+                logger.info(f"PumpFun API {method} {endpoint} - Request body: {kwargs['json']}")
+            
             # Make request
             response = self.session.request(method, url, **kwargs)
             
@@ -127,8 +131,17 @@ class PumpFunClient:
                 except json.JSONDecodeError:
                     return {"status": "success", "data": response.text}
             elif response.status_code == 400:
-                error_data = response.json() if response.content else {}
-                raise PumpFunValidationError(f"Validation error: {error_data.get('error', 'Invalid request')}")
+                # Enhanced error handling for validation errors
+                try:
+                    error_data = response.json() if response.content else {}
+                    detailed_error = error_data.get('error', 'Invalid request')
+                    # Log the full error response for debugging
+                    logger.error(f"PumpFun API 400 error details: {error_data}")
+                    raise PumpFunValidationError(f"Validation error: {detailed_error}")
+                except json.JSONDecodeError:
+                    # If response is not JSON, log the raw response
+                    logger.error(f"PumpFun API 400 non-JSON response: {response.text}")
+                    raise PumpFunValidationError(f"Validation error: {response.text}")
             elif response.status_code == 500:
                 error_data = response.json() if response.content else {}
                 raise PumpFunApiError(f"Server error: {error_data.get('error', 'Internal server error')}")
@@ -406,11 +419,89 @@ class PumpFunClient:
         """
         if amount_per_wallet <= 0:
             raise PumpFunValidationError("Amount per wallet must be greater than 0")
+        
+        # Validate reasonable amount (between 0.001 and 10 SOL)
+        if amount_per_wallet < 0.001:
+            raise PumpFunValidationError("Amount per wallet too small (minimum 0.001 SOL)")
+        if amount_per_wallet > 10:
+            raise PumpFunValidationError("Amount per wallet too large (maximum 10 SOL)")
             
         endpoint = "/api/wallets/fund-bundled"
-        data = {"amountPerWallet": amount_per_wallet}
+        
+        # Use the correct parameter name from API documentation
+        data = {"amountPerWalletSOL": amount_per_wallet}
+        
+        logger.info(f"Funding bundled wallets with {amount_per_wallet} SOL per wallet using correct API format")
         
         return self._make_request_with_retry("POST", endpoint, json=data)
+
+    def verify_bundled_wallets_exist(self) -> Dict[str, Any]:
+        """
+        Verify if bundled wallets exist on the API server.
+        
+        Returns:
+            Dictionary with verification results including wallet count and details
+        """
+        try:
+            # Try to get a simple balance check on the first bundled wallet
+            # This is an indirect way to verify if wallets are imported
+            # Since there's no explicit "list bundled wallets" endpoint documented
+            
+            # Alternative: Try to fund with 0 amount to test if wallets exist
+            test_endpoint = "/api/wallets/fund-bundled"
+            test_data = {"amountPerWalletSOL": 0.0}
+            
+            logger.info("Verifying bundled wallets exist on API server...")
+            
+            try:
+                response = self._make_request_with_retry("POST", test_endpoint, json=test_data)
+                
+                # If we get a validation error about amount being 0, wallets exist
+                # If we get "No child wallets found", wallets don't exist
+                return {
+                    "wallets_exist": True,
+                    "verification_method": "funding_test",
+                    "response": response
+                }
+            except PumpFunValidationError as e:
+                error_msg = str(e).lower()
+                if "no child wallets found" in error_msg or "no bundled wallets" in error_msg:
+                    return {
+                        "wallets_exist": False,
+                        "verification_method": "funding_test",
+                        "error": str(e)
+                    }
+                elif "amount" in error_msg and ("0" in error_msg or "positive" in error_msg):
+                    # Amount validation error means wallets exist but amount is invalid
+                    return {
+                        "wallets_exist": True,
+                        "verification_method": "funding_test",
+                        "note": "Wallets exist - amount validation triggered"
+                    }
+                else:
+                    # Unknown validation error
+                    return {
+                        "wallets_exist": False,
+                        "verification_method": "funding_test",
+                        "error": str(e),
+                        "unknown_error": True
+                    }
+            except Exception as e:
+                # Network or other errors
+                return {
+                    "wallets_exist": False,
+                    "verification_method": "funding_test",
+                    "error": str(e),
+                    "network_error": True
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to verify bundled wallets: {str(e)}")
+            return {
+                "wallets_exist": False,
+                "verification_method": "failed",
+                "error": str(e)
+            }
 
     def return_funds_to_mother(self, leave_dust: bool = False) -> Dict[str, Any]:
         """
