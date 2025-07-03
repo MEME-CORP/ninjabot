@@ -2112,6 +2112,9 @@ def register_start_handler(application):
         bundled_wallets_count,
         token_creation_start,
         token_parameter_input,
+        process_token_image_upload,
+        skip_image_upload,
+        proceed_to_preview,
         configure_buy_amounts,
         start_buy_amounts_input,
         buy_amounts_input,
@@ -2212,6 +2215,12 @@ def register_start_handler(application):
             ],
             ConversationState.TOKEN_PARAMETER_INPUT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, token_parameter_input),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.TOKEN_IMAGE_UPLOAD: [
+                MessageHandler(filters.PHOTO, process_token_image_upload),
+                CallbackQueryHandler(skip_image_upload, pattern=r"^skip_image$"),
+                CallbackQueryHandler(proceed_to_preview, pattern=r"^proceed_to_preview$"),
                 CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
             ],
             ConversationState.TOKEN_CREATION_PREVIEW: [

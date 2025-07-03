@@ -8,6 +8,7 @@ import json
 import time
 import logging
 import requests
+import os
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, asdict
 import random
@@ -131,12 +132,27 @@ class PumpFunClient:
                 except json.JSONDecodeError:
                     return {"status": "success", "data": response.text}
             elif response.status_code == 400:
-                # Enhanced error handling for validation errors
+                # Enhanced error handling for validation errors with field-level analysis
                 try:
                     error_data = response.json() if response.content else {}
-                    detailed_error = error_data.get('error', 'Invalid request')
-                    # Log the full error response for debugging
-                    logger.error(f"PumpFun API 400 error details: {error_data}")
+                    detailed_error = error_data.get('error', error_data.get('message', 'Invalid request'))
+                    
+                    # Enhanced logging for field-level validation debugging
+                    logger.error(f"PumpFun API 400 validation error: {detailed_error}")
+                    logger.error(f"Full error response: {error_data}")
+                    
+                    # Detect common field name mismatches for better error reporting
+                    if 'showName' in str(detailed_error):
+                        logger.error("Field mismatch detected: API expects 'showName' (camelCase), check for 'show_name' (snake_case)")
+                    if 'initialSupplyAmount' in str(detailed_error):
+                        logger.error("Field mismatch detected: API expects 'initialSupplyAmount' (camelCase), check for 'initial_supply_amount' (snake_case)")
+                    if 'imageFileName' in str(detailed_error):
+                        logger.error("Field mismatch detected: API expects 'imageFileName' (camelCase), check for 'image_url' (snake_case)")
+                    
+                    # Include request body in error context if available
+                    if 'json' in kwargs:
+                        logger.error(f"Request body that caused validation error: {kwargs['json']}")
+                    
                     raise PumpFunValidationError(f"Validation error: {detailed_error}")
                 except json.JSONDecodeError:
                     # If response is not JSON, log the raw response
@@ -788,8 +804,109 @@ class PumpFunClient:
 
     # Pump Portal Trading Methods
 
+    def upload_image_file(self, image_file_path: str) -> Dict[str, Any]:
+        """
+        Upload image file to API server (for future implementation).
+        
+        Args:
+            image_file_path: Local path to image file
+            
+        Returns:
+            Dictionary with upload result
+            
+        Raises:
+            NotImplementedError: This feature is not yet implemented
+        """
+        # TODO: Implement multipart file upload to API server
+        # This should upload the file and return the server-side file path
+        # Example implementation:
+        # endpoint = "/api/upload/image"
+        # with open(image_file_path, 'rb') as f:
+        #     files = {'image': f}
+        #     response = self._make_request("POST", endpoint, files=files)
+        #     return response
+        
+        raise NotImplementedError(
+            "Image file upload not yet implemented. "
+            "API server needs /api/upload/image endpoint to accept multipart file uploads."
+        )
+
+    def _transform_token_params_for_api(self, token_params: TokenCreationParams) -> Dict[str, Any]:
+        """
+        Transform snake_case token params to API-expected camelCase format.
+        
+        Args:
+            token_params: Token creation parameters with snake_case fields
+            
+        Returns:
+            Dictionary with camelCase field names for API compatibility
+        """
+        # Create base dictionary from token params
+        base_params = asdict(token_params)
+        
+        # Transform snake_case to camelCase for API compatibility
+        transformed_params = {
+            "name": base_params["name"],
+            "symbol": base_params["symbol"],
+            "description": base_params["description"],
+            "twitter": base_params["twitter"],
+            "telegram": base_params["telegram"],
+            "website": base_params["website"],
+            "showName": base_params["show_name"],  # snake_case -> camelCase
+            "initialSupplyAmount": base_params["initial_supply_amount"],  # snake_case -> camelCase
+            "imageFileName": base_params["image_url"]  # snake_case -> camelCase (semantic change)
+        }
+        
+        # Log the transformation for debugging
+        logger.info(f"Transformed token params: snake_case -> camelCase mapping applied")
+        logger.debug(f"Original params: {base_params}")
+        logger.debug(f"Transformed params: {transformed_params}")
+        
+        return transformed_params
+
+    def _validate_api_request_format(self, transformed_params: Dict[str, Any], operation: str = "token_creation") -> None:
+        """
+        Validate that transformed parameters match API expected format.
+        
+        Args:
+            transformed_params: Transformed parameters dictionary
+            operation: Operation type for context in error messages
+            
+        Raises:
+            PumpFunValidationError: If validation fails
+        """
+        # Define required fields for token creation API
+        required_api_fields = ["name", "symbol", "description", "showName", "initialSupplyAmount"]
+        optional_api_fields = ["twitter", "telegram", "website", "imageFileName"]
+        
+        # Check for required fields
+        missing_fields = [field for field in required_api_fields if field not in transformed_params]
+        if missing_fields:
+            raise PumpFunValidationError(f"Missing required API fields for {operation}: {missing_fields}")
+        
+        # Check field types match API expectations
+        type_validations = {
+            "showName": bool,
+            "initialSupplyAmount": str,
+            "name": str,
+            "symbol": str,
+            "description": str
+        }
+        
+        type_errors = []
+        for field, expected_type in type_validations.items():
+            if field in transformed_params and not isinstance(transformed_params[field], expected_type):
+                type_errors.append(f"{field}: expected {expected_type.__name__}, got {type(transformed_params[field]).__name__}")
+        
+        if type_errors:
+            raise PumpFunValidationError(f"API field type mismatches for {operation}: {type_errors}")
+        
+        # Log successful validation
+        logger.info(f"Pre-request validation passed for {operation} with {len(transformed_params)} fields")
+
     def create_token_and_buy(self, token_params: TokenCreationParams, 
-                           buy_amounts: BuyAmounts, slippage_bps: int = 2500) -> Dict[str, Any]:
+                           buy_amounts: BuyAmounts, slippage_bps: int = 2500,
+                           image_file_path: Optional[str] = None) -> Dict[str, Any]:
         """
         Create a token and perform initial buys.
         
@@ -797,6 +914,7 @@ class PumpFunClient:
             token_params: Token creation parameters
             buy_amounts: Buy amounts for different wallets
             slippage_bps: Slippage in basis points
+            image_file_path: Local path to image file (if any)
             
         Returns:
             Dictionary with token creation and buy results
@@ -815,14 +933,41 @@ class PumpFunClient:
             "firstBundledWallet4BuySOL": buy_amounts.first_bundled_wallet_4_buy_sol
         }
         
+        # Transform token params to API-expected format (snake_case -> camelCase)
+        transformed_token_params = self._transform_token_params_for_api(token_params)
+        
+        # Handle image file path - CRITICAL FIX for API compatibility
+        # The API expects images to exist on its server, not just filenames
+        # Until file upload is implemented, we must skip images to avoid the "path undefined" error
+        if image_file_path and os.path.exists(image_file_path):
+            logger.warning(f"Image file exists locally ({image_file_path}) but API expects server-side files")
+            logger.warning("Skipping image upload until multipart file upload is implemented")
+            # Do NOT send imageFileName - API will fail if file doesn't exist on server
+            transformed_token_params.pop("imageFileName", None)
+            logger.info("Creating token without image to avoid API path error")
+        else:
+            # Remove image field if no file provided
+            transformed_token_params.pop("imageFileName", None)
+            logger.info("No image file provided for token creation")
+        
+        # Pre-request validation to catch field format issues early
+        self._validate_api_request_format(transformed_token_params, "token_creation")
+        
         data = {
-            **asdict(token_params),
+            **transformed_token_params,
             "buyAmountsSOL": buy_amounts_dict,
             "slippageBps": slippage_bps
         }
         
+        # Log the final request payload for debugging (excluding sensitive data)
+        logger.info(f"Token creation request payload prepared: {len(data)} fields")
+        logger.debug(f"Request fields: {list(data.keys())}")
+        
         # Use enhanced retry for critical token creation operations
-        logger.info("Creating token with enhanced retry logic for cold start handling")
+        if image_file_path:
+            logger.info("Creating token (image upload temporarily disabled)")
+        else:
+            logger.info("Creating token without image")
         return self._make_request_for_critical_operations("POST", endpoint, json=data)
 
     def batch_buy_token(self, mint_address: str, sol_amount_per_wallet: float, 

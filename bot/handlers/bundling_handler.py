@@ -53,6 +53,21 @@ import glob
 import json
 
 
+def get_user(update: Update, context: CallbackContext):
+    """Helper function to get user from update object."""
+    if update.callback_query:
+        return update.callback_query.from_user
+    elif update.message:
+        return update.message.from_user
+    else:
+        return None
+
+
+def get_query(update: Update):
+    """Helper function to get callback query from update object."""
+    return update.callback_query
+
+
 def load_bundled_wallets_from_storage() -> List[Dict[str, Any]]:
     """
     Load bundled wallet data from local JSON files.
@@ -703,8 +718,6 @@ async def token_parameter_input(update: Update, context: CallbackContext) -> int
         is_valid, value_or_error = validate_token_ticker(parameter_value)
     elif current_param == "description":
         is_valid, value_or_error = validate_token_description(parameter_value)
-    elif current_param == "image_url":
-        is_valid, value_or_error = validate_image_url(parameter_value)
     else:
         is_valid, value_or_error = False, "Unknown parameter"
     
@@ -735,8 +748,8 @@ async def token_parameter_input(update: Update, context: CallbackContext) -> int
     token_params[current_param] = validated_value
     session_manager.update_session_value(user.id, "token_params", token_params)
     
-    # Determine next parameter or proceed to preview
-    parameter_order = ["name", "ticker", "description", "image_url"]
+    # Determine next parameter or proceed to image upload
+    parameter_order = ["name", "ticker", "description"]  # Removed image_url - handled separately
     current_index = parameter_order.index(current_param)
     
     if current_index + 1 < len(parameter_order):
@@ -751,8 +764,7 @@ async def token_parameter_input(update: Update, context: CallbackContext) -> int
         # Get parameter description based on type
         param_descriptions = {
             "ticker": "the token symbol/ticker (e.g., 'MAT')",
-            "description": "a description of your token and its purpose",
-            "image_url": "the URL of your token's image/logo (optional)"
+            "description": "a description of your token and its purpose"
         }
         
         await update.message.reply_text(
@@ -763,26 +775,175 @@ async def token_parameter_input(update: Update, context: CallbackContext) -> int
         
         return ConversationState.TOKEN_PARAMETER_INPUT
     else:
-        # All parameters collected, add standard supply and show preview
+        # Basic parameters collected, proceed to image upload step
         token_params["initial_supply"] = 1000000000  # Standard supply
         session_manager.update_session_value(user.id, "token_params", token_params)
         
-        # Get bundled wallets count for the buy amounts config
-        bundled_wallets_count = session_manager.get_session_value(user.id, "bundled_wallets_count", 0)
-        
+        # Request token image upload
         keyboard = InlineKeyboardMarkup([
-            [build_button("💰 Configure Buy Amounts", "configure_buy_amounts")],
-            [build_button("✏️ Edit Parameters", "edit_token_parameters")],
+            [build_button("⏭️ Skip Image", "skip_image")],
             [build_button("« Back to Activities", "back_to_activities")]
         ])
         
+        message = (
+            "🖼️ **Token Image (Optional)**\n\n"
+            "You can upload an image for your token:\n"
+            "• Send any photo directly to this chat\n"
+            "• Recommended: Square images (500x500px or larger)\n"
+            "• Supported formats: JPG, PNG\n\n"
+            "Or skip this step to create token without image."
+        )
+        
         await update.message.reply_text(
-            format_token_creation_preview(token_params),
+            message,
             reply_markup=keyboard,
             parse_mode=ParseMode.MARKDOWN
         )
         
-        return ConversationState.TOKEN_CREATION_PREVIEW
+        return ConversationState.TOKEN_IMAGE_UPLOAD
+
+
+async def process_token_image_upload(update: Update, context: CallbackContext) -> int:
+    """
+    Process uploaded image from Telegram for token creation.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.message.from_user
+    
+    try:
+        # Import the image processor
+        from bot.utils.image_utils import TelegramImageProcessor
+        
+        # Get the largest photo size for best quality
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        
+        # Download and save locally
+        image_processor = TelegramImageProcessor()
+        local_path = await image_processor.download_telegram_photo(file, user.id)
+        
+        # Store image path in session
+        session_manager.update_session_value(user.id, "token_image_local_path", local_path)
+        session_manager.update_session_value(user.id, "has_custom_image", True)
+        
+        logger.info(f"User {user.id} uploaded token image: {local_path}")
+        
+        # Show success and proceed to preview
+        keyboard = InlineKeyboardMarkup([
+            [build_button("Continue to Preview", "proceed_to_preview")]
+        ])
+        
+        await update.message.reply_text(
+            "✅ **Image Uploaded Successfully!**\n\n"
+            "Your token image has been saved and will be used during token creation.\n\n"
+            "Proceeding to token preview...",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.TOKEN_IMAGE_UPLOAD
+        
+    except Exception as e:
+        logger.error(f"Error processing image upload for user {user.id}: {e}")
+        
+        keyboard = InlineKeyboardMarkup([
+            [build_button("⏭️ Skip Image", "skip_image")],
+            [build_button("« Back to Activities", "back_to_activities")]
+        ])
+        
+        await update.message.reply_text(
+            "❌ **Image Upload Failed**\n\n"
+            f"Failed to process your image: {str(e)}\n\n"
+            "Please try uploading again or skip this step.",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.TOKEN_IMAGE_UPLOAD
+
+
+async def skip_image_upload(update: Update, context: CallbackContext) -> int:
+    """
+    Skip image upload and proceed to token preview.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer("Proceeding without image")
+    
+    # Set no image flags in session
+    session_manager.update_session_value(user.id, "has_custom_image", False)
+    session_manager.update_session_value(user.id, "token_image_local_path", None)
+    
+    logger.info(f"User {user.id} skipped token image upload")
+    
+    # Get token params and show preview
+    token_params = session_manager.get_session_value(user.id, "token_params") or {}
+    
+    keyboard = InlineKeyboardMarkup([
+        [build_button("💰 Configure Buy Amounts", "configure_buy_amounts")],
+        [build_button("✏️ Edit Parameters", "edit_token_parameters")],
+        [build_button("« Back to Activities", "back_to_activities")]
+    ])
+    
+    await query.edit_message_text(
+        format_token_creation_preview(token_params),
+        reply_markup=keyboard,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    return ConversationState.TOKEN_CREATION_PREVIEW
+
+
+async def proceed_to_preview(update: Update, context: CallbackContext) -> int:
+    """
+    Proceed to token creation preview after image upload.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+    
+    # Get token params and show preview
+    token_params = session_manager.get_session_value(user.id, "token_params") or {}
+    has_image = session_manager.get_session_value(user.id, "has_custom_image", False)
+    
+    # Add image status to preview
+    preview_text = format_token_creation_preview(token_params)
+    if has_image:
+        preview_text += "\n🖼️ **Image:** Custom image uploaded ✅"
+    
+    keyboard = InlineKeyboardMarkup([
+        [build_button("💰 Configure Buy Amounts", "configure_buy_amounts")],
+        [build_button("✏️ Edit Parameters", "edit_token_parameters")],
+        [build_button("« Back to Activities", "back_to_activities")]
+    ])
+    
+    await query.edit_message_text(
+        preview_text,
+        reply_markup=keyboard,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    return ConversationState.TOKEN_CREATION_PREVIEW
 
 
 async def configure_buy_amounts(update: Update, context: CallbackContext) -> int:
@@ -1744,13 +1905,22 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
         buy_amounts = session_manager.get_session_value(user.id, "buy_amounts")
         wallet_group_counts = session_manager.get_session_value(user.id, "wallet_group_counts", {})
         
+        # Get image data from session if uploaded
+        image_file_path = session_manager.get_session_value(user.id, "token_image_local_path")
+        has_custom_image = session_manager.get_session_value(user.id, "has_custom_image", False)
+        
         if not all([pumpfun_client, token_params, buy_amounts]):
             raise Exception("Missing required session data for token creation")
         
         # Show progress message
+        progress_message = "🚀 **Creating Token with Initial Buys...**\n\n"
+        if has_custom_image:
+            progress_message += "⚠️ **Note**: Image upload temporarily disabled due to API limitations\n"
+            progress_message += "🖼️ Your image was saved but token will be created without it for now\n"
+        progress_message += "⏳ Creating your token and executing initial purchases with configured amounts..."
+        
         await query.edit_message_text(
-            "🚀 **Creating Token with Initial Buys...**\n\n"
-            "⏳ Creating your token and executing initial purchases with configured amounts...",
+            progress_message,
             parse_mode=ParseMode.MARKDOWN
         )
         
@@ -1780,13 +1950,24 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
         logger.info(f"Creating final token with configured buy amounts for user {user.id}")
         start_time = time.time()
         
-        # Create token and execute buys with user-configured amounts
+        # Create token and execute buys with user-configured amounts and image
         token_result = pumpfun_client.create_token_and_buy(
             token_params=token_creation_params,
-            buy_amounts=buy_amounts_obj
+            buy_amounts=buy_amounts_obj,
+            image_file_path=image_file_path if has_custom_image else None
         )
         
         execution_time = time.time() - start_time
+        
+        # Cleanup temporary image file after successful creation
+        if has_custom_image and image_file_path:
+            try:
+                from bot.utils.image_utils import TelegramImageProcessor
+                image_processor = TelegramImageProcessor()
+                cleaned_count = image_processor.cleanup_temp_files(user.id)
+                logger.info(f"Cleaned up {cleaned_count} temp image files for user {user.id}")
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to cleanup temp image files: {cleanup_error}")
         
         # Store final results
         session_manager.update_session_value(user.id, "token_address", token_result["mint_address"])
@@ -1854,6 +2035,17 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             f"Final token creation failed for user {user.id}: {str(e)}",
             extra={"user_id": user.id}
         )
+        
+        # Cleanup temp image files on error too
+        try:
+            has_custom_image = session_manager.get_session_value(user.id, "has_custom_image", False)
+            if has_custom_image:
+                from bot.utils.image_utils import TelegramImageProcessor
+                image_processor = TelegramImageProcessor()
+                cleaned_count = image_processor.cleanup_temp_files(user.id)
+                logger.info(f"Cleaned up {cleaned_count} temp image files after error for user {user.id}")
+        except Exception as cleanup_error:
+            logger.warning(f"Failed to cleanup temp image files after error: {cleanup_error}")
         
         keyboard = InlineKeyboardMarkup([
             [build_button("Try Again", "create_token_final")],
