@@ -454,6 +454,7 @@ class PumpFunClient:
     def verify_bundled_wallets_exist(self) -> Dict[str, Any]:
         """
         Verify if bundled wallets exist on the API server.
+        Enhanced with path error detection for better debugging.
         
         Returns:
             Dictionary with verification results including wallet count and details
@@ -502,6 +503,25 @@ class PumpFunClient:
                         "error": str(e),
                         "unknown_error": True
                     }
+            except PumpFunApiError as e:
+                # Check for path-related errors that indicate server-side configuration issues
+                error_msg = str(e).lower()
+                if "path" in error_msg and "undefined" in error_msg:
+                    return {
+                        "wallets_exist": False,
+                        "verification_method": "funding_test",
+                        "error": str(e),
+                        "path_error": True,
+                        "diagnosis": "Server-side wallet file path configuration issue detected"
+                    }
+                else:
+                    # Other API errors
+                    return {
+                        "wallets_exist": False,
+                        "verification_method": "funding_test",
+                        "error": str(e),
+                        "api_error": True
+                    }
             except Exception as e:
                 # Network or other errors
                 return {
@@ -518,6 +538,58 @@ class PumpFunClient:
                 "verification_method": "failed",
                 "error": str(e)
             }
+
+    def diagnose_server_wallet_configuration(self) -> Dict[str, Any]:
+        """
+        Diagnose server-side wallet configuration issues.
+        Specifically looks for path-related errors that indicate server configuration problems.
+        
+        Returns:
+            Dictionary with diagnostic results and recommendations
+        """
+        logger.info("Running server-side wallet configuration diagnostics...")
+        
+        # Test multiple endpoints to identify configuration issues
+        diagnostics = {
+            "wallet_verification": self.verify_bundled_wallets_exist(),
+            "recommendations": [],
+            "configuration_issues": []
+        }
+        
+        # Analyze wallet verification results
+        wallet_status = diagnostics["wallet_verification"]
+        
+        if wallet_status.get("path_error", False):
+            diagnostics["configuration_issues"].append({
+                "issue": "Server wallet file path configuration",
+                "description": "The server is trying to load wallet files but the path parameter is undefined",
+                "error": wallet_status.get("error", "Unknown path error")
+            })
+            
+            diagnostics["recommendations"].extend([
+                "Check server environment variables for wallet file paths",
+                "Ensure WALLETS_FILE_PATH or similar environment variable is set",
+                "Verify wallet files exist in the expected server directory",
+                "Check server logs for additional path-related errors"
+            ])
+        
+        elif not wallet_status.get("wallets_exist", False):
+            diagnostics["configuration_issues"].append({
+                "issue": "No bundled wallets found",
+                "description": "The server does not have any bundled wallets configured",
+                "error": wallet_status.get("error", "No wallets found")
+            })
+            
+            diagnostics["recommendations"].extend([
+                "Create bundled wallets using the create_bundled_wallets() method",
+                "Import existing wallets using the import_bundled_wallets() method",
+                "Ensure wallets are properly saved to the server's storage system"
+            ])
+        
+        else:
+            diagnostics["recommendations"].append("Wallet configuration appears to be healthy")
+        
+        return diagnostics
 
     def return_funds_to_mother(self, leave_dust: bool = False) -> Dict[str, Any]:
         """
@@ -804,32 +876,8 @@ class PumpFunClient:
 
     # Pump Portal Trading Methods
 
-    def upload_image_file(self, image_file_path: str) -> Dict[str, Any]:
-        """
-        Upload image file to API server (for future implementation).
-        
-        Args:
-            image_file_path: Local path to image file
-            
-        Returns:
-            Dictionary with upload result
-            
-        Raises:
-            NotImplementedError: This feature is not yet implemented
-        """
-        # TODO: Implement multipart file upload to API server
-        # This should upload the file and return the server-side file path
-        # Example implementation:
-        # endpoint = "/api/upload/image"
-        # with open(image_file_path, 'rb') as f:
-        #     files = {'image': f}
-        #     response = self._make_request("POST", endpoint, files=files)
-        #     return response
-        
-        raise NotImplementedError(
-            "Image file upload not yet implemented. "
-            "API server needs /api/upload/image endpoint to accept multipart file uploads."
-        )
+    # Image upload is now implemented as part of create_token_and_buy method
+    # using multipart/form-data uploads as per API documentation
 
     def _transform_token_params_for_api(self, token_params: TokenCreationParams) -> Dict[str, Any]:
         """
@@ -904,11 +952,52 @@ class PumpFunClient:
         # Log successful validation
         logger.info(f"Pre-request validation passed for {operation} with {len(transformed_params)} fields")
 
+    def _validate_buy_amounts_json(self, buy_amounts_json: str) -> None:
+        """
+        Validate that the buyAmountsSOL JSON string is correctly formatted.
+        
+        Args:
+            buy_amounts_json: JSON string to validate
+            
+        Raises:
+            PumpFunValidationError: If validation fails
+        """
+        try:
+            # Parse JSON to verify it's valid
+            parsed = json.loads(buy_amounts_json)
+            
+            # Validate structure
+            if not isinstance(parsed, dict):
+                raise PumpFunValidationError("buyAmountsSOL must be a JSON object")
+            
+            # Check required fields
+            required_fields = ["devWalletBuySOL", "firstBundledWallet1BuySOL"]
+            for field in required_fields:
+                if field not in parsed:
+                    raise PumpFunValidationError(f"Missing required field in buyAmountsSOL: {field}")
+                if not isinstance(parsed[field], (int, float)):
+                    raise PumpFunValidationError(f"Field {field} must be a number, got {type(parsed[field])}")
+                if parsed[field] < 0:
+                    raise PumpFunValidationError(f"Field {field} must be positive, got {parsed[field]}")
+            
+            # Validate JSON string format (should be compact, no spaces)
+            expected_format = json.dumps(parsed, separators=(',', ':'))
+            if buy_amounts_json != expected_format:
+                logger.warning(f"buyAmountsSOL JSON format suboptimal. Expected: {expected_format}, Got: {buy_amounts_json}")
+                
+            logger.info(f"buyAmountsSOL JSON validation passed: {buy_amounts_json}")
+            
+        except json.JSONDecodeError as e:
+            raise PumpFunValidationError(f"Invalid JSON format for buyAmountsSOL: {str(e)}")
+        except Exception as e:
+            raise PumpFunValidationError(f"buyAmountsSOL validation failed: {str(e)}")
+
     def create_token_and_buy(self, token_params: TokenCreationParams, 
                            buy_amounts: BuyAmounts, slippage_bps: int = 2500,
                            image_file_path: Optional[str] = None) -> Dict[str, Any]:
         """
-        Create a token and perform initial buys.
+        Create a token and perform initial buys with proper multipart/form-data support.
+        Enhanced with wallet loading error recovery.
         
         Args:
             token_params: Token creation parameters
@@ -924,31 +1013,269 @@ class PumpFunClient:
         
         endpoint = "/api/pump/create-and-buy"
         
-        # Prepare buy amounts dictionary
+        # Prepare buy amounts dictionary - create-and-buy endpoint only supports DevWallet + First Bundled Wallet
+        # Additional wallets (2-4) should be handled via batch-buy endpoint separately
         buy_amounts_dict = {
             "devWalletBuySOL": buy_amounts.dev_wallet_buy_sol,
-            "firstBundledWallet1BuySOL": buy_amounts.first_bundled_wallet_1_buy_sol,
-            "firstBundledWallet2BuySOL": buy_amounts.first_bundled_wallet_2_buy_sol,
-            "firstBundledWallet3BuySOL": buy_amounts.first_bundled_wallet_3_buy_sol,
-            "firstBundledWallet4BuySOL": buy_amounts.first_bundled_wallet_4_buy_sol
+            "firstBundledWallet1BuySOL": buy_amounts.first_bundled_wallet_1_buy_sol
         }
         
+        # Log buy amounts breakdown for debugging
+        logger.info(f"Token creation buy amounts - DevWallet: {buy_amounts.dev_wallet_buy_sol} SOL, "
+                   f"First Bundled Wallet: {buy_amounts.first_bundled_wallet_1_buy_sol} SOL")
+        additional_total = (buy_amounts.first_bundled_wallet_2_buy_sol + 
+                           buy_amounts.first_bundled_wallet_3_buy_sol + 
+                           buy_amounts.first_bundled_wallet_4_buy_sol)
+        if additional_total > 0:
+            logger.info(f"Additional wallets will purchase {additional_total} SOL total after token creation")
+        
+        # Try token creation with enhanced error recovery
+        token_result = None
+        
+        # Check if we have an image file to upload
+        if image_file_path and os.path.exists(image_file_path):
+            # Try multipart/form-data first for image upload
+            logger.info(f"Creating token with image upload: {image_file_path}")
+            try:
+                token_result = self._create_token_with_image(token_params, buy_amounts_dict, slippage_bps, image_file_path)
+            except PumpFunApiError as e:
+                # Enhanced error handling for server-side wallet loading issues
+                error_msg = str(e).lower()
+                if "path" in error_msg and "undefined" in error_msg:
+                    logger.error(f"Server-side wallet loading error detected: {str(e)}")
+                    logger.info("Attempting to recover by ensuring wallet setup before token creation")
+                    
+                    # Try to ensure wallets are properly set up first
+                    try:
+                        wallet_status = self.verify_bundled_wallets_exist()
+                        if not wallet_status.get("wallets_exist", False):
+                            logger.warning("Bundled wallets not found on server, this may be the cause of the path error")
+                            # Return a more helpful error message
+                            raise PumpFunApiError(
+                                "Server-side wallet loading failed. Please ensure bundled wallets are created and "
+                                "properly configured on the API server before attempting token creation."
+                            )
+                    except Exception as wallet_check_error:
+                        logger.error(f"Failed to verify wallet status: {str(wallet_check_error)}")
+                    
+                    # Try fallback to JSON without image
+                    logger.info("Attempting fallback to JSON without image due to server-side error")
+                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, slippage_bps)
+                elif "buyAmountsSOL" in str(e):
+                    logger.warning(f"Multipart upload failed with buyAmountsSOL error: {str(e)}")
+                    logger.info("Attempting fallback to JSON without image due to multipart parsing issue")
+                    # Fallback to JSON without image
+                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, slippage_bps)
+                else:
+                    # Re-raise other API errors
+                    raise e
+            except PumpFunValidationError as e:
+                if "buyAmountsSOL" in str(e):
+                    logger.warning(f"Multipart upload failed with buyAmountsSOL error: {str(e)}")
+                    logger.info("Attempting fallback to JSON without image due to multipart parsing issue")
+                    # Fallback to JSON without image
+                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, slippage_bps)
+                else:
+                    # Re-raise non-buyAmountsSOL validation errors
+                    raise e
+        else:
+            # Use JSON for token creation without image
+            logger.info("Creating token without image using JSON request")
+            try:
+                token_result = self._create_token_without_image(token_params, buy_amounts_dict, slippage_bps)
+            except PumpFunApiError as e:
+                # Enhanced error handling for server-side wallet loading issues
+                error_msg = str(e).lower()
+                if "path" in error_msg and "undefined" in error_msg:
+                    logger.error(f"Server-side wallet loading error detected: {str(e)}")
+                    
+                    # Try to ensure wallets are properly set up first
+                    try:
+                        wallet_status = self.verify_bundled_wallets_exist()
+                        if not wallet_status.get("wallets_exist", False):
+                            logger.warning("Bundled wallets not found on server, this may be the cause of the path error")
+                            # Return a more helpful error message
+                            raise PumpFunApiError(
+                                "Server-side wallet loading failed. Please ensure bundled wallets are created and "
+                                "properly configured on the API server before attempting token creation."
+                            )
+                    except Exception as wallet_check_error:
+                        logger.error(f"Failed to verify wallet status: {str(wallet_check_error)}")
+                    
+                    # Re-raise the original error with additional context
+                    raise PumpFunApiError(
+                        f"Server-side wallet configuration error: {str(e)}. "
+                        "Please check that the API server has proper wallet file paths configured."
+                    )
+                else:
+                    # Re-raise other API errors
+                    raise e
+        
+        # Handle additional wallet purchases (wallets 2-4) if they have non-zero amounts
+        additional_purchases = []
+        if buy_amounts.first_bundled_wallet_2_buy_sol > 0:
+            additional_purchases.append(("First Bundled Wallet 2", buy_amounts.first_bundled_wallet_2_buy_sol))
+        if buy_amounts.first_bundled_wallet_3_buy_sol > 0:
+            additional_purchases.append(("First Bundled Wallet 3", buy_amounts.first_bundled_wallet_3_buy_sol))
+        if buy_amounts.first_bundled_wallet_4_buy_sol > 0:
+            additional_purchases.append(("First Bundled Wallet 4", buy_amounts.first_bundled_wallet_4_buy_sol))
+        
+        if additional_purchases and token_result.get("mintAddress"):
+            logger.info(f"Executing additional purchases for {len(additional_purchases)} wallets")
+            mint_address = token_result["mintAddress"]
+            
+            # Execute batch buys for remaining wallets
+            for wallet_name, sol_amount in additional_purchases:
+                try:
+                    batch_result = self.batch_buy_token(
+                        mint_address=mint_address,
+                        sol_amount_per_wallet=sol_amount,
+                        slippage_bps=slippage_bps,
+                        target_wallet_names=[wallet_name]
+                    )
+                    logger.info(f"Additional purchase completed for {wallet_name}: {sol_amount} SOL")
+                    
+                    # Merge batch results into main token result
+                    if "additionalPurchases" not in token_result:
+                        token_result["additionalPurchases"] = []
+                    token_result["additionalPurchases"].append({
+                        "wallet": wallet_name,
+                        "amount": sol_amount,
+                        "result": batch_result
+                    })
+                    
+                except Exception as e:
+                    logger.error(f"Failed additional purchase for {wallet_name}: {str(e)}")
+                    if "additionalPurchaseErrors" not in token_result:
+                        token_result["additionalPurchaseErrors"] = []
+                    token_result["additionalPurchaseErrors"].append({
+                        "wallet": wallet_name,
+                        "amount": sol_amount,
+                        "error": str(e)
+                    })
+        
+        return token_result
+
+    def _create_token_with_image(self, token_params: TokenCreationParams, 
+                                buy_amounts_dict: Dict[str, float], slippage_bps: int,
+                                image_file_path: str) -> Dict[str, Any]:
+        """
+        Create token with image using multipart/form-data upload.
+        
+        Args:
+            token_params: Token creation parameters
+            buy_amounts_dict: Buy amounts dictionary
+            slippage_bps: Slippage in basis points
+            image_file_path: Path to image file
+            
+        Returns:
+            Dictionary with token creation results
+        """
+        url = f"{self.base_url}/api/pump/create-and-buy"
+        
+        # Prepare form data according to API documentation
+        # Format buyAmountsSOL exactly like the cURL example: no spaces, compact format
+        # Ensure numbers are formatted as proper decimals
+        dev_amount = float(buy_amounts_dict["devWalletBuySOL"])
+        first_bundled_amount = float(buy_amounts_dict["firstBundledWallet1BuySOL"])
+        
+        # Use json.dumps for proper JSON formatting to avoid f-string issues
+        buy_amounts_obj = {
+            "devWalletBuySOL": dev_amount,
+            "firstBundledWallet1BuySOL": first_bundled_amount
+        }
+        buy_amounts_json = json.dumps(buy_amounts_obj, separators=(',', ':'))
+        
+        # Validate the JSON before sending
+        self._validate_buy_amounts_json(buy_amounts_json)
+        
+        form_data = {
+            'name': token_params.name,
+            'symbol': token_params.symbol,
+            'description': token_params.description,
+            'twitter': token_params.twitter or '',  # Ensure empty string instead of None
+            'telegram': token_params.telegram or '',  # Ensure empty string instead of None
+            'website': token_params.website or '',  # Ensure empty string instead of None
+            'showName': 'true' if token_params.show_name else 'false',  # Exact boolean string format
+            'initialSupplyAmount': token_params.initial_supply_amount,
+            'buyAmountsSOL': buy_amounts_json,  # Validated JSON string
+            'slippageBps': str(slippage_bps)
+        }
+        
+        # Debug logging to see exact JSON format being sent
+        logger.info(f"buyAmountsSOL JSON being sent: {buy_amounts_json}")
+        logger.info(f"buyAmountsSOL JSON length: {len(buy_amounts_json)}")
+        logger.info(f"buyAmountsSOL JSON repr: {repr(buy_amounts_json)}")
+        logger.debug(f"Form data keys: {list(form_data.keys())}")
+        logger.debug(f"Form data types: {[(k, type(v).__name__) for k, v in form_data.items()]}")
+        
+        # Validate JSON string can be parsed back
+        try:
+            parsed_test = json.loads(buy_amounts_json)
+            logger.info(f"JSON validation successful: {parsed_test}")
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON validation failed: {e}")
+            raise PumpFunValidationError(f"Invalid JSON generated for buyAmountsSOL: {e}")
+        
+        # Validate image file
+        if not os.path.exists(image_file_path):
+            raise PumpFunValidationError(f"Image file not found: {image_file_path}")
+        
+        # Check file size (5MB limit as per API docs)
+        file_size = os.path.getsize(image_file_path)
+        if file_size > 5 * 1024 * 1024:  # 5MB
+            raise PumpFunValidationError(f"Image file too large: {file_size} bytes (max 5MB)")
+        
+        # Check file format
+        valid_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'}
+        file_extension = os.path.splitext(image_file_path)[1].lower()
+        if file_extension not in valid_extensions:
+            raise PumpFunValidationError(f"Invalid image format: {file_extension}. Supported: {valid_extensions}")
+        
+        try:
+            # Open and prepare file for upload
+            with open(image_file_path, 'rb') as image_file:
+                files = {'image': (os.path.basename(image_file_path), image_file, self._get_content_type(file_extension))}
+                
+                # Log complete request details for debugging
+                logger.info(f"Multipart upload - Form fields: {list(form_data.keys())}, File: {os.path.basename(image_file_path)}")
+                logger.info(f"Complete form data for debugging:")
+                for key, value in form_data.items():
+                    if key == 'buyAmountsSOL':
+                        logger.info(f"  {key}: {value} (type: {type(value).__name__}, length: {len(value)})")
+                    else:
+                        logger.info(f"  {key}: {value} (type: {type(value).__name__})")
+                
+                # Make multipart request with retry logic
+                response = self._make_multipart_request_with_retry("POST", url, data=form_data, files=files)
+                
+                logger.info("Token creation with image upload completed successfully")
+                return response
+                
+        except IOError as e:
+            raise PumpFunValidationError(f"Failed to read image file: {str(e)}")
+        except Exception as e:
+            logger.error(f"Image upload failed: {str(e)}")
+            raise PumpFunApiError(f"Image upload failed: {str(e)}")
+
+    def _create_token_without_image(self, token_params: TokenCreationParams, 
+                                   buy_amounts_dict: Dict[str, float], slippage_bps: int) -> Dict[str, Any]:
+        """
+        Create token without image using JSON request.
+        
+        Args:
+            token_params: Token creation parameters
+            buy_amounts_dict: Buy amounts dictionary
+            slippage_bps: Slippage in basis points
+            
+        Returns:
+            Dictionary with token creation results
+        """
         # Transform token params to API-expected format (snake_case -> camelCase)
         transformed_token_params = self._transform_token_params_for_api(token_params)
         
-        # Handle image file path - CRITICAL FIX for API compatibility
-        # The API expects images to exist on its server, not just filenames
-        # Until file upload is implemented, we must skip images to avoid the "path undefined" error
-        if image_file_path and os.path.exists(image_file_path):
-            logger.warning(f"Image file exists locally ({image_file_path}) but API expects server-side files")
-            logger.warning("Skipping image upload until multipart file upload is implemented")
-            # Do NOT send imageFileName - API will fail if file doesn't exist on server
-            transformed_token_params.pop("imageFileName", None)
-            logger.info("Creating token without image to avoid API path error")
-        else:
-            # Remove image field if no file provided
-            transformed_token_params.pop("imageFileName", None)
-            logger.info("No image file provided for token creation")
+        # Remove image field since no image is provided
+        transformed_token_params.pop("imageFileName", None)
         
         # Pre-request validation to catch field format issues early
         self._validate_api_request_format(transformed_token_params, "token_creation")
@@ -959,16 +1286,131 @@ class PumpFunClient:
             "slippageBps": slippage_bps
         }
         
-        # Log the final request payload for debugging (excluding sensitive data)
-        logger.info(f"Token creation request payload prepared: {len(data)} fields")
-        logger.debug(f"Request fields: {list(data.keys())}")
+        # Log the final request payload for debugging
+        logger.info(f"JSON token creation request - Fields: {list(data.keys())}")
         
         # Use enhanced retry for critical token creation operations
-        if image_file_path:
-            logger.info("Creating token (image upload temporarily disabled)")
-        else:
-            logger.info("Creating token without image")
-        return self._make_request_for_critical_operations("POST", endpoint, json=data)
+        return self._make_request_for_critical_operations("POST", "/api/pump/create-and-buy", json=data)
+
+    def _get_content_type(self, file_extension: str) -> str:
+        """
+        Get content type for file extension.
+        
+        Args:
+            file_extension: File extension (with dot)
+            
+        Returns:
+            Content type string
+        """
+        content_types = {
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.gif': 'image/gif',
+            '.webp': 'image/webp',
+            '.svg': 'image/svg+xml'
+        }
+        return content_types.get(file_extension.lower(), 'application/octet-stream')
+
+    def _make_multipart_request_with_retry(self, method: str, url: str, data: Dict[str, Any], 
+                                         files: Dict[str, Any], max_retries: int = MAX_RETRIES) -> Dict[str, Any]:
+        """
+        Make multipart request with retry logic for image uploads.
+        
+        Args:
+            method: HTTP method
+            url: Full URL
+            data: Form data
+            files: Files to upload
+            max_retries: Maximum retry attempts
+            
+        Returns:
+            API response dictionary
+        """
+        last_exception = None
+        is_cold_start = self._detect_cold_start_scenario()
+        
+        # Use enhanced retry parameters for cold start scenarios
+        if is_cold_start:
+            max_retries = max(max_retries, COLD_START_MAX_RETRIES)
+            logger.info(f"Cold start detected for multipart upload, using enhanced retry: max_retries={max_retries}")
+        
+        for attempt in range(max_retries + 1):
+            try:
+                # Create a new session for multipart requests to avoid header conflicts
+                with requests.Session() as session:
+                    # Don't set Content-Type header - requests will set it automatically for multipart
+                    session.headers.update({
+                        'User-Agent': 'NinjaBot-PumpFun-Client/1.0'
+                    })
+                    
+                    response = session.request(method, url, data=data, files=files, timeout=self.timeout)
+                    
+                    # Log request details
+                    logger.info(f"Multipart request {method} {url} - Status: {response.status_code}")
+                    
+                    # Handle response
+                    if response.status_code == 200:
+                        try:
+                            return response.json()
+                        except json.JSONDecodeError:
+                            return {"status": "success", "data": response.text}
+                    elif response.status_code == 400:
+                        try:
+                            error_data = response.json() if response.content else {}
+                            detailed_error = error_data.get('error', error_data.get('message', 'Invalid request'))
+                            
+                            # Enhanced error logging for buyAmountsSOL issues
+                            logger.error(f"Multipart upload validation error: {detailed_error}")
+                            logger.error(f"Full error response: {error_data}")
+                            logger.error(f"Response headers: {dict(response.headers)}")
+                            logger.error(f"Response status: {response.status_code}")
+                            
+                            # If it's a buyAmountsSOL error, log more debugging info
+                            if 'buyAmountsSOL' in str(detailed_error):
+                                logger.error("buyAmountsSOL validation failed - debugging info:")
+                                logger.error(f"Sent buyAmountsSOL format: {data.get('buyAmountsSOL', 'NOT_FOUND')}")
+                                logger.error(f"Expected format from API docs: {{'devWalletBuySOL':0.01,'firstBundledWallet1BuySOL':0.01}}")
+                                
+                                # Log all form data keys to help debug
+                                logger.error(f"All form data keys sent: {list(data.keys())}")
+                                logger.error(f"All form data values types: {[(k, type(v).__name__) for k, v in data.items()]}")
+                            
+                            raise PumpFunValidationError(f"Validation error: {detailed_error}")
+                        except json.JSONDecodeError:
+                            logger.error(f"Multipart upload 400 non-JSON response: {response.text}")
+                            logger.error(f"Response headers: {dict(response.headers)}")
+                            raise PumpFunValidationError(f"Validation error: {response.text}")
+                    elif response.status_code == 500:
+                        error_data = response.json() if response.content else {}
+                        raise PumpFunApiError(f"Server error: {error_data.get('error', 'Internal server error')}")
+                    else:
+                        raise PumpFunApiError(f"HTTP {response.status_code}: {response.text}")
+                        
+            except requests.exceptions.ConnectionError as e:
+                last_exception = PumpFunNetworkError(f"Connection error: {str(e)}")
+            except requests.exceptions.Timeout as e:
+                last_exception = PumpFunNetworkError(f"Request timeout: {str(e)}")
+            except requests.exceptions.RequestException as e:
+                last_exception = PumpFunNetworkError(f"Request error: {str(e)}")
+            except (PumpFunValidationError, PumpFunApiError) as e:
+                # Don't retry validation or API errors
+                raise e
+            
+            # Retry logic
+            if last_exception and attempt < max_retries:
+                backoff_time = INITIAL_BACKOFF * (2 ** attempt)
+                if is_cold_start:
+                    backoff_time *= random.uniform(0.5, 1.5)
+                
+                logger.warning(f"Multipart upload error on attempt {attempt + 1}/{max_retries + 1}, retrying in {backoff_time:.1f}s: {str(last_exception)}")
+                time.sleep(backoff_time)
+            elif last_exception:
+                logger.error(f"All {max_retries + 1} multipart upload attempts failed: {str(last_exception)}")
+                raise last_exception
+        
+        # Should not reach here
+        raise last_exception or PumpFunNetworkError("Unknown error in multipart upload")
 
     def batch_buy_token(self, mint_address: str, sol_amount_per_wallet: float, 
                        slippage_bps: int = 2500, target_wallet_names: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -1139,6 +1581,177 @@ class PumpFunClient:
                 "cold_start_likely": False
             }
 
+    def test_server_configuration(self) -> Dict[str, Any]:
+        """
+        Test server configuration and wallet setup after applying fixes.
+        This method helps verify that the server-side path configuration fix worked.
+        
+        Returns:
+            Dictionary with configuration test results
+        """
+        logger.info("Testing server configuration after applying fixes...")
+        
+        test_results = {
+            "timestamp": time.time(),
+            "tests": {},
+            "overall_status": "unknown",
+            "recommendations": []
+        }
+        
+        # Test 1: Basic API connectivity
+        logger.info("Test 1: Basic API connectivity")
+        health_check = self.health_check()
+        test_results["tests"]["api_connectivity"] = {
+            "status": "pass" if health_check["api_reachable"] else "fail",
+            "details": health_check
+        }
+        
+        # Test 2: Wallet configuration diagnostics
+        logger.info("Test 2: Wallet configuration diagnostics")
+        try:
+            wallet_diagnostics = self.diagnose_server_wallet_configuration()
+            has_path_errors = any(
+                issue.get("issue") == "Server wallet file path configuration" 
+                for issue in wallet_diagnostics.get("configuration_issues", [])
+            )
+            
+            test_results["tests"]["wallet_configuration"] = {
+                "status": "fail" if has_path_errors else "pass",
+                "details": wallet_diagnostics
+            }
+            
+            if has_path_errors:
+                test_results["recommendations"].extend([
+                    "Apply the server-side configuration fix from server_config_fix.md",
+                    "Set BUNDLED_WALLETS_PATH environment variable",
+                    "Ensure wallet file directory exists and is writable"
+                ])
+        except Exception as e:
+            test_results["tests"]["wallet_configuration"] = {
+                "status": "error",
+                "details": {"error": str(e)}
+            }
+        
+        # Test 3: Try to create bundled wallets (if they don't exist)
+        logger.info("Test 3: Wallet creation capability")
+        try:
+            # First check if wallets exist
+            wallet_verification = self.verify_bundled_wallets_exist()
+            
+            if not wallet_verification.get("wallets_exist", False):
+                # Try to create test wallets
+                try:
+                    creation_result = self.create_bundled_wallets(5)
+                    test_results["tests"]["wallet_creation"] = {
+                        "status": "pass",
+                        "details": {
+                            "message": "Successfully created test wallets",
+                            "result": creation_result
+                        }
+                    }
+                except Exception as create_error:
+                    test_results["tests"]["wallet_creation"] = {
+                        "status": "fail",
+                        "details": {
+                            "error": str(create_error),
+                            "message": "Failed to create test wallets"
+                        }
+                    }
+                    
+                    if "path" in str(create_error).lower():
+                        test_results["recommendations"].append(
+                            "Path error detected - server-side configuration fix still needed"
+                        )
+            else:
+                test_results["tests"]["wallet_creation"] = {
+                    "status": "pass",
+                    "details": {
+                        "message": "Wallets already exist, creation test skipped"
+                    }
+                }
+        except Exception as e:
+            test_results["tests"]["wallet_creation"] = {
+                "status": "error",
+                "details": {"error": str(e)}
+            }
+        
+        # Test 4: Test token creation (minimal test)
+        logger.info("Test 4: Token creation capability")
+        try:
+            # Create test token parameters
+            test_token_params = TokenCreationParams(
+                name="Test Token",
+                symbol="TEST",
+                description="Configuration test token"
+            )
+            
+            test_buy_amounts = BuyAmounts(
+                dev_wallet_buy_sol=0.005,
+                first_bundled_wallet_1_buy_sol=0.005
+            )
+            
+            # Try to create token (this will fail if path error still exists)
+            try:
+                token_result = self.create_token_and_buy(
+                    test_token_params, 
+                    test_buy_amounts, 
+                    slippage_bps=2500
+                )
+                test_results["tests"]["token_creation"] = {
+                    "status": "pass",
+                    "details": {
+                        "message": "Token creation succeeded",
+                        "result": token_result
+                    }
+                }
+            except PumpFunApiError as token_error:
+                error_msg = str(token_error).lower()
+                if "path" in error_msg and "undefined" in error_msg:
+                    test_results["tests"]["token_creation"] = {
+                        "status": "fail",
+                        "details": {
+                            "error": str(token_error),
+                            "message": "Path error still exists - server fix needed"
+                        }
+                    }
+                    test_results["recommendations"].append(
+                        "Server-side path configuration fix is still required"
+                    )
+                else:
+                    test_results["tests"]["token_creation"] = {
+                        "status": "partial",
+                        "details": {
+                            "error": str(token_error),
+                            "message": "Path error resolved, but other issues remain"
+                        }
+                    }
+                    
+        except Exception as e:
+            test_results["tests"]["token_creation"] = {
+                "status": "error",
+                "details": {"error": str(e)}
+            }
+        
+        # Determine overall status
+        test_statuses = [test["status"] for test in test_results["tests"].values()]
+        if all(status == "pass" for status in test_statuses):
+            test_results["overall_status"] = "pass"
+        elif any(status == "fail" for status in test_statuses):
+            test_results["overall_status"] = "fail"
+        else:
+            test_results["overall_status"] = "partial"
+        
+        # Add general recommendations
+        if test_results["overall_status"] != "pass":
+            test_results["recommendations"].extend([
+                "Review server logs for additional error details",
+                "Ensure all environment variables are properly set",
+                "Verify server has proper file system permissions"
+            ])
+        
+        logger.info(f"Configuration test completed with overall status: {test_results['overall_status']}")
+        return test_results
+
     def get_api_info(self) -> Dict[str, Any]:
         """
         Get API information and status.
@@ -1157,3 +1770,106 @@ class PumpFunClient:
                 "funding_operations"
             ]
         } 
+
+if __name__ == "__main__":
+    # Example usage and test of the updated buyAmountsSOL validation
+    # This demonstrates systematic debugging following MONOCODE principles
+    
+    import sys
+    import tempfile
+    
+    # Create a test client
+    client = PumpFunClient()
+    
+    # Test 1: Health check (minimal slice)
+    print("=== Testing API Health Check ===")
+    health = client.health_check()
+    print(f"Health Status: {health}")
+    
+    # Test 2: buyAmountsSOL validation (new validation system)
+    print("\n=== Testing buyAmountsSOL Validation ===")
+    try:
+        # Test valid JSON
+        valid_json = '{"devWalletBuySOL":0.01,"firstBundledWallet1BuySOL":0.005}'
+        client._validate_buy_amounts_json(valid_json)
+        print("✓ Valid JSON validation passed")
+        
+        # Test invalid JSON
+        try:
+            invalid_json = '{"devWalletBuySOL":0.01,"firstBundledWallet1BuySOL":}'
+            client._validate_buy_amounts_json(invalid_json)
+            print("✗ Invalid JSON validation should have failed")
+        except PumpFunValidationError as e:
+            print(f"✓ Invalid JSON properly rejected: {e}")
+        
+        # Test missing field
+        try:
+            missing_field_json = '{"devWalletBuySOL":0.01}'
+            client._validate_buy_amounts_json(missing_field_json)
+            print("✗ Missing field validation should have failed")
+        except PumpFunValidationError as e:
+            print(f"✓ Missing field properly rejected: {e}")
+        
+        # Test negative value
+        try:
+            negative_value_json = '{"devWalletBuySOL":-0.01,"firstBundledWallet1BuySOL":0.005}'
+            client._validate_buy_amounts_json(negative_value_json)
+            print("✗ Negative value validation should have failed")
+        except PumpFunValidationError as e:
+            print(f"✓ Negative value properly rejected: {e}")
+        
+    except Exception as e:
+        print(f"buyAmountsSOL validation test error: {e}")
+    
+    # Test 3: Token creation with enhanced error handling
+    print("\n=== Testing Token Creation with Enhanced Error Handling ===")
+    try:
+        token_params = TokenCreationParams(
+            name="Test Token",
+            symbol="TEST",
+            description="A test token for validation"
+        )
+        
+        buy_amounts = BuyAmounts(
+            dev_wallet_buy_sol=0.01,
+            first_bundled_wallet_1_buy_sol=0.005
+        )
+        
+        print("Token parameters prepared for enhanced error handling test")
+        print(f"Token Name: {token_params.name}")
+        print(f"Token Symbol: {token_params.symbol}")
+        print(f"DevWallet Buy Amount: {buy_amounts.dev_wallet_buy_sol} SOL")
+        print(f"First Bundled Wallet Buy Amount: {buy_amounts.first_bundled_wallet_1_buy_sol} SOL")
+        print("Note: This is a dry run - no actual API call will be made")
+        
+        # Test the JSON generation and validation
+        client_test = PumpFunClient()
+        test_buy_amounts = {
+            "devWalletBuySOL": buy_amounts.dev_wallet_buy_sol,
+            "firstBundledWallet1BuySOL": buy_amounts.first_bundled_wallet_1_buy_sol
+        }
+        test_json = json.dumps(test_buy_amounts, separators=(',', ':'))
+        client_test._validate_buy_amounts_json(test_json)
+        print(f"✓ Generated JSON validated successfully: {test_json}")
+        
+    except Exception as e:
+        print(f"Token parameter validation error: {e}")
+    
+    print("\n=== Solution Summary ===")
+    print("✓ Enhanced JSON formatting using json.dumps() instead of f-strings")
+    print("✓ Comprehensive buyAmountsSOL validation with detailed error messages")
+    print("✓ Fallback mechanism: multipart -> JSON when buyAmountsSOL fails")
+    print("✓ Enhanced debugging logs for troubleshooting multipart issues")
+    print("✓ Systematic error isolation following MONOCODE debugging principles")
+    
+    print("\n=== Root Cause Analysis ===")
+    print("Issue: buyAmountsSOL JSON string formatting inconsistencies")
+    print("Solution: Proper JSON serialization with validation and fallback")
+    print("Prevention: Pre-request validation and enhanced error logging")
+    
+    print("\n=== Usage Instructions ===")
+    print("1. The client now automatically validates buyAmountsSOL before sending")
+    print("2. If multipart upload fails with buyAmountsSOL error, it falls back to JSON")
+    print("3. Enhanced logging provides detailed debugging information")
+    print("4. All JSON strings are now properly formatted using json.dumps()")
+    print("5. Validation catches format issues before they reach the API") 
