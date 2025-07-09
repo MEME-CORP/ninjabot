@@ -2,6 +2,33 @@
 """
 PumpFun API Client for Solana wallet management and Pump.fun platform interactions.
 Handles token creation, batch buying, and batch selling using Jito bundles.
+
+UPDATED API USAGE (v2.0):
+The client now supports the new stateless API endpoint that requires wallet credentials
+to be passed directly in requests instead of being stored server-side.
+
+Key Changes:
+- create_token_and_buy() now requires a 'wallets' parameter with private keys
+- Eliminates server-side wallet storage and path configuration issues
+- Supports both multipart/form-data (with images) and JSON requests
+- Enhanced validation for wallet credentials and buy amounts
+
+Example Usage:
+    client = PumpFunClient()
+    
+    # Prepare wallet credentials
+    wallets = [
+        {"name": "DevWallet", "privateKey": "base58_private_key"},
+        {"name": "First Bundled Wallet 1", "privateKey": "base58_private_key"}
+    ]
+    
+    # Create token
+    result = client.create_token_and_buy(
+        token_params=token_params,
+        buy_amounts=buy_amounts, 
+        wallets=wallets,  # NEW: Required parameter
+        slippage_bps=2500
+    )
 """
 
 import json
@@ -992,8 +1019,53 @@ class PumpFunClient:
         except Exception as e:
             raise PumpFunValidationError(f"buyAmountsSOL validation failed: {str(e)}")
 
+    def _validate_wallets_json(self, wallets_json: str) -> None:
+        """
+        Validate that the wallets JSON string is correctly formatted.
+        
+        Args:
+            wallets_json: JSON string to validate
+            
+        Raises:
+            PumpFunValidationError: If validation fails
+        """
+        try:
+            # Parse JSON to verify it's valid
+            parsed = json.loads(wallets_json)
+            
+            # Validate structure
+            if not isinstance(parsed, list):
+                raise PumpFunValidationError("wallets must be a JSON array")
+            
+            # Check required fields for each wallet
+            wallet_names = []
+            for wallet_data in parsed:
+                if 'name' not in wallet_data or 'privateKey' not in wallet_data:
+                    raise PumpFunValidationError("Each wallet in the 'wallets' array must have 'name' and 'privateKey' fields")
+                
+                if not isinstance(wallet_data['name'], str) or not isinstance(wallet_data['privateKey'], str):
+                    raise PumpFunValidationError("Wallet 'name' and 'privateKey' must be strings")
+                
+                # Check for duplicate names
+                if wallet_data['name'] in wallet_names:
+                    raise PumpFunValidationError(f"Duplicate wallet name found: {wallet_data['name']}")
+                wallet_names.append(wallet_data['name'])
+                
+                # Basic validation for private key (e.g., length)
+                if len(wallet_data['privateKey']) < 80:  # More flexible length check
+                    logger.warning(f"Wallet private key length suspicious: {len(wallet_data['privateKey'])}")
+                
+                logger.info(f"Wallet JSON validation passed for: {wallet_data['name']}")
+            
+            logger.info(f"wallets JSON validation passed: {wallets_json}")
+            
+        except json.JSONDecodeError as e:
+            raise PumpFunValidationError(f"Invalid JSON format for wallets: {str(e)}")
+        except Exception as e:
+            raise PumpFunValidationError(f"wallets JSON validation failed: {str(e)}")
+
     def create_token_and_buy(self, token_params: TokenCreationParams, 
-                           buy_amounts: BuyAmounts, slippage_bps: int = 2500,
+                           buy_amounts: BuyAmounts, wallets: List[Dict[str, str]], slippage_bps: int = 2500,
                            image_file_path: Optional[str] = None) -> Dict[str, Any]:
         """
         Create a token and perform initial buys with proper multipart/form-data support.
@@ -1002,6 +1074,7 @@ class PumpFunClient:
         Args:
             token_params: Token creation parameters
             buy_amounts: Buy amounts for different wallets
+            wallets: List of wallet dictionaries with 'name' and 'privateKey' fields
             slippage_bps: Slippage in basis points
             image_file_path: Local path to image file (if any)
             
@@ -1010,6 +1083,14 @@ class PumpFunClient:
         """
         # Validate token parameters
         self._validate_token_params(token_params)
+        
+        # Validate wallets parameter
+        if not wallets:
+            raise PumpFunValidationError("Wallets list cannot be empty")
+        
+        for wallet in wallets:
+            if 'name' not in wallet or 'privateKey' not in wallet:
+                raise PumpFunValidationError("Each wallet must have 'name' and 'privateKey' fields")
         
         endpoint = "/api/pump/create-and-buy"
         
@@ -1037,7 +1118,7 @@ class PumpFunClient:
             # Try multipart/form-data first for image upload
             logger.info(f"Creating token with image upload: {image_file_path}")
             try:
-                token_result = self._create_token_with_image(token_params, buy_amounts_dict, slippage_bps, image_file_path)
+                token_result = self._create_token_with_image(token_params, buy_amounts_dict, wallets, slippage_bps, image_file_path)
             except PumpFunApiError as e:
                 # Enhanced error handling for server-side wallet loading issues
                 error_msg = str(e).lower()
@@ -1045,27 +1126,14 @@ class PumpFunClient:
                     logger.error(f"Server-side wallet loading error detected: {str(e)}")
                     logger.info("Attempting to recover by ensuring wallet setup before token creation")
                     
-                    # Try to ensure wallets are properly set up first
-                    try:
-                        wallet_status = self.verify_bundled_wallets_exist()
-                        if not wallet_status.get("wallets_exist", False):
-                            logger.warning("Bundled wallets not found on server, this may be the cause of the path error")
-                            # Return a more helpful error message
-                            raise PumpFunApiError(
-                                "Server-side wallet loading failed. Please ensure bundled wallets are created and "
-                                "properly configured on the API server before attempting token creation."
-                            )
-                    except Exception as wallet_check_error:
-                        logger.error(f"Failed to verify wallet status: {str(wallet_check_error)}")
-                    
                     # Try fallback to JSON without image
                     logger.info("Attempting fallback to JSON without image due to server-side error")
-                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, slippage_bps)
+                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, wallets, slippage_bps)
                 elif "buyAmountsSOL" in str(e):
                     logger.warning(f"Multipart upload failed with buyAmountsSOL error: {str(e)}")
                     logger.info("Attempting fallback to JSON without image due to multipart parsing issue")
                     # Fallback to JSON without image
-                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, slippage_bps)
+                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, wallets, slippage_bps)
                 else:
                     # Re-raise other API errors
                     raise e
@@ -1074,7 +1142,7 @@ class PumpFunClient:
                     logger.warning(f"Multipart upload failed with buyAmountsSOL error: {str(e)}")
                     logger.info("Attempting fallback to JSON without image due to multipart parsing issue")
                     # Fallback to JSON without image
-                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, slippage_bps)
+                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, wallets, slippage_bps)
                 else:
                     # Re-raise non-buyAmountsSOL validation errors
                     raise e
@@ -1082,25 +1150,12 @@ class PumpFunClient:
             # Use JSON for token creation without image
             logger.info("Creating token without image using JSON request")
             try:
-                token_result = self._create_token_without_image(token_params, buy_amounts_dict, slippage_bps)
+                token_result = self._create_token_without_image(token_params, buy_amounts_dict, wallets, slippage_bps)
             except PumpFunApiError as e:
                 # Enhanced error handling for server-side wallet loading issues
                 error_msg = str(e).lower()
                 if "path" in error_msg and "undefined" in error_msg:
                     logger.error(f"Server-side wallet loading error detected: {str(e)}")
-                    
-                    # Try to ensure wallets are properly set up first
-                    try:
-                        wallet_status = self.verify_bundled_wallets_exist()
-                        if not wallet_status.get("wallets_exist", False):
-                            logger.warning("Bundled wallets not found on server, this may be the cause of the path error")
-                            # Return a more helpful error message
-                            raise PumpFunApiError(
-                                "Server-side wallet loading failed. Please ensure bundled wallets are created and "
-                                "properly configured on the API server before attempting token creation."
-                            )
-                    except Exception as wallet_check_error:
-                        logger.error(f"Failed to verify wallet status: {str(wallet_check_error)}")
                     
                     # Re-raise the original error with additional context
                     raise PumpFunApiError(
@@ -1157,7 +1212,7 @@ class PumpFunClient:
         return token_result
 
     def _create_token_with_image(self, token_params: TokenCreationParams, 
-                                buy_amounts_dict: Dict[str, float], slippage_bps: int,
+                                buy_amounts_dict: Dict[str, float], wallets: List[Dict[str, str]], slippage_bps: int,
                                 image_file_path: str) -> Dict[str, Any]:
         """
         Create token with image using multipart/form-data upload.
@@ -1165,6 +1220,7 @@ class PumpFunClient:
         Args:
             token_params: Token creation parameters
             buy_amounts_dict: Buy amounts dictionary
+            wallets: List of wallet dictionaries with 'name' and 'privateKey' fields
             slippage_bps: Slippage in basis points
             image_file_path: Path to image file
             
@@ -1189,6 +1245,12 @@ class PumpFunClient:
         # Validate the JSON before sending
         self._validate_buy_amounts_json(buy_amounts_json)
         
+        # Prepare wallets JSON string
+        wallets_json = json.dumps(wallets, separators=(',', ':'))
+        
+        # Validate wallets JSON
+        self._validate_wallets_json(wallets_json)
+        
         form_data = {
             'name': token_params.name,
             'symbol': token_params.symbol,
@@ -1199,6 +1261,7 @@ class PumpFunClient:
             'showName': 'true' if token_params.show_name else 'false',  # Exact boolean string format
             'initialSupplyAmount': token_params.initial_supply_amount,
             'buyAmountsSOL': buy_amounts_json,  # Validated JSON string
+            'wallets': wallets_json,  # New required field as JSON string
             'slippageBps': str(slippage_bps)
         }
         
@@ -1243,6 +1306,8 @@ class PumpFunClient:
                 for key, value in form_data.items():
                     if key == 'buyAmountsSOL':
                         logger.info(f"  {key}: {value} (type: {type(value).__name__}, length: {len(value)})")
+                    elif key == 'wallets':
+                        logger.info(f"  {key}: {value} (type: {type(value).__name__}, length: {len(value)})")
                     else:
                         logger.info(f"  {key}: {value} (type: {type(value).__name__})")
                 
@@ -1259,13 +1324,14 @@ class PumpFunClient:
             raise PumpFunApiError(f"Image upload failed: {str(e)}")
 
     def _create_token_without_image(self, token_params: TokenCreationParams, 
-                                   buy_amounts_dict: Dict[str, float], slippage_bps: int) -> Dict[str, Any]:
+                                   buy_amounts_dict: Dict[str, float], wallets: List[Dict[str, str]], slippage_bps: int) -> Dict[str, Any]:
         """
         Create token without image using JSON request.
         
         Args:
             token_params: Token creation parameters
             buy_amounts_dict: Buy amounts dictionary
+            wallets: List of wallet dictionaries with 'name' and 'privateKey' fields
             slippage_bps: Slippage in basis points
             
         Returns:
@@ -1283,6 +1349,7 @@ class PumpFunClient:
         data = {
             **transformed_token_params,
             "buyAmountsSOL": buy_amounts_dict,
+            "wallets": wallets,  # Include wallets directly as list for JSON request
             "slippageBps": slippage_bps
         }
         
@@ -1769,7 +1836,95 @@ class PumpFunClient:
                 "batch_trading",
                 "funding_operations"
             ]
-        } 
+        }
+
+    def create_token_example(self) -> Dict[str, Any]:
+        """
+        Example showing how to use the updated create_token_and_buy method.
+        This demonstrates the new pattern where wallet credentials are passed directly.
+        
+        Returns:
+            Dictionary with example usage instructions
+        """
+        example_code = '''
+# Example usage of the updated PumpFun client
+from ninjabot.bot.api.pumpfun_client import PumpFunClient, TokenCreationParams, BuyAmounts
+
+# Initialize client
+client = PumpFunClient()
+
+# Define token parameters
+token_params = TokenCreationParams(
+    name="My Awesome Token",
+    symbol="MAT", 
+    description="This is an awesome token for testing",
+    twitter="@mytoken",
+    telegram="@mytoken_chat",
+    website="https://mytoken.com"
+)
+
+# Define buy amounts
+buy_amounts = BuyAmounts(
+    dev_wallet_buy_sol=0.01,
+    first_bundled_wallet_1_buy_sol=0.005,
+    first_bundled_wallet_2_buy_sol=0.005,
+    first_bundled_wallet_3_buy_sol=0.005,
+    first_bundled_wallet_4_buy_sol=0.005
+)
+
+# IMPORTANT: Prepare wallet credentials with private keys
+wallets = [
+    {
+        "name": "DevWallet",
+        "privateKey": "your_dev_wallet_base58_private_key_here"
+    },
+    {
+        "name": "First Bundled Wallet 1",
+        "privateKey": "your_first_bundled_wallet_base58_private_key_here"
+    },
+    {
+        "name": "First Bundled Wallet 2", 
+        "privateKey": "your_second_bundled_wallet_base58_private_key_here"
+    }
+    # Add more wallets as needed...
+]
+
+# Create token with image
+try:
+    result = client.create_token_and_buy(
+        token_params=token_params,
+        buy_amounts=buy_amounts,
+        wallets=wallets,  # NEW: Required parameter
+        slippage_bps=2500,
+        image_file_path="path/to/token/image.png"  # Optional
+    )
+    
+    print(f"Token created successfully: {result['mintAddress']}")
+    print(f"Bundle ID: {result['bundleId']}")
+    
+except Exception as e:
+    print(f"Token creation failed: {e}")
+'''
+        
+        return {
+            "example_code": example_code,
+            "key_changes": [
+                "Wallet credentials must be passed directly to create_token_and_buy()",
+                "Each wallet must have 'name' and 'privateKey' fields",
+                "DevWallet must be included with creator private key",
+                "Buying wallets must be included with their private keys",
+                "Server no longer stores wallet files - everything is stateless"
+            ],
+            "required_wallet_fields": ["name", "privateKey"],
+            "minimum_wallets_needed": ["DevWallet", "First Bundled Wallet 1"],
+            "api_benefits": [
+                "Eliminates server-side wallet storage issues",
+                "Prevents path configuration errors",
+                "Enables truly stateless operation", 
+                "Improves security by not storing private keys server-side",
+                "Compatible with ephemeral container deployments"
+            ]
+        }
 
 if __name__ == "__main__":
     # Example usage and test of the updated buyAmountsSOL validation
@@ -1835,11 +1990,24 @@ if __name__ == "__main__":
             first_bundled_wallet_1_buy_sol=0.005
         )
         
+        # Example wallet credentials (replace with actual credentials)
+        example_wallets = [
+            {
+                "name": "DevWallet",
+                "privateKey": "base58_private_key_here_for_dev_wallet"
+            },
+            {
+                "name": "First Bundled Wallet 1", 
+                "privateKey": "base58_private_key_here_for_bundled_wallet"
+            }
+        ]
+        
         print("Token parameters prepared for enhanced error handling test")
         print(f"Token Name: {token_params.name}")
         print(f"Token Symbol: {token_params.symbol}")
         print(f"DevWallet Buy Amount: {buy_amounts.dev_wallet_buy_sol} SOL")
         print(f"First Bundled Wallet Buy Amount: {buy_amounts.first_bundled_wallet_1_buy_sol} SOL")
+        print(f"Number of wallets: {len(example_wallets)}")
         print("Note: This is a dry run - no actual API call will be made")
         
         # Test the JSON generation and validation
@@ -1850,7 +2018,12 @@ if __name__ == "__main__":
         }
         test_json = json.dumps(test_buy_amounts, separators=(',', ':'))
         client_test._validate_buy_amounts_json(test_json)
-        print(f"✓ Generated JSON validated successfully: {test_json}")
+        print(f"✓ Generated buyAmountsSOL JSON validated successfully: {test_json}")
+        
+        # Test wallets JSON validation
+        wallets_json = json.dumps(example_wallets, separators=(',', ':'))
+        client_test._validate_wallets_json(wallets_json)
+        print(f"✓ Generated wallets JSON validated successfully: {len(wallets_json)} characters")
         
     except Exception as e:
         print(f"Token parameter validation error: {e}")
@@ -1858,18 +2031,80 @@ if __name__ == "__main__":
     print("\n=== Solution Summary ===")
     print("✓ Enhanced JSON formatting using json.dumps() instead of f-strings")
     print("✓ Comprehensive buyAmountsSOL validation with detailed error messages")
+    print("✓ NEW: wallets parameter now passed directly with private keys")
+    print("✓ NEW: wallets JSON validation with duplicate name checking")
     print("✓ Fallback mechanism: multipart -> JSON when buyAmountsSOL fails")
     print("✓ Enhanced debugging logs for troubleshooting multipart issues")
     print("✓ Systematic error isolation following MONOCODE debugging principles")
     
     print("\n=== Root Cause Analysis ===")
-    print("Issue: buyAmountsSOL JSON string formatting inconsistencies")
-    print("Solution: Proper JSON serialization with validation and fallback")
-    print("Prevention: Pre-request validation and enhanced error logging")
+    print("Issue: Server-side wallet storage causing path errors")
+    print("Solution: Pass wallet credentials directly in API requests")
+    print("Prevention: Client-side wallet management with proper validation")
     
     print("\n=== Usage Instructions ===")
-    print("1. The client now automatically validates buyAmountsSOL before sending")
-    print("2. If multipart upload fails with buyAmountsSOL error, it falls back to JSON")
-    print("3. Enhanced logging provides detailed debugging information")
-    print("4. All JSON strings are now properly formatted using json.dumps()")
-    print("5. Validation catches format issues before they reach the API") 
+    print("1. The client now requires wallet credentials to be passed to create_token_and_buy()")
+    print("2. Wallets must include 'name' and 'privateKey' fields")
+    print("3. DevWallet and buying wallets must be included in the wallets list")
+    print("4. Both multipart and JSON requests now include wallet credentials")
+    print("5. Enhanced validation ensures wallet data integrity before sending") 
+    
+    # Test 4: New wallets parameter validation
+    print("\n=== Testing New Wallets Parameter Validation ===")
+    try:
+        client_test = PumpFunClient()
+        
+        # Test valid wallets
+        valid_wallets = [
+            {"name": "DevWallet", "privateKey": "5KJvsngHeMgenTuAidBDrNuGlNs5XdFPBcNbG8FqehQk9QKXcH" + "x" * 55},
+            {"name": "First Bundled Wallet 1", "privateKey": "5KJvsngHeMgenTuAidBDrNuGlNs5XdFPBcNbG8FqehQk9QKXcH" + "y" * 55}
+        ]
+        
+        valid_wallets_json = json.dumps(valid_wallets, separators=(',', ':'))
+        client_test._validate_wallets_json(valid_wallets_json)
+        print("✓ Valid wallets JSON passed validation")
+        
+        # Test duplicate wallet names
+        try:
+            duplicate_wallets = [
+                {"name": "DevWallet", "privateKey": "key1"},
+                {"name": "DevWallet", "privateKey": "key2"}  # Duplicate name
+            ]
+            duplicate_json = json.dumps(duplicate_wallets, separators=(',', ':'))
+            client_test._validate_wallets_json(duplicate_json)
+            print("✗ Duplicate wallet validation should have failed")
+        except PumpFunValidationError as e:
+            print(f"✓ Duplicate wallet names properly rejected: {e}")
+        
+        # Test missing fields
+        try:
+            missing_fields_wallets = [
+                {"name": "DevWallet"}  # Missing privateKey
+            ]
+            missing_json = json.dumps(missing_fields_wallets, separators=(',', ':'))
+            client_test._validate_wallets_json(missing_json)
+            print("✗ Missing fields validation should have failed")
+        except PumpFunValidationError as e:
+            print(f"✓ Missing wallet fields properly rejected: {e}")
+        
+    except Exception as e:
+        print(f"Wallets validation test error: {e}")
+    
+    print("\n=== NEW API INTEGRATION SUMMARY ===")
+    print("✓ Wallet credentials now passed directly to API (no server storage)")
+    print("✓ Enhanced JSON validation for both buyAmountsSOL and wallets")
+    print("✓ Duplicate wallet name detection prevents configuration errors")
+    print("✓ Private key validation warns of suspicious lengths")
+    print("✓ Both multipart (with image) and JSON (without image) requests supported")
+    print("✓ Fallback mechanism maintained for backward compatibility")
+    print("✓ Stateless operation eliminates server-side path configuration issues")
+    
+    print("\n=== MIGRATION GUIDE ===")
+    print("OLD: client.create_token_and_buy(token_params, buy_amounts)")
+    print("NEW: client.create_token_and_buy(token_params, buy_amounts, wallets)")
+    print("")
+    print("Required wallets format:")
+    print('[{"name": "DevWallet", "privateKey": "base58_key"},')
+    print(' {"name": "First Bundled Wallet 1", "privateKey": "base58_key"}]')
+    print("")
+    print("Benefits: No more server-side wallet storage, improved security, stateless operation")

@@ -51,6 +51,8 @@ from bot.utils.wallet_storage import airdrop_wallet_storage, bundled_wallet_stor
 import os
 import glob
 import json
+import base64
+import base58
 
 
 def get_user(update: Update, context: CallbackContext):
@@ -1947,13 +1949,46 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             first_bundled_wallet_4_buy_sol=first_bundled_amount
         )
         
-        logger.info(f"Creating final token with configured buy amounts for user {user.id}")
+        # Load wallet credentials from bundled wallet file (with base64 -> base58 conversion)
+        wallets = load_wallet_credentials_from_bundled_file(user.id)
+        
+        logger.info(f"Loaded wallet credentials for user {user.id}: {len(wallets)} wallets from bundled file")
+        
+        if not wallets:
+            raise Exception("No wallet credentials found in bundled wallet file. Please ensure bundled wallets are properly created.")
+        
+        # Filter to only include the wallets we need for token creation
+        # DevWallet + First Bundled Wallet 1-4 (up to 5 wallets total)
+        required_wallet_names = ["DevWallet", "First Bundled Wallet 1", "First Bundled Wallet 2", 
+                                "First Bundled Wallet 3", "First Bundled Wallet 4"]
+        
+        filtered_wallets = []
+        for wallet in wallets:
+            if wallet["name"] in required_wallet_names:
+                filtered_wallets.append(wallet)
+        
+        wallets = filtered_wallets
+        
+        # Ensure we have at least DevWallet and First Bundled Wallet 1
+        wallet_names = [wallet["name"] for wallet in wallets]
+        if "DevWallet" not in wallet_names:
+            raise Exception("DevWallet not found in bundled wallet file")
+        if "First Bundled Wallet 1" not in wallet_names:
+            raise Exception("First Bundled Wallet 1 not found in bundled wallet file")
+        
+        if len(wallets) < 2:  # Need at least DevWallet + 1 bundled wallet
+            raise Exception("At least one bundled wallet private key is required")
+        
+        # Log wallet names for debugging (without private keys)
+        wallet_names = [wallet["name"] for wallet in wallets]
+        logger.info(f"Creating final token with configured buy amounts and {len(wallets)} wallets for user {user.id}: {wallet_names}")
         start_time = time.time()
         
         # Create token and execute buys with user-configured amounts and image
         token_result = pumpfun_client.create_token_and_buy(
             token_params=token_creation_params,
             buy_amounts=buy_amounts_obj,
+            wallets=wallets,  # NEW: Required wallets parameter
             image_file_path=image_file_path if has_custom_image else None
         )
         
@@ -2976,3 +3011,97 @@ async def check_bundled_wallets_funding_status(pumpfun_client, bundled_wallets_c
             "funded_count": 0,
             "error": str(e)
         }
+
+def convert_base64_to_base58(base64_key: str) -> str:
+    """
+    Convert a base64 encoded private key to base58 format.
+    
+    Args:
+        base64_key: Base64 encoded private key
+        
+    Returns:
+        Base58 encoded private key
+    """
+    try:
+        # Decode base64 to bytes
+        key_bytes = base64.b64decode(base64_key)
+        # Encode to base58
+        base58_key = base58.b58encode(key_bytes).decode('utf-8')
+        return base58_key
+    except Exception as e:
+        logger.error(f"Failed to convert base64 to base58: {e}")
+        raise ValueError(f"Invalid base64 private key: {e}")
+
+def load_wallet_credentials_from_bundled_file(user_id: int) -> List[Dict[str, str]]:
+    """
+    Load wallet credentials from the bundled wallet file and convert to API format.
+    
+    Args:
+        user_id: User ID to find the bundled wallet file
+        
+    Returns:
+        List of wallet dictionaries with name and privateKey in base58 format
+    """
+    try:
+        # Find the bundled wallet file for this user
+        bundled_wallets_dir = os.path.join("ninjabot", "data", "bundled_wallets")
+        if not os.path.exists(bundled_wallets_dir):
+            bundled_wallets_dir = os.path.join("data", "bundled_wallets")
+        
+        # Find the file for this user
+        bundled_file_path = None
+        if os.path.exists(bundled_wallets_dir):
+            # Find all files for this user and select the most recent one
+            user_files = []
+            for filename in os.listdir(bundled_wallets_dir):
+                if filename.startswith(f"bundled_{user_id}_") and filename.endswith(".json"):
+                    # Extract timestamp from filename
+                    try:
+                        timestamp_str = filename.split('_')[2]  # bundled_userid_timestamp_hash.json
+                        timestamp = int(timestamp_str)
+                        full_path = os.path.join(bundled_wallets_dir, filename)
+                        user_files.append((timestamp, full_path))
+                    except (IndexError, ValueError):
+                        logger.warning(f"Unable to parse timestamp from filename: {filename}")
+                        continue
+            
+            if user_files:
+                # Sort by timestamp (descending) and select the most recent
+                user_files.sort(key=lambda x: x[0], reverse=True)
+                bundled_file_path = user_files[0][1]
+                logger.info(f"Selected most recent bundled wallet file: {bundled_file_path}")
+        
+        if not bundled_file_path or not os.path.exists(bundled_file_path):
+            logger.error(f"Bundled wallet file not found for user {user_id}")
+            return []
+        
+        # Load the bundled wallet file
+        with open(bundled_file_path, 'r') as f:
+            bundled_data = json.load(f)
+        
+        # Extract wallet credentials and convert to API format
+        wallets = []
+        wallet_data = bundled_data.get("data", [])
+        
+        for wallet in wallet_data:
+            wallet_name = wallet.get("name", "")
+            base64_private_key = wallet.get("privateKey", "")
+            
+            if wallet_name and base64_private_key:
+                # Convert base64 to base58
+                base58_private_key = convert_base64_to_base58(base64_private_key)
+                
+                # Add to wallets list
+                wallets.append({
+                    "name": wallet_name,
+                    "privateKey": base58_private_key
+                })
+                
+                logger.info(f"Loaded wallet credential for: {wallet_name}")
+        
+        logger.info(f"Successfully loaded {len(wallets)} wallet credentials from bundled file")
+        return wallets
+        
+    except Exception as e:
+        logger.error(f"Failed to load wallet credentials from bundled file: {e}")
+        return []
