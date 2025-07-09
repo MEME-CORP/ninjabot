@@ -1558,18 +1558,46 @@ def format_wallet_balance_result_message(wallet_address: str, current_balance: f
     
     return message
 
-def format_wallet_funding_required_message(airdrop_wallet: str, bundled_wallets_count: int) -> str:
+def format_wallet_funding_required_message(airdrop_wallet: str, bundled_wallets_count: int, buy_amounts: Dict[str, float] = None) -> str:
     """
     Format message explaining bundled wallet funding requirement.
+    Now uses proper API minimum balance requirements.
     
     Args:
         airdrop_wallet: The airdrop wallet address
         bundled_wallets_count: Number of bundled wallets to fund
+        buy_amounts: Dictionary of buy amounts for proper calculation
         
     Returns:
         Formatted message string
     """
     short_wallet = f"{airdrop_wallet[:8]}...{airdrop_wallet[-8:]}" if len(airdrop_wallet) > 16 else airdrop_wallet
+    
+    # Calculate proper funding requirements per API documentation
+    if buy_amounts:
+        dev_wallet_buy_amount = buy_amounts.get("DevWallet", 0.01)
+        first_bundled_buy_amount = buy_amounts.get("First Bundled Wallets", 0.01)
+        
+        # API requirements: DevWallet (tipper): 0.055 + buy_amount, Other wallets: 0.025 + buy_amount
+        dev_wallet_required = 0.055 + dev_wallet_buy_amount
+        bundled_wallet_required = 0.025 + first_bundled_buy_amount
+        
+        # Calculate total funding needed (1 DevWallet + (count-1) bundled wallets)
+        total_needed = dev_wallet_required + (bundled_wallets_count - 1) * bundled_wallet_required
+        
+        funding_details = (
+            f"**API Requirements:**\n"
+            f"• DevWallet: {dev_wallet_required:.4f} SOL (0.055 + {dev_wallet_buy_amount:.4f} buy amount)\n"
+            f"• Bundled wallets: {bundled_wallet_required:.4f} SOL each (0.025 + {first_bundled_buy_amount:.4f} buy amount)\n\n"
+            f"**Total needed:** {total_needed:.4f} SOL\n"
+        )
+    else:
+        # Fallback for backward compatibility
+        total_needed = bundled_wallets_count * 0.035  # Conservative estimate
+        funding_details = (
+            f"**Estimated funding:** ~0.035 SOL per wallet\n"
+            f"**Total needed:** ~{total_needed:.3f} SOL\n"
+        )
     
     return (
         f"💰 **Fund Bundled Wallets**\n\n"
@@ -1577,11 +1605,10 @@ def format_wallet_funding_required_message(airdrop_wallet: str, bundled_wallets_
         f"**Bundled Wallets:** {bundled_wallets_count}\n\n"
         f"Before creating your token, we need to fund your bundled wallets with SOL.\n\n"
         f"**Why funding is needed:**\n"
-        f"• Bundled wallets need SOL for transaction fees\n"
-        f"• Gas fees for token purchases\n"
-        f"• Rent for token accounts\n\n"
-        f"**Recommended funding:** 0.01 SOL per wallet\n"
-        f"**Total needed:** {bundled_wallets_count * 0.01:.3f} SOL\n\n"
+        f"• DevWallet needs higher balance as transaction tipper\n"
+        f"• All wallets need SOL for transaction fees and Jito tips\n"
+        f"• Token purchase amounts require additional SOL balance\n\n"
+        f"{funding_details}\n"
         f"💡 This will be deducted from your airdrop wallet balance."
     )
 

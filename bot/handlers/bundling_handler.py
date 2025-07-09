@@ -1269,6 +1269,7 @@ async def edit_buy_amounts(update: Update, context: CallbackContext) -> int:
 async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
     """
     Check wallet balances with corrected flow: bundled wallets first, then airdrop wallet.
+    Now uses proper API minimum balance requirements.
     """
     user = update.callback_query.from_user
     query = update.callback_query
@@ -1286,32 +1287,94 @@ async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
         )
         return ConversationState.ACTIVITY_SELECTION
     
-    # Calculate total funding needed per bundled wallet
-    total_per_wallet = sum([
-        buy_amounts.get("first_bundled_wallet_1_buy_sol", 0),
-        buy_amounts.get("first_bundled_wallet_2_buy_sol", 0), 
-        buy_amounts.get("first_bundled_wallet_3_buy_sol", 0),
-        buy_amounts.get("first_bundled_wallet_4_buy_sol", 0)
-    ]) / 4.0  # Average amount per wallet
+    # Calculate individual buy amounts per wallet
+    dev_wallet_buy_amount = buy_amounts.get("DevWallet", 0.01)
+    first_bundled_buy_amount = buy_amounts.get("First Bundled Wallets", 0.01)
     
-    # Add buffer for transaction fees (0.002 SOL per wallet)
-    required_per_wallet = total_per_wallet + 0.002
+    # Calculate required balances per API documentation:
+    # - DevWallet (tipper): 0.055 SOL minimum + buy amount
+    # - Other wallets: 0.025 SOL minimum + buy amount
+    dev_wallet_required = 0.055 + dev_wallet_buy_amount
+    bundled_wallet_required = 0.025 + first_bundled_buy_amount
     
     await query.edit_message_text("🔍 **Checking Bundled Wallet Balances**...", parse_mode=ParseMode.MARKDOWN)
     
     # STEP 1: Check bundled wallets first
     try:
-        bundled_wallets_status = await check_bundled_wallets_funding_status(
-            pumpfun_client, bundled_wallets_count, required_per_wallet
-        )
+        # Load bundled wallet data to check individual wallet balances
+        bundled_wallets_data = load_bundled_wallets_from_storage()
         
-        if bundled_wallets_status.get("all_funded", False):
+        if not bundled_wallets_data:
+            raise Exception("No bundled wallets found in local storage")
+        
+        funded_count = 0
+        total_wallets = len(bundled_wallets_data)
+        insufficient_wallets = []
+        
+        logger.info(f"Checking SOL balance for {total_wallets} bundled wallets with API requirements")
+        
+        # Check each wallet's SOL balance with proper requirements
+        for wallet in bundled_wallets_data:
+            wallet_address = wallet.get("publicKey")
+            wallet_name = wallet.get("name", "Unknown")
+            
+            if not wallet_address:
+                continue
+                
+            try:
+                # Use enhanced SOL balance endpoint
+                balance_response = pumpfun_client.get_wallet_sol_balance(wallet_address)
+                
+                # Extract SOL balance from enhanced response format
+                sol_balance = 0
+                if "data" in balance_response and "sol" in balance_response["data"]:
+                    sol_balance = balance_response["data"]["sol"].get("balance", 0)
+                elif "data" in balance_response:
+                    # Fallback for legacy format
+                    sol_balance = balance_response["data"].get("balance", 0)
+                
+                # Determine required balance based on wallet role
+                if wallet_name == "DevWallet":
+                    required_balance = dev_wallet_required
+                    logger.info(f"Wallet {wallet_name} ({wallet_address[:8]}...): {sol_balance:.6f} SOL (DevWallet requires {required_balance:.6f} SOL)")
+                else:
+                    required_balance = bundled_wallet_required
+                    logger.info(f"Wallet {wallet_name} ({wallet_address[:8]}...): {sol_balance:.6f} SOL (Bundled wallet requires {required_balance:.6f} SOL)")
+                
+                if sol_balance >= required_balance:
+                    funded_count += 1
+                else:
+                    insufficient_wallets.append({
+                        "name": wallet_name,
+                        "address": wallet_address[:8] + "...",
+                        "current": sol_balance,
+                        "required": required_balance,
+                        "shortfall": required_balance - sol_balance
+                    })
+                    
+            except Exception as e:
+                logger.error(f"Error checking balance for wallet {wallet_name}: {e}")
+                insufficient_wallets.append({
+                    "name": wallet_name,
+                    "address": wallet_address[:8] + "..." if wallet_address else "Unknown",
+                    "current": 0,
+                    "required": bundled_wallet_required,
+                    "shortfall": bundled_wallet_required,
+                    "error": str(e)
+                })
+        
+        all_funded = funded_count == total_wallets
+        
+        logger.info(f"Bundled wallet funding status: {funded_count}/{total_wallets} wallets funded")
+        
+        if all_funded:
             # All bundled wallets have sufficient funds
             await context.bot.send_message(
                 chat_id=user.id,
                 text=f"✅ **All Bundled Wallets Ready**\n\n"
-                     f"All {bundled_wallets_count} bundled wallets have sufficient SOL "
-                     f"({required_per_wallet:.4f} SOL each required).\n\n"
+                     f"All {total_wallets} bundled wallets have sufficient SOL.\n\n"
+                     f"• DevWallet: {dev_wallet_required:.4f} SOL required\n"
+                     f"• Bundled wallets: {bundled_wallet_required:.4f} SOL each required\n\n"
                      f"Ready to proceed with token creation!",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup([
@@ -1321,16 +1384,26 @@ async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
             )
             return ConversationState.WALLET_FUNDING_PROGRESS
         
-        # Some bundled wallets need funding
-        funded_count = bundled_wallets_status.get("funded_count", 0)
-        total_funding_needed = (bundled_wallets_count - funded_count) * required_per_wallet
+        # Some bundled wallets need funding - calculate total needed
+        total_funding_needed = sum(wallet["shortfall"] for wallet in insufficient_wallets)
+        
+        # Create detailed funding message
+        funding_details = f"⚠️ **Bundled Wallets Need Funding**\n\n"
+        funding_details += f"Ready wallets: {funded_count}/{total_wallets}\n"
+        funding_details += f"Total funding needed: {total_funding_needed:.4f} SOL\n\n"
+        funding_details += "**Insufficient wallets:**\n"
+        
+        for wallet in insufficient_wallets[:5]:  # Show first 5 to avoid message length issues
+            funding_details += f"• {wallet['name']}: {wallet['current']:.4f} SOL (need {wallet['required']:.4f})\n"
+        
+        if len(insufficient_wallets) > 5:
+            funding_details += f"• ... and {len(insufficient_wallets) - 5} more wallets\n"
+            
+        funding_details += f"\nChecking airdrop wallet balance..."
         
         await context.bot.send_message(
             chat_id=user.id,
-            text=f"⚠️ **Bundled Wallets Need Funding**\n\n"
-                 f"Ready wallets: {funded_count}/{bundled_wallets_count}\n"
-                 f"Total funding needed: {total_funding_needed:.4f} SOL\n\n"
-                 f"Checking airdrop wallet balance...",
+            text=funding_details,
             parse_mode=ParseMode.MARKDOWN
         )
         
@@ -1343,7 +1416,8 @@ async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
                  f"Proceeding to check airdrop wallet...",
             parse_mode=ParseMode.MARKDOWN
         )
-        total_funding_needed = bundled_wallets_count * required_per_wallet
+        # Estimate total funding needed based on wallet count and requirements
+        total_funding_needed = (dev_wallet_required + (bundled_wallets_count - 1) * bundled_wallet_required)
     
     # STEP 2: Check airdrop wallet balance
     try:
@@ -1354,8 +1428,8 @@ async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
         balance_response = pumpfun_client.get_wallet_balance(airdrop_wallet_address)
         current_balance = balance_response.get("data", {}).get("balance", 0)
         
-        # Add buffer for transaction fees
-        total_needed_with_buffer = total_funding_needed + 0.01  # Extra buffer for fees
+        # Add buffer for transaction fees (0.01 SOL for transfers)
+        total_needed_with_buffer = total_funding_needed + 0.01
         
         if current_balance >= total_needed_with_buffer:
             # Airdrop wallet has sufficient funds
@@ -1381,6 +1455,9 @@ async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
                      f"Current balance: {current_balance:.4f} SOL\n"
                      f"Required: {total_needed_with_buffer:.4f} SOL\n"
                      f"Shortfall: {shortfall:.4f} SOL\n\n"
+                     f"**API Requirements:**\n"
+                     f"• DevWallet needs: {dev_wallet_required:.4f} SOL\n"
+                     f"• Bundled wallets need: {bundled_wallet_required:.4f} SOL each\n\n"
                      f"Please fund your airdrop wallet with at least {shortfall:.4f} SOL.",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup([
@@ -1426,6 +1503,7 @@ async def fund_bundled_wallets_now(update: Update, context: CallbackContext) -> 
         pumpfun_client = session_manager.get_session_value(user.id, "pumpfun_client")
         bundled_wallets_count = session_manager.get_session_value(user.id, "bundled_wallets_count")
         airdrop_wallet = session_manager.get_session_value(user.id, "airdrop_wallet_address")
+        buy_amounts = session_manager.get_session_value(user.id, "buy_amounts")
         
         if not all([pumpfun_client, bundled_wallets_count, airdrop_wallet]):
             raise Exception("Missing required session data for wallet funding")
@@ -1437,7 +1515,7 @@ async def fund_bundled_wallets_now(update: Update, context: CallbackContext) -> 
         ])
         
         await query.edit_message_text(
-            format_wallet_funding_required_message(airdrop_wallet, bundled_wallets_count),
+            format_wallet_funding_required_message(airdrop_wallet, bundled_wallets_count, buy_amounts),
             reply_markup=keyboard,
             parse_mode=ParseMode.MARKDOWN
         )
@@ -2934,14 +3012,15 @@ async def back_to_bundled_setup(update: Update, context: CallbackContext) -> int
         
         return ConversationState.BUNDLED_WALLETS_COUNT
 
-async def check_bundled_wallets_funding_status(pumpfun_client, bundled_wallets_count: int, required_per_wallet: float) -> Dict[str, Any]:
+async def check_bundled_wallets_funding_status(pumpfun_client, bundled_wallets_count: int, buy_amounts: Dict[str, float]) -> Dict[str, Any]:
     """
     Check if bundled wallets have sufficient funding by checking individual wallet balances.
+    Now uses proper API minimum balance requirements.
     
     Args:
         pumpfun_client: PumpFun client instance
         bundled_wallets_count: Number of bundled wallets
-        required_per_wallet: Required SOL per wallet
+        buy_amounts: Dictionary containing buy amounts for each wallet type
         
     Returns:
         Dictionary with funding status
@@ -2957,11 +3036,21 @@ async def check_bundled_wallets_funding_status(pumpfun_client, bundled_wallets_c
                 "error": "No bundled wallets found in local storage"
             }
         
+        # Calculate required balances per API documentation:
+        # - DevWallet (tipper): 0.055 SOL minimum + buy amount  
+        # - Other wallets: 0.025 SOL minimum + buy amount
+        dev_wallet_buy_amount = buy_amounts.get("DevWallet", 0.01)
+        first_bundled_buy_amount = buy_amounts.get("First Bundled Wallets", 0.01)
+        
+        dev_wallet_required = 0.055 + dev_wallet_buy_amount
+        bundled_wallet_required = 0.025 + first_bundled_buy_amount
+        
         funded_count = 0
         total_wallets = len(bundled_wallets_data)
         balance_check_errors = []
+        insufficient_wallets = []
         
-        logger.info(f"Checking SOL balance for {total_wallets} bundled wallets")
+        logger.info(f"Checking SOL balance for {total_wallets} bundled wallets with API requirements")
         
         # Check each wallet's SOL balance using enhanced API endpoint
         for wallet in bundled_wallets_data:
@@ -2983,14 +3072,36 @@ async def check_bundled_wallets_funding_status(pumpfun_client, bundled_wallets_c
                     # Fallback for legacy format
                     sol_balance = balance_response["data"].get("balance", 0)
                 
-                logger.info(f"Wallet {wallet_name} ({wallet_address[:8]}...): {sol_balance:.6f} SOL")
+                # Determine required balance based on wallet role
+                if wallet_name == "DevWallet":
+                    required_balance = dev_wallet_required
+                    logger.info(f"Wallet {wallet_name} ({wallet_address[:8]}...): {sol_balance:.6f} SOL (DevWallet requires {required_balance:.6f} SOL)")
+                else:
+                    required_balance = bundled_wallet_required
+                    logger.info(f"Wallet {wallet_name} ({wallet_address[:8]}...): {sol_balance:.6f} SOL (Bundled wallet requires {required_balance:.6f} SOL)")
                 
-                if sol_balance >= required_per_wallet:
+                if sol_balance >= required_balance:
                     funded_count += 1
+                else:
+                    insufficient_wallets.append({
+                        "name": wallet_name,
+                        "address": wallet_address,
+                        "current": sol_balance,
+                        "required": required_balance,
+                        "shortfall": required_balance - sol_balance
+                    })
                     
             except Exception as e:
                 logger.error(f"Error checking balance for wallet {wallet_name}: {e}")
                 balance_check_errors.append(f"{wallet_name}: {str(e)}")
+                insufficient_wallets.append({
+                    "name": wallet_name,
+                    "address": wallet_address,
+                    "current": 0,
+                    "required": bundled_wallet_required if wallet_name != "DevWallet" else dev_wallet_required,
+                    "shortfall": bundled_wallet_required if wallet_name != "DevWallet" else dev_wallet_required,
+                    "error": str(e)
+                })
         
         all_funded = funded_count == total_wallets
         
@@ -3000,7 +3111,9 @@ async def check_bundled_wallets_funding_status(pumpfun_client, bundled_wallets_c
             "all_funded": all_funded,
             "funded_count": funded_count,
             "total_wallets": total_wallets,
-            "required_per_wallet": required_per_wallet,
+            "dev_wallet_required": dev_wallet_required,
+            "bundled_wallet_required": bundled_wallet_required,
+            "insufficient_wallets": insufficient_wallets,
             "balance_check_errors": balance_check_errors if balance_check_errors else None
         }
         
