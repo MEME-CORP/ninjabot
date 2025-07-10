@@ -440,10 +440,16 @@ class PumpFunClient:
         if not wallets:
             raise PumpFunValidationError("Wallets list cannot be empty")
             
-        # Validate wallet format
+        # Validate wallet format and ensure both field names for server compatibility
         for wallet in wallets:
-            if 'name' not in wallet or 'privateKey' not in wallet:
-                raise PumpFunValidationError("Each wallet must have 'name' and 'privateKey' fields")
+            if 'name' not in wallet or ('privateKey' not in wallet and 'privateKeyBs58' not in wallet):
+                raise PumpFunValidationError("Each wallet must have 'name' and 'privateKey' or 'privateKeyBs58' fields")
+            
+            # Ensure both field names exist due to server validation/processing inconsistency
+            private_key_value = wallet.get('privateKey') or wallet.get('privateKeyBs58')
+            if private_key_value:
+                wallet['privateKey'] = private_key_value        # For processing layer
+                wallet['privateKeyBs58'] = private_key_value    # For validation layer
                 
         endpoint = "/api/wallets/bundled/import"
         data = {"wallets": wallets}
@@ -618,18 +624,25 @@ class PumpFunClient:
         
         return diagnostics
 
-    def return_funds_to_mother(self, leave_dust: bool = False) -> Dict[str, Any]:
+    def return_funds_to_mother(self, mother_wallet_public_key: str, leave_dust: bool = False) -> Dict[str, Any]:
         """
         Return funds from bundled wallets to the airdrop wallet.
         
         Args:
+            mother_wallet_public_key: Public key of the mother (airdrop) wallet in base58 format
             leave_dust: Whether to leave small amounts in wallets
             
         Returns:
             Dictionary with return transaction results
         """
+        if not mother_wallet_public_key:
+            raise PumpFunValidationError("Mother wallet public key cannot be empty")
+            
         endpoint = "/api/wallets/return-funds"
-        data = {"leaveDust": leave_dust}
+        data = {
+            "motherWalletPublicKeyBs58": mother_wallet_public_key,
+            "leaveDust": leave_dust
+        }
         
         return self._make_request_with_retry("POST", endpoint, json=data)
 
@@ -1040,11 +1053,12 @@ class PumpFunClient:
             # Check required fields for each wallet
             wallet_names = []
             for wallet_data in parsed:
-                if 'name' not in wallet_data or 'privateKey' not in wallet_data:
-                    raise PumpFunValidationError("Each wallet in the 'wallets' array must have 'name' and 'privateKey' fields")
+                if 'name' not in wallet_data or ('privateKey' not in wallet_data and 'privateKeyBs58' not in wallet_data):
+                    raise PumpFunValidationError("Each wallet in the 'wallets' array must have 'name' and 'privateKey' or 'privateKeyBs58' fields")
                 
-                if not isinstance(wallet_data['name'], str) or not isinstance(wallet_data['privateKey'], str):
-                    raise PumpFunValidationError("Wallet 'name' and 'privateKey' must be strings")
+                private_key_field = wallet_data.get('privateKey') or wallet_data.get('privateKeyBs58')
+                if not isinstance(wallet_data['name'], str) or not isinstance(private_key_field, str):
+                    raise PumpFunValidationError("Wallet 'name' and private key field must be strings")
                 
                 # Check for duplicate names
                 if wallet_data['name'] in wallet_names:
@@ -1052,8 +1066,8 @@ class PumpFunClient:
                 wallet_names.append(wallet_data['name'])
                 
                 # Basic validation for private key (e.g., length)
-                if len(wallet_data['privateKey']) < 80:  # More flexible length check
-                    logger.warning(f"Wallet private key length suspicious: {len(wallet_data['privateKey'])}")
+                if len(private_key_field) < 80:  # More flexible length check
+                    logger.warning(f"Wallet private key length suspicious: {len(private_key_field)}")
                 
                 logger.info(f"Wallet JSON validation passed for: {wallet_data['name']}")
             
@@ -1089,8 +1103,14 @@ class PumpFunClient:
             raise PumpFunValidationError("Wallets list cannot be empty")
         
         for wallet in wallets:
-            if 'name' not in wallet or 'privateKey' not in wallet:
-                raise PumpFunValidationError("Each wallet must have 'name' and 'privateKey' fields")
+            if 'name' not in wallet or ('privateKey' not in wallet and 'privateKeyBs58' not in wallet):
+                raise PumpFunValidationError("Each wallet must have 'name' and 'privateKey' or 'privateKeyBs58' fields")
+            
+            # Ensure both field names exist due to server validation/processing inconsistency
+            private_key_value = wallet.get('privateKey') or wallet.get('privateKeyBs58')
+            if private_key_value:
+                wallet['privateKey'] = private_key_value        # For processing layer
+                wallet['privateKeyBs58'] = private_key_value    # For validation layer
         
         endpoint = "/api/pump/create-and-buy"
         
@@ -1872,22 +1892,22 @@ buy_amounts = BuyAmounts(
     first_bundled_wallet_4_buy_sol=0.005
 )
 
-# IMPORTANT: Prepare wallet credentials with private keys
-wallets = [
-    {
-        "name": "DevWallet",
-        "privateKey": "your_dev_wallet_base58_private_key_here"
-    },
-    {
-        "name": "First Bundled Wallet 1",
-        "privateKey": "your_first_bundled_wallet_base58_private_key_here"
-    },
-    {
-        "name": "First Bundled Wallet 2", 
-        "privateKey": "your_second_bundled_wallet_base58_private_key_here"
-    }
-    # Add more wallets as needed...
-]
+        # IMPORTANT: Prepare wallet credentials with private keys
+        wallets = [
+            {
+                "name": "DevWallet",
+                "privateKeyBs58": "your_dev_wallet_base58_private_key_here"
+            },
+            {
+                "name": "First Bundled Wallet 1",
+                "privateKeyBs58": "your_first_bundled_wallet_base58_private_key_here"
+            },
+            {
+                "name": "First Bundled Wallet 2", 
+                "privateKeyBs58": "your_second_bundled_wallet_base58_private_key_here"
+            }
+            # Add more wallets as needed...
+        ]
 
 # Create token with image
 try:
@@ -2104,7 +2124,7 @@ if __name__ == "__main__":
     print("NEW: client.create_token_and_buy(token_params, buy_amounts, wallets)")
     print("")
     print("Required wallets format:")
-    print('[{"name": "DevWallet", "privateKey": "base58_key"},')
-    print(' {"name": "First Bundled Wallet 1", "privateKey": "base58_key"}]')
+    print('[{"name": "DevWallet", "privateKeyBs58": "base58_key"},')
+    print(' {"name": "First Bundled Wallet 1", "privateKeyBs58": "base58_key"}]')
     print("")
     print("Benefits: No more server-side wallet storage, improved security, stateless operation")

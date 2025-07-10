@@ -1684,3 +1684,143 @@ def format_wallet_funding_complete_message(results: Dict[str, Any]) -> str:
         )
     
     return message
+
+
+def format_return_funds_confirmation_message(wallet_counts: Dict[str, int]) -> str:
+    """
+    Format return funds confirmation message.
+    
+    Args:
+        wallet_counts: Dictionary with wallet type counts
+        
+    Returns:
+        Formatted confirmation message string
+    """
+    total_wallets = sum(wallet_counts.values())
+    
+    message = f"💰 **Return Funds to Mother Wallet**\n\n"
+    message += f"This will return all SOL from your wallets back to the airdrop (mother) wallet.\n\n"
+    message += f"**Wallets to be cleared:**\n"
+    
+    for wallet_type, count in wallet_counts.items():
+        if count > 0:
+            message += f"• {wallet_type}: {count} wallet{'s' if count > 1 else ''}\n"
+    
+    message += f"\n**Total wallets:** {total_wallets}\n\n"
+    message += f"⚠️ **Important:** This operation will:\n"
+    message += f"• Transfer all SOL balances to the airdrop wallet\n"
+    message += f"• Leave only dust amounts (~0.001 SOL) in wallets\n"
+    message += f"• Clear wallets for fresh funding later\n\n"
+    message += f"Do you want to proceed with returning funds?"
+    
+    return message
+
+
+def format_return_funds_progress_message(progress_data: Dict[str, Any]) -> str:
+    """
+    Format return funds progress message.
+    
+    Args:
+        progress_data: Dictionary containing progress information
+        
+    Returns:
+        Formatted progress message string
+    """
+    processed = progress_data.get("processed", 0)
+    total = progress_data.get("total", 0)
+    successful = progress_data.get("successful", 0)
+    failed = progress_data.get("failed", 0)
+    current_operation = progress_data.get("current_operation", "Processing...")
+    
+    message = f"🔄 **Returning Funds to Mother Wallet**\n\n"
+    message += f"📊 **Progress:** {processed}/{total} wallets processed\n"
+    message += f"✅ **Successful:** {successful}\n"
+    message += f"❌ **Failed:** {failed}\n\n"
+    message += f"🔧 **Current:** {current_operation}\n\n"
+    
+    if total > 0:
+        progress_percent = (processed / total) * 100
+        message += f"📈 **Progress:** {progress_percent:.1f}% complete\n"
+        
+        # Add progress bar
+        filled_blocks = int(progress_percent // 10)
+        empty_blocks = 10 - filled_blocks
+        progress_bar = "█" * filled_blocks + "░" * empty_blocks
+        message += f"[{progress_bar}]"
+    
+    return message
+
+
+def format_return_funds_results_message(results: Dict[str, Any]) -> str:
+    """
+    Format return funds completion results message.
+    
+    Args:
+        results: Dictionary containing return funds results
+        
+    Returns:
+        Formatted results message string
+    """
+    successful = results.get("successful_returns", 0)
+    failed = results.get("failed_returns", 0)
+    total = successful + failed
+    total_returned = results.get("total_sol_returned", 0)
+    
+    message = f"✅ **Funds Return Complete**\n\n"
+    
+    if total > 0:
+        message += f"📊 **Summary:**\n"
+        message += f"• Total wallets processed: {total}\n"
+        message += f"• Successful returns: {successful}\n"
+        message += f"• Failed returns: {failed}\n"
+        message += f"• Success rate: {(successful/total)*100:.1f}%\n\n"
+    
+    if total_returned > 0:
+        message += f"💰 **Total SOL returned:** {total_returned:.6f} SOL\n"
+    
+    if results.get("bundle_id"):
+        message += f"📦 **Bundle ID:** `{results['bundle_id']}`\n"
+    
+    if results.get("transaction_signatures"):
+        signatures = results["transaction_signatures"]
+        message += f"\n📝 **Transaction Signatures:**\n"
+        for i, sig in enumerate(signatures[:3]):  # Show first 3
+            message += f"• `{sig[:8]}...{sig[-8:]}`\n"
+        if len(signatures) > 3:
+            message += f"• ... and {len(signatures) - 3} more\n"
+    
+    message += f"\n🎉 **Your airdrop wallet is now ready for fresh funding!**"
+    
+    return message
+
+
+def format_return_funds_option_message(current_balance: float, required_balance: float) -> str:
+    """
+    Format message offering return funds option during balance check.
+    
+    Args:
+        current_balance: Current airdrop wallet balance
+        required_balance: Required balance for token creation
+        
+    Returns:
+        Formatted option message string
+    """
+    message = f"💰 **Wallet Balance Options**\n\n"
+    message += f"**Current airdrop wallet balance:** {current_balance:.6f} SOL\n"
+    message += f"**Required for token creation:** {required_balance:.6f} SOL\n\n"
+    
+    if current_balance < required_balance:
+        shortfall = required_balance - current_balance
+        message += f"⚠️ **Shortfall:** {shortfall:.6f} SOL\n\n"
+        message += f"**Options:**\n"
+        message += f"• **Return Funds:** Clear all wallet balances and return SOL to airdrop wallet\n"
+        message += f"• **Add More SOL:** Fund your airdrop wallet with additional SOL\n"
+        message += f"• **Reduce Buy Amounts:** Lower the SOL amounts for token purchases\n"
+    else:
+        message += f"✅ **Balance is sufficient!**\n\n"
+        message += f"**Options:**\n"
+        message += f"• **Proceed:** Continue with token creation\n"
+        message += f"• **Return Funds:** Clear wallet balances first (optional)\n"
+        message += f"• **Edit Buy Amounts:** Adjust purchase amounts\n"
+    
+    return message

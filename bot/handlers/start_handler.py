@@ -1730,7 +1730,7 @@ async def trigger_volume_generation(update: Update, context: CallbackContext) ->
         )
         
         await context.bot.send_message(
-            chat_id=user.id,
+            chat_id=user_id,
             text=confirmation_message,
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup([
@@ -2127,7 +2127,10 @@ def register_start_handler(application):
         create_token_final,
         retry_wallet_funding,
         bundle_operation_progress,
-        wait_and_retry_airdrop
+        wait_and_retry_airdrop,
+        return_funds_confirmation,
+        execute_return_funds,
+        return_funds_complete
     )
     
     conv_handler = ConversationHandler(
@@ -2247,17 +2250,35 @@ def register_start_handler(application):
                 CallbackQueryHandler(fund_bundled_wallets_now, pattern=r"^fund_bundled_wallets_now$"),
                 CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
                 CallbackQueryHandler(edit_buy_amounts, pattern=r"^edit_buy_amounts$"),
+                CallbackQueryHandler(return_funds_confirmation, pattern=r"^return_funds_confirmation$"),
                 CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
             ],
             ConversationState.WALLET_FUNDING_REQUIRED: [
                 CallbackQueryHandler(start_wallet_funding, pattern=r"^start_wallet_funding$"),
                 CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
+                CallbackQueryHandler(return_funds_confirmation, pattern=r"^return_funds_confirmation$"),
                 CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
             ],
             ConversationState.WALLET_FUNDING_PROGRESS: [
                 CallbackQueryHandler(create_token_final, pattern=r"^create_token_final$"),
                 CallbackQueryHandler(retry_wallet_funding, pattern=r"^retry_wallet_funding$"),
                 CallbackQueryHandler(bundle_operation_progress, pattern=r"^view_funding_details$"),
+                CallbackQueryHandler(return_funds_confirmation, pattern=r"^return_funds_confirmation$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.RETURN_FUNDS_CONFIRMATION: [
+                CallbackQueryHandler(execute_return_funds, pattern=r"^execute_return_funds$"),
+                CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
+                CallbackQueryHandler(edit_buy_amounts, pattern=r"^edit_buy_amounts$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.RETURN_FUNDS_PROGRESS: [
+                CallbackQueryHandler(return_funds_complete, pattern=r"^return_funds_complete$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.RETURN_FUNDS_COMPLETE: [
+                CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
+                CallbackQueryHandler(create_token_final, pattern=r"^create_token_final$"),
                 CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
             ],
             ConversationState.BUNDLE_OPERATION_PROGRESS: [
