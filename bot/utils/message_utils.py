@@ -1243,7 +1243,7 @@ def format_bundled_wallets_creation_message() -> str:
     message += "Before creating your token, we need to set up the bundled wallets that will participate in the trading.\n\n"
     message += "📝 **What we'll create:**\n"
     message += "• **DevWallet** - Main development wallet for token operations\n"
-    message += "• **First Bundled Wallet 1-4** - Initial trading wallets for coordinated buys\n"
+    message += "• **First Bundled Wallets** - Primary trading wallets for coordinated buys\n"
     message += "• **Additional Bundled Wallets** - Extra wallets for enhanced trading activity\n\n"
     message += "💡 **Recommended Setup:**\n"
     message += "• Minimum: 5 wallets (1 Dev + 4 Initial)\n"
@@ -1364,7 +1364,7 @@ def format_buy_amounts_config_message(token_address: str, total_bundled_wallets:
         message += f"**1. DevWallet** (1 wallet)\n"
         message += f"   • Main development wallet for token operations\n\n"
         message += f"**2. First Bundled Wallets** ({first_four_count} wallets)\n"
-        message += f"   • Primary trading wallets (First Bundled Wallet 1-{first_four_count})\n\n"
+        message += f"   • Primary trading wallets\n\n"
         
         if remaining_count > 0:
             message += f"**3. Additional Child Wallets** ({remaining_count} wallets)\n"
@@ -1372,7 +1372,7 @@ def format_buy_amounts_config_message(token_address: str, total_bundled_wallets:
     else:
         message += f"📝 **Wallets to configure:**\n"
         message += f"• **DevWallet** - Main development wallet\n"
-        message += f"• **First Bundled Wallets 1-4** - Primary trading wallets\n\n"
+        message += f"• **First Bundled Wallets** - Primary trading wallets\n\n"
     
     message += f"💡 **Guidelines:**\n"
     message += f"• Minimum: 0.001 SOL per wallet\n"

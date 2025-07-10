@@ -566,7 +566,7 @@ async def bundled_wallets_count(update: Update, context: CallbackContext) -> int
         
         await update.message.reply_text(
             f"❌ **Invalid Wallet Count**\n\n{error_msg}\n\n"
-            f"Please enter a number between 5 and 50:",
+            f"Please enter a number between 2 and 50:",
             reply_markup=keyboard,
             parse_mode=ParseMode.MARKDOWN
         )
@@ -974,8 +974,8 @@ async def configure_buy_amounts(update: Update, context: CallbackContext) -> int
     wallet_groups = ["DevWallet"]
     
     if bundled_wallets_count > 0:
-        # Always add first bundled wallets group (up to 4 wallets)
-        first_four_count = min(4, bundled_wallets_count)
+        # Add first bundled wallets group (up to 4 wallets, minimum 1)
+        first_bundled_count = min(4, bundled_wallets_count)
         wallet_groups.append("First Bundled Wallets")
         
         # Add additional child wallets group if more than 4 bundled wallets
@@ -1063,7 +1063,7 @@ async def start_buy_amounts_input(update: Update, context: CallbackContext) -> i
     # Get group description for better context
     group_descriptions = {
         "DevWallet": "Main development wallet",
-        "First Bundled Wallets": "Primary trading wallets (First Bundled Wallet 1-4)",
+        "First Bundled Wallets": "Primary trading wallets",
         "Additional Child Wallets": "Extra trading wallets (remaining bundled wallets)"
     }
     
@@ -1214,7 +1214,7 @@ async def buy_amounts_input(update: Update, context: CallbackContext) -> int:
         # Get group description for better context
         group_descriptions = {
             "DevWallet": "Main development wallet",
-            "First Bundled Wallets": "Primary trading wallets (First Bundled Wallet 1-4)",
+            "First Bundled Wallets": "Primary trading wallets",
             "Additional Child Wallets": "Extra trading wallets (remaining bundled wallets)"
         }
         
@@ -1672,14 +1672,18 @@ async def execute_return_funds(update: Update, context: CallbackContext) -> int:
                             if private_key:
                                 # CRITICAL: Convert base64 private key to base58 format for API
                                 try:
-                                    # Check if it's already base58 format (longer than base64)
-                                    if len(private_key) > 88:  # Base58 keys are typically 88 characters
+                                    # Check if it's already base58 format using proper validation
+                                    if is_base58_private_key(private_key):
                                         private_key_bs58 = private_key
-                                        logger.info(f"Private key for wallet {name} appears to be already in base58 format")
+                                        logger.info(f"Private key for wallet {name} is already in base58 format (length: {len(private_key)})")
                                     else:
                                         # Convert from base64 to base58 format as expected by API
                                         private_key_bs58 = convert_base64_to_base58(private_key)
-                                        logger.info(f"Successfully converted private key for wallet {name} from base64 to base58")
+                                        logger.info(f"Successfully converted private key for wallet {name} from base64 to base58 (length: {len(private_key)} -> {len(private_key_bs58)})")
+                                    
+                                    # Validate the final key format before sending to API
+                                    if not is_base58_private_key(private_key_bs58):
+                                        raise ValueError(f"Final private key format validation failed for wallet {name}")
                                     
                                     api_wallets.append({
                                         "name": name,
@@ -1687,11 +1691,10 @@ async def execute_return_funds(update: Update, context: CallbackContext) -> int:
                                     })
                                 except Exception as conversion_error:
                                     logger.error(f"Failed to convert private key for wallet {name}: {str(conversion_error)}")
-                                    # Try using the key as-is in case it's already base58
-                                    api_wallets.append({
-                                        "name": name,
-                                        "privateKey": private_key  # PumpFunClient will add both privateKey and privateKeyBs58 fields
-                                    })
+                                    # Log details for debugging but don't expose sensitive data
+                                    logger.error(f"Private key format details - length: {len(private_key)}, starts_with: {private_key[:8] if len(private_key) >= 8 else 'too_short'}")
+                                    # Skip this wallet rather than sending potentially invalid data
+                                    logger.warning(f"Skipping wallet {name} due to private key format issues")
                     
                     if api_wallets:
                         logger.info(f"Importing {len(api_wallets)} bundled wallets to API for return funds operation")
@@ -1783,8 +1786,24 @@ async def execute_return_funds(update: Update, context: CallbackContext) -> int:
                 
         except Exception as import_error:
             logger.error(f"Failed to import bundled wallets for return funds operation: {str(import_error)}")
-            # Continue with return funds operation anyway - wallets might already be imported
-            logger.info("Continuing with return funds operation despite import error")
+            
+            # Enhanced error analysis for server-side issues
+            error_message = str(import_error)
+            if "bs58.decode is not a function" in error_message:
+                logger.error("Server-side bs58 library issue detected during return funds import")
+                # This is a critical server configuration issue
+                raise Exception(
+                    "Server configuration error: bs58 library not properly installed. "
+                    "Contact API administrator to install: npm install bs58. "
+                    "Cannot proceed with return funds operation without proper server setup."
+                )
+            elif "bs58" in error_message.lower():
+                logger.error("Server-side base58 processing issue during return funds import")
+                # This might be recoverable by retrying
+                logger.info("Attempting to continue despite base58 processing issues")
+            else:
+                # Continue with return funds operation anyway - wallets might already be imported
+                logger.info("Continuing with return funds operation despite import error")
         
         # Execute return funds operation via API
         return_results = pumpfun_client.return_funds_to_mother(
@@ -2101,28 +2120,30 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
                             if private_key:
                                 # CRITICAL: Convert base64 private key to base58 format for API
                                 try:
-                                    # Check if it's already base58 format (longer than base64)
-                                    if len(private_key) > 88:  # Base58 keys are typically 88 characters
+                                    # Check if it's already base58 format using proper validation
+                                    if is_base58_private_key(private_key):
                                         private_key_bs58 = private_key
-                                        logger.info(f"Private key for wallet {name} appears to be already in base58 format")
+                                        logger.info(f"Private key for wallet {name} is already in base58 format (length: {len(private_key)})")
                                     else:
                                         # Convert from base64 to base58 format as expected by API
                                         private_key_bs58 = convert_base64_to_base58(private_key)
-                                        logger.info(f"Successfully converted private key for wallet {name} from base64 to base58")
+                                        logger.info(f"Successfully converted private key for wallet {name} from base64 to base58 (length: {len(private_key)} -> {len(private_key_bs58)})")
+                                    
+                                    # Validate the final key format before sending to API
+                                    if not is_base58_private_key(private_key_bs58):
+                                        raise ValueError(f"Final private key format validation failed for wallet {name}")
                                     
                                     api_wallets.append({
                                         "name": name,
                                         "privateKey": private_key_bs58  # PumpFunClient will add both privateKey and privateKeyBs58 fields
                                     })
-                                    logger.info(f"DEBUG: Added wallet '{name}' to API import list")
+                                    logger.info(f"DEBUG: Added wallet '{name}' to API import list with validated base58 key")
                                 except Exception as conversion_error:
                                     logger.error(f"Failed to convert private key for wallet {name}: {str(conversion_error)}")
-                                    # Try using the key as-is in case it's already base58
-                                    api_wallets.append({
-                                        "name": name,
-                                        "privateKey": private_key  # PumpFunClient will add both privateKey and privateKeyBs58 fields
-                                    })
-                                    logger.warning(f"DEBUG: Added wallet '{name}' to API import list with unconverted key")
+                                    # Log details for debugging but don't expose sensitive data
+                                    logger.error(f"Private key format details - length: {len(private_key)}, starts_with: {private_key[:8] if len(private_key) >= 8 else 'too_short'}")
+                                    # Skip this wallet rather than sending potentially invalid data
+                                    logger.warning(f"Skipping wallet {name} due to private key format issues")
                             else:
                                 logger.warning(f"Bundled wallet missing private key, skipping: {wallet.get('name', 'Unknown')}")
                                 logger.warning(f"DEBUG: Wallet {i} keys: {list(wallet.keys())}")
@@ -2151,9 +2172,30 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
                             logger.error(f"API import failed: {str(api_import_error)}")
                             logger.error(f"DEBUG: API import error type: {type(api_import_error)}")
                             logger.error(f"DEBUG: API import error details: {repr(api_import_error)}")
-                            api_import_success = False
-                            # Store the error for later decision making
-                            api_import_error = api_import_error
+                            
+                            # Enhanced error recovery for specific server-side issues
+                            error_message = str(api_import_error)
+                            
+                            if "bs58.decode is not a function" in error_message:
+                                logger.error("Server-side bs58 library issue detected - this requires server configuration fix")
+                                # This is a server configuration issue that cannot be fixed client-side
+                                api_import_success = False
+                                api_import_error = Exception(
+                                    "Server configuration error: bs58 library not properly installed. "
+                                    "Contact API administrator to install: npm install bs58"
+                                )
+                            elif "bs58" in error_message.lower():
+                                logger.error("Server-side base58 processing issue detected")
+                                # Try a different approach - maybe retry with explicit format
+                                api_import_success = False
+                                api_import_error = Exception(
+                                    f"Server base58 processing error: {error_message}. "
+                                    "Private key format validation passed client-side but failed server-side."
+                                )
+                            else:
+                                # Other types of errors - standard handling
+                                api_import_success = False
+                                api_import_error = api_import_error
                         
                         # Only update UI after API operation completes (success or failure)
                         try:
@@ -2457,9 +2499,13 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             raise Exception("No wallet credentials found in bundled wallet file. Please ensure bundled wallets are properly created.")
         
         # Filter to only include the wallets we need for token creation
-        # DevWallet + First Bundled Wallet 1-4 (up to 5 wallets total)
-        required_wallet_names = ["DevWallet", "First Bundled Wallet 1", "First Bundled Wallet 2", 
-                                "First Bundled Wallet 3", "First Bundled Wallet 4"]
+        # DevWallet + First Bundled Wallets (minimum 2 wallets total)
+        required_wallet_names = ["DevWallet"]
+        
+        # Add bundled wallet names based on actual count (minimum 1)
+        bundled_wallets_count = session_manager.get_session_value(user.id, "bundled_wallets_count", 0)
+        for i in range(1, min(5, bundled_wallets_count + 1)):  # Support up to 4 bundled wallets in token creation
+            required_wallet_names.append(f"First Bundled Wallet {i}")
         
         filtered_wallets = []
         for wallet in wallets:
@@ -2468,12 +2514,15 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
         
         wallets = filtered_wallets
         
-        # Ensure we have at least DevWallet and First Bundled Wallet 1
+        # Ensure we have at least DevWallet and one bundled wallet
         wallet_names = [wallet["name"] for wallet in wallets]
         if "DevWallet" not in wallet_names:
             raise Exception("DevWallet not found in bundled wallet file")
-        if "First Bundled Wallet 1" not in wallet_names:
-            raise Exception("First Bundled Wallet 1 not found in bundled wallet file")
+        
+        # Check if we have at least one bundled wallet
+        bundled_wallet_found = any(name.startswith("First Bundled Wallet") for name in wallet_names)
+        if not bundled_wallet_found:
+            raise Exception("At least one bundled wallet not found in bundled wallet file")
         
         if len(wallets) < 2:  # Need at least DevWallet + 1 bundled wallet
             raise Exception("At least one bundled wallet private key is required")
@@ -3097,7 +3146,7 @@ async def check_funding_prerequisites(update: Update, context: CallbackContext) 
         elif not airdrop_wallet:
             status_message += "1. Create or import an airdrop wallet\n"
         elif not bundled_wallets or len(bundled_wallets) == 0:
-            status_message += "1. Create bundled wallets (5-50 wallets recommended)\n"
+                            status_message += "1. Create bundled wallets (2-50 wallets supported)\n"
         elif airdrop_wallet and pumpfun_client:
             status_message += "1. All prerequisites appear to be met\n"
             status_message += "2. Try the funding process again\n"
@@ -3546,6 +3595,33 @@ async def check_bundled_wallets_funding_status(pumpfun_client, bundled_wallets_c
             "error": str(e)
         }
 
+def is_base58_private_key(key: str) -> bool:
+    """
+    Check if a string is a valid base58 encoded Solana private key.
+    
+    Args:
+        key: The key string to validate
+        
+    Returns:
+        True if the key is valid base58 format, False otherwise
+    """
+    try:
+        # Solana private keys in base58 format are typically 88 characters
+        if len(key) != 88:
+            return False
+        
+        # Try to decode as base58 - this will fail if not valid base58
+        decoded = base58.b58decode(key)
+        
+        # Solana private keys should decode to 64 bytes
+        if len(decoded) != 64:
+            return False
+            
+        return True
+    except Exception:
+        return False
+
+
 def convert_base64_to_base58(base64_key: str) -> str:
     """
     Convert a base64 encoded private key to base58 format.
@@ -3559,6 +3635,11 @@ def convert_base64_to_base58(base64_key: str) -> str:
     try:
         # Decode base64 to bytes
         key_bytes = base64.b64decode(base64_key)
+        
+        # Validate that we have 64 bytes (Solana private key size)
+        if len(key_bytes) != 64:
+            raise ValueError(f"Invalid private key length: expected 64 bytes, got {len(key_bytes)}")
+        
         # Encode to base58
         base58_key = base58.b58encode(key_bytes).decode('utf-8')
         return base58_key
@@ -3619,19 +3700,36 @@ def load_wallet_credentials_from_bundled_file(user_id: int) -> List[Dict[str, st
         
         for wallet in wallet_data:
             wallet_name = wallet.get("name", "")
-            base64_private_key = wallet.get("privateKey", "")
+            stored_private_key = wallet.get("privateKey", "")
             
-            if wallet_name and base64_private_key:
-                # Convert base64 to base58
-                base58_private_key = convert_base64_to_base58(base64_private_key)
-                
-                # Add to wallets list
-                wallets.append({
-                    "name": wallet_name,
-                    "privateKey": base58_private_key
-                })
-                
-                logger.info(f"Loaded wallet credential for: {wallet_name}")
+            if wallet_name and stored_private_key:
+                try:
+                    # Check if it's already base58 format or needs conversion
+                    if is_base58_private_key(stored_private_key):
+                        base58_private_key = stored_private_key
+                        logger.info(f"Wallet {wallet_name}: Private key already in base58 format")
+                    else:
+                        # Convert from base64 to base58
+                        base58_private_key = convert_base64_to_base58(stored_private_key)
+                        logger.info(f"Wallet {wallet_name}: Converted private key from base64 to base58")
+                    
+                    # Final validation before adding to list
+                    if not is_base58_private_key(base58_private_key):
+                        logger.error(f"Wallet {wallet_name}: Final private key validation failed, skipping")
+                        continue
+                    
+                    # Add to wallets list
+                    wallets.append({
+                        "name": wallet_name,
+                        "privateKey": base58_private_key
+                    })
+                    
+                    logger.info(f"Successfully loaded wallet credential for: {wallet_name}")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to process private key for wallet {wallet_name}: {str(e)}")
+                    logger.error(f"Private key format details - length: {len(stored_private_key)}, starts_with: {stored_private_key[:8] if len(stored_private_key) >= 8 else 'too_short'}")
+                    continue
         
         logger.info(f"Successfully loaded {len(wallets)} wallet credentials from bundled file")
         return wallets

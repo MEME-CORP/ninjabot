@@ -92,9 +92,9 @@ class BuyAmounts:
     """Buy amounts for different wallets"""
     dev_wallet_buy_sol: float = 0.01
     first_bundled_wallet_1_buy_sol: float = 0.01
-    first_bundled_wallet_2_buy_sol: float = 0.01
-    first_bundled_wallet_3_buy_sol: float = 0.01
-    first_bundled_wallet_4_buy_sol: float = 0.01
+    first_bundled_wallet_2_buy_sol: float = 0.0  # Optional - only used if wallet exists
+    first_bundled_wallet_3_buy_sol: float = 0.0  # Optional - only used if wallet exists
+    first_bundled_wallet_4_buy_sol: float = 0.0  # Optional - only used if wallet exists
 
 
 class PumpFunClient:
@@ -429,7 +429,7 @@ class PumpFunClient:
 
     def import_bundled_wallets(self, wallets: List[Dict[str, str]]) -> Dict[str, Any]:
         """
-        Import bundled (child) wallets.
+        Import bundled (child) wallets with enhanced error handling for bs58 issues.
         
         Args:
             wallets: List of wallet dictionaries with 'name' and 'privateKey' fields
@@ -441,20 +441,61 @@ class PumpFunClient:
             raise PumpFunValidationError("Wallets list cannot be empty")
             
         # Validate wallet format and ensure both field names for server compatibility
-        for wallet in wallets:
+        validated_wallets = []
+        for i, wallet in enumerate(wallets):
             if 'name' not in wallet or ('privateKey' not in wallet and 'privateKeyBs58' not in wallet):
-                raise PumpFunValidationError("Each wallet must have 'name' and 'privateKey' or 'privateKeyBs58' fields")
+                raise PumpFunValidationError(f"Wallet {i} must have 'name' and 'privateKey' or 'privateKeyBs58' fields")
             
-            # Ensure both field names exist due to server validation/processing inconsistency
+            # Get the private key value
             private_key_value = wallet.get('privateKey') or wallet.get('privateKeyBs58')
-            if private_key_value:
-                wallet['privateKey'] = private_key_value        # For processing layer
-                wallet['privateKeyBs58'] = private_key_value    # For validation layer
+            if not private_key_value:
+                raise PumpFunValidationError(f"Wallet {i} ({wallet.get('name', 'Unknown')}) missing private key")
+            
+            # Validate base58 format on client side to catch issues early
+            try:
+                # Check if it's valid base58 and correct length
+                if len(private_key_value) != 88:
+                    raise ValueError(f"Invalid private key length: {len(private_key_value)} (expected 88)")
+                
+                # Try to decode as base58 to validate format
+                import base58
+                decoded = base58.b58decode(private_key_value)
+                if len(decoded) != 64:
+                    raise ValueError(f"Invalid decoded key length: {len(decoded)} bytes (expected 64)")
+                    
+            except Exception as validation_error:
+                raise PumpFunValidationError(f"Wallet {i} ({wallet.get('name', 'Unknown')}) has invalid private key format: {str(validation_error)}")
+            
+            # Create validated wallet object with both field names for server compatibility
+            validated_wallet = {
+                'name': wallet['name'],
+                'privateKey': private_key_value,        # For processing layer
+                'privateKeyBs58': private_key_value     # For validation layer
+            }
+            validated_wallets.append(validated_wallet)
                 
         endpoint = "/api/wallets/bundled/import"
-        data = {"wallets": wallets}
+        data = {"wallets": validated_wallets}
         
-        return self._make_request_with_retry("POST", endpoint, json=data)
+        try:
+            return self._make_request_with_retry("POST", endpoint, json=data)
+        except Exception as e:
+            error_message = str(e)
+            # Enhanced error handling for common server-side issues
+            if "bs58.decode is not a function" in error_message:
+                raise PumpFunApiError(
+                    "Server-side bs58 library error detected. "
+                    "This indicates a server configuration issue. "
+                    f"Original error: {error_message}"
+                )
+            elif "bs58" in error_message.lower():
+                raise PumpFunApiError(
+                    f"Server-side base58 processing error: {error_message}. "
+                    "Check that all private keys are in valid base58 format."
+                )
+            else:
+                # Re-raise original exception for other types of errors
+                raise
 
     def fund_bundled_wallets(self, amount_per_wallet: float) -> Dict[str, Any]:
         """
@@ -1186,13 +1227,15 @@ class PumpFunClient:
                     # Re-raise other API errors
                     raise e
         
-        # Handle additional wallet purchases (wallets 2-4) if they have non-zero amounts
+        # Handle additional wallet purchases (wallets 2-4) if they have non-zero amounts and exist
         additional_purchases = []
-        if buy_amounts.first_bundled_wallet_2_buy_sol > 0:
+        wallet_names = [w["name"] for w in wallets]
+        
+        if buy_amounts.first_bundled_wallet_2_buy_sol > 0 and "First Bundled Wallet 2" in wallet_names:
             additional_purchases.append(("First Bundled Wallet 2", buy_amounts.first_bundled_wallet_2_buy_sol))
-        if buy_amounts.first_bundled_wallet_3_buy_sol > 0:
+        if buy_amounts.first_bundled_wallet_3_buy_sol > 0 and "First Bundled Wallet 3" in wallet_names:
             additional_purchases.append(("First Bundled Wallet 3", buy_amounts.first_bundled_wallet_3_buy_sol))
-        if buy_amounts.first_bundled_wallet_4_buy_sol > 0:
+        if buy_amounts.first_bundled_wallet_4_buy_sol > 0 and "First Bundled Wallet 4" in wallet_names:
             additional_purchases.append(("First Bundled Wallet 4", buy_amounts.first_bundled_wallet_4_buy_sol))
         
         if additional_purchases and token_result.get("mintAddress"):
