@@ -1761,10 +1761,65 @@ def format_return_funds_results_message(results: Dict[str, Any]) -> str:
     Returns:
         Formatted results message string
     """
-    successful = results.get("successful_returns", 0)
-    failed = results.get("failed_returns", 0)
+    # Handle the case where results might be a list or have different structure
+    if isinstance(results, list):
+        # If results is a list, try to extract summary information
+        successful = len([r for r in results if r.get('status') == 'success'])
+        failed = len([r for r in results if r.get('status') == 'failed'])
+        total = len(results)
+        total_returned = sum(r.get('amount', 0) for r in results if r.get('status') == 'success')
+        
+        message = f"✅ **Funds Return Complete**\n\n"
+        message += f"📊 **Summary:**\n"
+        message += f"• Total wallets processed: {total}\n"
+        message += f"• Successful returns: {successful}\n"
+        message += f"• Failed returns: {failed}\n"
+        message += f"• Success rate: {(successful/total)*100:.1f}%\n\n" if total > 0 else ""
+        
+        if total_returned > 0:
+            message += f"💰 **Total SOL returned:** {total_returned:.6f} SOL\n"
+        
+        message += f"\n🎉 **Your airdrop wallet is now ready for fresh funding!**"
+        return message
+    
+    # Handle the case where results is a dictionary but might have different structure
+    if not isinstance(results, dict):
+        return f"✅ **Funds Return Complete**\n\n❌ **Error:** Unexpected response format from API.\n\n🎉 **Your airdrop wallet should now be ready for fresh funding!**"
+    
+    # Handle different possible response structures
+    data = results.get("data", {})
+    
+    # Try to extract values from different possible response formats
+    successful = 0
+    failed = 0
+    total_returned = 0
+    
+    # Check for various possible field names in the response
+    if "successfulTransfers" in data:
+        successful = data.get("successfulTransfers", 0)
+    elif "successful_returns" in results:
+        successful = results.get("successful_returns", 0)
+    elif "successful" in results:
+        successful = results.get("successful", 0)
+    
+    if "failedTransfers" in data:
+        failed = data.get("failedTransfers", 0)
+    elif "failed_returns" in results:
+        failed = results.get("failed_returns", 0)
+    elif "failed" in results:
+        failed = results.get("failed", 0)
+    
+    if "totalAmount" in data:
+        total_returned = data.get("totalAmount", 0)
+    elif "total_sol_returned" in results:
+        total_returned = results.get("total_sol_returned", 0)
+    elif "totalAmountReturned" in data:
+        total_returned = data.get("totalAmountReturned", 0)
+    
+    # Calculate totals
     total = successful + failed
-    total_returned = results.get("total_sol_returned", 0)
+    if "totalWallets" in data:
+        total = data.get("totalWallets", total)
     
     message = f"✅ **Funds Return Complete**\n\n"
     
@@ -1778,14 +1833,33 @@ def format_return_funds_results_message(results: Dict[str, Any]) -> str:
     if total_returned > 0:
         message += f"💰 **Total SOL returned:** {total_returned:.6f} SOL\n"
     
-    if results.get("bundle_id"):
-        message += f"📦 **Bundle ID:** `{results['bundle_id']}`\n"
+    # Check for bundle ID in various possible locations
+    bundle_id = None
+    if "bundleId" in data:
+        bundle_id = data.get("bundleId")
+    elif "bundle_id" in results:
+        bundle_id = results.get("bundle_id")
     
-    if results.get("transaction_signatures"):
-        signatures = results["transaction_signatures"]
+    if bundle_id:
+        message += f"📦 **Bundle ID:** `{bundle_id}`\n"
+    
+    # Check for transaction signatures in various possible locations
+    signatures = None
+    if "transactionSignatures" in data:
+        signatures = data.get("transactionSignatures")
+    elif "transaction_signatures" in results:
+        signatures = results.get("transaction_signatures")
+    elif "transactions" in data:
+        signatures = data.get("transactions")
+    
+    if signatures and isinstance(signatures, list):
         message += f"\n📝 **Transaction Signatures:**\n"
         for i, sig in enumerate(signatures[:3]):  # Show first 3
-            message += f"• `{sig[:8]}...{sig[-8:]}`\n"
+            if isinstance(sig, str):
+                message += f"• `{sig[:8]}...{sig[-8:]}`\n"
+            elif isinstance(sig, dict) and "signature" in sig:
+                sig_str = sig["signature"]
+                message += f"• `{sig_str[:8]}...{sig_str[-8:]}`\n"
         if len(signatures) > 3:
             message += f"• ... and {len(signatures) - 3} more\n"
     

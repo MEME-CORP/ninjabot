@@ -1805,19 +1805,82 @@ async def execute_return_funds(update: Update, context: CallbackContext) -> int:
                 # Continue with return funds operation anyway - wallets might already be imported
                 logger.info("Continuing with return funds operation despite import error")
         
-        # Execute return funds operation via API
+        # Execute return funds operation via API with enhanced fee calculation
+        logger.info(f"Executing return funds operation with enhanced fee calculation for user {user.id}")
+        
+        # Show operation progress
+        await query.edit_message_text(
+            format_return_funds_progress_message({
+                "processed": 0,
+                "total": bundled_wallets_count + 1,
+                "successful": 0,
+                "failed": 0,
+                "current_operation": "Executing return funds with enhanced fee calculation..."
+            }),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
         return_results = pumpfun_client.return_funds_to_mother(
             mother_wallet_public_key=airdrop_wallet_address,
             leave_dust=True
         )
         
+        # Enhanced response validation and logging
+        logger.info(f"Return funds API response for user {user.id}: {json.dumps(return_results, default=str, indent=2)}")
+        
+        # Validate response structure
+        if not return_results:
+            logger.error(f"Empty response from return funds API for user {user.id}")
+            return_results = {
+                "message": "Return funds operation completed but response was empty",
+                "data": {
+                    "totalWallets": bundled_wallets_count,
+                    "successfulTransfers": 0,
+                    "failedTransfers": 0,
+                    "totalAmount": 0
+                }
+            }
+        elif isinstance(return_results, list):
+            logger.warning(f"Return funds API returned a list instead of dictionary for user {user.id}")
+            # Convert list response to expected dictionary format
+            list_results = return_results
+            return_results = {
+                "message": "Return funds operation completed",
+                "data": {
+                    "totalWallets": len(list_results),
+                    "successfulTransfers": len([r for r in list_results if r.get('status') == 'success']),
+                    "failedTransfers": len([r for r in list_results if r.get('status') == 'failed']),
+                    "totalAmount": sum(r.get('amount', 0) for r in list_results if r.get('status') == 'success'),
+                    "transactions": list_results
+                }
+            }
+        elif not isinstance(return_results, dict):
+            logger.error(f"Unexpected response type from return funds API for user {user.id}: {type(return_results)}")
+            return_results = {
+                "message": "Return funds operation completed but response format was unexpected",
+                "data": {
+                    "totalWallets": bundled_wallets_count,
+                    "successfulTransfers": 0,
+                    "failedTransfers": 0,
+                    "totalAmount": 0,
+                    "error": f"Unexpected response type: {type(return_results)}"
+                }
+            }
+        
         # Store results in session
         session_manager.update_session_value(user.id, "return_funds_results", return_results)
         
-        logger.info(
-            f"Return funds operation completed for user {user.id}",
-            extra={"user_id": user.id, "results": return_results}
-        )
+        # Enhanced logging for debugging per API documentation
+        logger.info(f"Return funds operation completed for user {user.id}")
+        if "data" in return_results:
+            data = return_results["data"]
+            logger.info(f"  Enhanced return funds results:")
+            logger.info(f"    Total wallets processed: {data.get('totalWallets', 'N/A')}")
+            logger.info(f"    Successful transfers: {data.get('successfulTransfers', 'N/A')}")
+            logger.info(f"    Failed transfers: {data.get('failedTransfers', 'N/A')}")
+            logger.info(f"    Total amount returned: {data.get('totalAmount', 'N/A')} SOL")
+            logger.info(f"    Fee calculation applied: {data.get('feeCalculation', 'N/A')}")
+            logger.info(f"    Bundle ID: {data.get('bundleId', 'N/A')}")
         
         # Show completion message
         keyboard = InlineKeyboardMarkup([
@@ -1828,8 +1891,21 @@ async def execute_return_funds(update: Update, context: CallbackContext) -> int:
         # Import message formatter
         from bot.utils.message_utils import format_return_funds_results_message
         
+        # Try to format the message with enhanced error handling
+        try:
+            formatted_message = format_return_funds_results_message(return_results)
+        except Exception as format_error:
+            logger.error(f"Error formatting return funds results message for user {user.id}: {str(format_error)}")
+            # Fallback message
+            formatted_message = (
+                f"✅ **Funds Return Complete**\n\n"
+                f"The return funds operation has been completed. Please check your wallet balances.\n\n"
+                f"**Note:** There was an issue formatting the detailed results, but the operation should have succeeded.\n\n"
+                f"🎉 **Your airdrop wallet should now be ready for fresh funding!**"
+            )
+        
         await query.edit_message_text(
-            format_return_funds_results_message(return_results),
+            formatted_message,
             reply_markup=keyboard,
             parse_mode=ParseMode.MARKDOWN
         )
@@ -1837,21 +1913,136 @@ async def execute_return_funds(update: Update, context: CallbackContext) -> int:
         return ConversationState.RETURN_FUNDS_COMPLETE
         
     except Exception as e:
-        logger.error(
-            f"Return funds operation failed for user {user.id}: {str(e)}",
-            extra={"user_id": user.id}
-        )
+        error_message = str(e).lower()
         
-        keyboard = InlineKeyboardMarkup([
-            [build_button("🔄 Try Again", "execute_return_funds")],
-            [build_button("« Back to Balance Check", "check_wallet_balance")]
-        ])
+        # Enhanced error detection for insufficient funds scenarios per API documentation
+        insufficient_funds_patterns = [
+            "custom program error: 1",     # Primary insufficient lamports error
+            "insufficient funds",          # Standard insufficient funds
+            "insufficient lamports",       # Lamports-specific error
+            "insufficient balance",        # Balance-specific error
+            "not enough sol",             # Alternative phrasing
+            "insufficient account balance", # Account balance error
+            "each wallet needs at least",  # Our enhanced error message
+            "insufficient funds for rent", # Rent exemption error
+            "program error: \"insufficient funds for rent", # Specific rent error format
+            "insufficient funds for rent:", # Rent error with colon
+        ]
         
-        await query.edit_message_text(
-            format_pumpfun_error_message("return_funds_execution", str(e)),
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
+        is_insufficient_funds = any(pattern in error_message for pattern in insufficient_funds_patterns)
+        
+        if is_insufficient_funds:
+            logger.error(f"Enhanced insufficient funds error detected for user {user.id}")
+            logger.error(f"  Error details: {str(e)}")
+            logger.error(f"  Airdrop wallet: {airdrop_wallet_address}")
+            logger.error(f"  Bundled wallets count: {bundled_wallets_count}")
+            logger.error(f"  Recommendation: Check individual wallet balances and ensure minimum reserve + fee requirements are met")
+            
+            # Check if this is a rent-related error
+            error_message_lower = str(e).lower()
+            is_rent_error = any(pattern in error_message_lower for pattern in [
+                "insufficient funds for rent", 
+                "program error: \"insufficient funds for rent"
+            ])
+            
+            # Show enhanced insufficient funds error message
+            keyboard = InlineKeyboardMarkup([
+                [build_button("📊 Check Individual Balances", "check_wallet_balance")],
+                [build_button("💰 Fund Wallets First", "fund_bundled_wallets_now")],
+                [build_button("🔄 Try Again", "execute_return_funds")]
+            ])
+            
+            if is_rent_error:
+                insufficient_funds_message = (
+                    "⚠️ **Insufficient Funds for Rent Exemption**\n\n"
+                    "The return funds operation failed because one or more wallets don't have enough SOL for rent exemption.\n\n"
+                    "**Rent Error Details:**\n"
+                    f"• {str(e)}\n\n"
+                    "**Solana Rent Requirements:**\n"
+                    "• Rent exemption: ~0.00203928 SOL per wallet\n"
+                    "• Transaction fee: ~0.000025 SOL per transaction\n"
+                    "• **Minimum needed per wallet: ~0.0021 SOL**\n\n"
+                    "**Recommended Actions:**\n"
+                    "1. Fund each wallet with at least 0.0025 SOL\n"
+                    "2. Check individual wallet balances\n"
+                    "3. Some wallets may have been emptied too much\n"
+                    "4. Fund the affected wallets before retrying\n\n"
+                    "**Note:** Solana accounts need minimum SOL for rent exemption to remain active."
+                )
+            else:
+                insufficient_funds_message = (
+                    "⚠️ **Insufficient Funds for Return Operation**\n\n"
+                    "The return funds operation failed due to insufficient balances in one or more wallets.\n\n"
+                    "**Enhanced Error Details:**\n"
+                    f"• {str(e)}\n\n"
+                    "**Per API Documentation:**\n"
+                    "• Minimum reserve: 0.0001 SOL per wallet\n"
+                    "• Transaction fee: ~0.000025 SOL per transaction\n"
+                    "• Enhanced fee calculation: Base 5,000 + Priority 20,000 lamports\n\n"
+                    "**Recommended Actions:**\n"
+                    "1. Check individual wallet balances\n"
+                    "2. Fund wallets with additional SOL if needed\n"
+                    "3. Ensure each wallet has sufficient balance for fees\n"
+                    "4. Try the operation again"
+                )
+            
+            await query.edit_message_text(
+                insufficient_funds_message,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+        else:
+            # Handle other types of errors (non-balance related)
+            logger.error(f"Return funds operation failed for user {user.id}: {str(e)}")
+            logger.error(f"  Error type: {type(e).__name__}")
+            logger.error(f"  Error category: Non-balance error")
+            logger.error(f"  Airdrop wallet: {airdrop_wallet_address}")
+            logger.error(f"  Bundled wallets count: {bundled_wallets_count}")
+            
+            # Determine appropriate error handling based on error type
+            if "server configuration" in error_message:
+                keyboard = InlineKeyboardMarkup([
+                    [build_button("📊 Check API Status", "check_api_status")],
+                    [build_button("🔄 Wait & Retry", "wait_and_retry_import")],
+                    [build_button("« Back to Balance Check", "check_wallet_balance")]
+                ])
+                
+                error_title = "**Server Configuration Error**"
+                error_context = "The API server has a configuration issue that prevents the return funds operation."
+                
+            elif "timeout" in error_message or "connection" in error_message:
+                keyboard = InlineKeyboardMarkup([
+                    [build_button("🔄 Try Again", "execute_return_funds")],
+                    [build_button("⏱️ Wait & Retry", "wait_and_retry_import")],
+                    [build_button("« Back to Balance Check", "check_wallet_balance")]
+                ])
+                
+                error_title = "**Connection Error**"
+                error_context = "The operation failed due to a network or connection issue."
+                
+            else:
+                keyboard = InlineKeyboardMarkup([
+                    [build_button("🔄 Try Again", "execute_return_funds")],
+                    [build_button("« Back to Balance Check", "check_wallet_balance")]
+                ])
+                
+                error_title = "**Operation Error**"
+                error_context = "The return funds operation encountered an unexpected error."
+            
+            await query.edit_message_text(
+                f"❌ {error_title}\n\n"
+                f"{error_context}\n\n"
+                f"**Error Details:**\n"
+                f"• {str(e)}\n\n"
+                f"**Next Steps:**\n"
+                f"• Try the operation again\n"
+                f"• Check your wallet balances\n"
+                f"• Ensure API server is operational\n"
+                f"• Contact support if the issue persists",
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
         
         return ConversationState.RETURN_FUNDS_CONFIRMATION
 

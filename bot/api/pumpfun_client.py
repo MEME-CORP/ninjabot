@@ -499,7 +499,12 @@ class PumpFunClient:
 
     def fund_bundled_wallets(self, amount_per_wallet: float) -> Dict[str, Any]:
         """
-        Fund bundled wallets from the airdrop wallet.
+        Fund bundled wallets from the airdrop wallet with enhanced fee calculation and error detection.
+        
+        Per API documentation:
+        - Enhanced Fee Calculation: Uses precise priority fee calculation (base 5,000 + priority ~20,000 lamports = ~25,000 lamports total)
+        - Wallet Management Operations: 0.0001 SOL minimum reserve for transaction fees
+        - Enhanced error detection for insufficient funds scenarios
         
         Args:
             amount_per_wallet: SOL amount to send to each wallet
@@ -510,20 +515,102 @@ class PumpFunClient:
         if amount_per_wallet <= 0:
             raise PumpFunValidationError("Amount per wallet must be greater than 0")
         
-        # Validate reasonable amount (between 0.001 and 10 SOL)
-        if amount_per_wallet < 0.001:
-            raise PumpFunValidationError("Amount per wallet too small (minimum 0.001 SOL)")
+        # Enhanced fee calculation per API documentation
+        base_fee_lamports = 5000  # Base transaction fee
+        priority_fee_lamports = 20000  # Priority fee for faster processing
+        total_estimated_fee_lamports = base_fee_lamports + priority_fee_lamports  # ~25,000 lamports
+        minimum_reserve_lamports = 100_000  # 0.0001 SOL minimum reserve for wallet management
+        
+        # Calculate minimum required amount including fees
+        min_fee_sol = total_estimated_fee_lamports / 1_000_000_000
+        min_reserve_sol = minimum_reserve_lamports / 1_000_000_000
+        absolute_minimum = min_fee_sol + min_reserve_sol  # ~0.000125 SOL
+        
+        # Validate reasonable amount with enhanced fee consideration
+        if amount_per_wallet < absolute_minimum:
+            raise PumpFunValidationError(
+                f"Amount per wallet too small (minimum {absolute_minimum:.6f} SOL required for fees + reserve). "
+                f"Fee: {min_fee_sol:.6f} SOL, Reserve: {min_reserve_sol:.6f} SOL"
+            )
         if amount_per_wallet > 10:
             raise PumpFunValidationError("Amount per wallet too large (maximum 10 SOL)")
+        
+        # Log detailed fee calculation for debugging
+        logger.info(f"Fund bundled wallets fee calculation:")
+        logger.info(f"  Amount per wallet: {amount_per_wallet} SOL")
+        logger.info(f"  Base fee: {base_fee_lamports} lamports ({min_fee_sol:.6f} SOL)")
+        logger.info(f"  Priority fee: {priority_fee_lamports} lamports") 
+        logger.info(f"  Total estimated fee: {total_estimated_fee_lamports} lamports ({min_fee_sol:.6f} SOL)")
+        logger.info(f"  Minimum reserve: {minimum_reserve_lamports} lamports ({min_reserve_sol:.6f} SOL)")
+        logger.info(f"  Absolute minimum amount: {absolute_minimum:.6f} SOL")
             
         endpoint = "/api/wallets/fund-bundled"
         
-        # Use the correct parameter name from API documentation
-        data = {"amountPerWalletSOL": amount_per_wallet}
+        # Use the correct parameter name from API documentation with enhanced fee calculation
+        data = {
+            "amountPerWalletSOL": amount_per_wallet,
+            # Include fee calculation parameters for server-side validation
+            "feeCalculation": {
+                "baseFee": base_fee_lamports,
+                "priorityFee": priority_fee_lamports,
+                "totalEstimatedFee": total_estimated_fee_lamports,
+                "minimumReserve": minimum_reserve_lamports
+            }
+        }
         
-        logger.info(f"Funding bundled wallets with {amount_per_wallet} SOL per wallet using correct API format")
-        
-        return self._make_request_with_retry("POST", endpoint, json=data)
+        try:
+            result = self._make_request_with_retry("POST", endpoint, json=data)
+            
+            # Log successful operation details
+            logger.info(f"Fund bundled wallets operation completed successfully")
+            if "data" in result:
+                logger.info(f"  Wallets funded: {result['data'].get('walletsCount', 'unknown')}")
+                logger.info(f"  Amount per wallet: {result['data'].get('amountPerWallet', 'unknown')} SOL")
+                logger.info(f"  Total amount sent: {result['data'].get('totalAmount', 'unknown')} SOL")
+                if 'bundleId' in result['data']:
+                    logger.info(f"  Bundle ID: {result['data']['bundleId']}")
+            
+            return result
+            
+        except Exception as e:
+            error_message = str(e).lower()
+            
+            # Enhanced error detection for insufficient funds scenarios per API documentation
+            insufficient_funds_patterns = [
+                "custom program error: 1",  # Primary insufficient lamports error
+                "insufficient funds",       # Standard insufficient funds
+                "insufficient lamports",    # Lamports-specific error
+                "insufficient balance",     # Balance-specific error
+                "not enough sol",          # Alternative phrasing
+                "insufficient account balance"  # Account balance error
+            ]
+            
+            is_insufficient_funds = any(pattern in error_message for pattern in insufficient_funds_patterns)
+            
+            if is_insufficient_funds:
+                logger.error(f"Insufficient funds detected during fund bundled wallets operation:")
+                logger.error(f"  Error message: {str(e)}")
+                logger.error(f"  Amount per wallet: {amount_per_wallet} SOL")
+                logger.error(f"  Required minimum per wallet: {minimum_reserve_lamports} lamports")
+                logger.error(f"  Estimated fee per transaction: {total_estimated_fee_lamports} lamports")
+                logger.error(f"  Recommendation: Ensure airdrop wallet has sufficient balance for all transfers + fees")
+                
+                # Enhance the error with specific guidance
+                enhanced_error = PumpFunApiError(
+                    f"Insufficient funds for funding operation. {str(e)}. "
+                    f"Airdrop wallet needs at least {amount_per_wallet} SOL per wallet plus "
+                    f"transaction fees (~{min_fee_sol:.6f} SOL per wallet) for successful operation."
+                )
+                raise enhanced_error
+            else:
+                # Log other types of errors with context
+                logger.error(f"Fund bundled wallets operation failed with non-balance error:")
+                logger.error(f"  Error type: {type(e).__name__}")
+                logger.error(f"  Error message: {str(e)}")
+                logger.error(f"  Amount per wallet: {amount_per_wallet} SOL")
+                
+                # Re-raise original exception for non-balance errors
+                raise
 
     def verify_bundled_wallets_exist(self) -> Dict[str, Any]:
         """
@@ -667,7 +754,12 @@ class PumpFunClient:
 
     def return_funds_to_mother(self, mother_wallet_public_key: str, leave_dust: bool = False) -> Dict[str, Any]:
         """
-        Return funds from bundled wallets to the airdrop wallet.
+        Return funds from bundled wallets to the airdrop wallet with enhanced fee calculation and error detection.
+        
+        Per API documentation:
+        - Enhanced Fee Calculation: Uses precise priority fee calculation (base 5,000 + priority ~20,000 lamports = ~25,000 lamports total)
+        - Wallet Management Operations: 0.0001 SOL minimum reserve for transaction fees
+        - Enhanced error detection for insufficient funds scenarios
         
         Args:
             mother_wallet_public_key: Public key of the mother (airdrop) wallet in base58 format
@@ -678,14 +770,132 @@ class PumpFunClient:
         """
         if not mother_wallet_public_key:
             raise PumpFunValidationError("Mother wallet public key cannot be empty")
+        
+        # Enhanced fee calculation per API documentation with rent exemption
+        base_fee_lamports = 5000  # Base transaction fee
+        priority_fee_lamports = 20000  # Priority fee for faster processing
+        total_estimated_fee_lamports = base_fee_lamports + priority_fee_lamports  # ~25,000 lamports
+        rent_exemption_lamports = 2_039_280  # 0.00203928 SOL rent exemption per wallet
+        minimum_reserve_lamports = rent_exemption_lamports + total_estimated_fee_lamports  # Rent + fees
+        
+        # Log detailed fee calculation for debugging
+        logger.info(f"Return funds fee calculation:")
+        logger.info(f"  Base fee: {base_fee_lamports} lamports")
+        logger.info(f"  Priority fee: {priority_fee_lamports} lamports") 
+        logger.info(f"  Total estimated fee: {total_estimated_fee_lamports} lamports ({total_estimated_fee_lamports / 1_000_000_000:.6f} SOL)")
+        logger.info(f"  Rent exemption: {rent_exemption_lamports} lamports ({rent_exemption_lamports / 1_000_000_000:.6f} SOL)")
+        logger.info(f"  Minimum reserve: {minimum_reserve_lamports} lamports ({minimum_reserve_lamports / 1_000_000_000:.6f} SOL)")
+        logger.info(f"  Mother wallet: {mother_wallet_public_key}")
+        logger.info(f"  Leave dust: {leave_dust}")
             
         endpoint = "/api/wallets/return-funds"
         data = {
             "motherWalletPublicKeyBs58": mother_wallet_public_key,
-            "leaveDust": leave_dust
+            "leaveDust": leave_dust,
+            # Include fee calculation parameters for server-side validation
+            "feeCalculation": {
+                "baseFee": base_fee_lamports,
+                "priorityFee": priority_fee_lamports,
+                "totalEstimatedFee": total_estimated_fee_lamports,
+                "rentExemption": rent_exemption_lamports,
+                "minimumReserve": minimum_reserve_lamports
+            }
         }
         
-        return self._make_request_with_retry("POST", endpoint, json=data)
+        try:
+            result = self._make_request_with_retry("POST", endpoint, json=data)
+            
+            # Normalize response: convert list to expected dict format (API contract change fix)
+            if isinstance(result, list):
+                logger.info(f"API returned list response, normalizing to dict format")
+                transfers = result
+                total_amount = sum(item.get("amount", 0) for item in transfers if isinstance(item, dict))
+                successful_transfers = len([item for item in transfers if isinstance(item, dict) and item.get("status") != "failed"])
+                failed_transfers = len(transfers) - successful_transfers
+                
+                result = {
+                    "status": "success",
+                    "message": "Return funds operation completed successfully",
+                    "data": {
+                        "transfers": transfers,
+                        "totalWallets": len(transfers),
+                        "successfulTransfers": successful_transfers,
+                        "failedTransfers": failed_transfers,
+                        "totalAmount": total_amount
+                    }
+                }
+                logger.info(f"Normalized list response: {successful_transfers} successful, {failed_transfers} failed, {total_amount:.6f} SOL total")
+            
+            # Enhanced logging for debugging response structure
+            logger.info(f"Return funds operation completed successfully")
+            logger.info(f"Final response type: {type(result)}")
+            
+            if isinstance(result, dict):
+                logger.info(f"Response keys: {list(result.keys())}")
+                
+                # Log data section details if present
+                if "data" in result:
+                    data_section = result["data"]
+                    logger.info(f"  Data section type: {type(data_section)}")
+                    
+                    if isinstance(data_section, dict):
+                        logger.info(f"  Wallets processed: {data_section.get('totalWallets', 'unknown')}")
+                        logger.info(f"  Successful transfers: {data_section.get('successfulTransfers', 'unknown')}")
+                        logger.info(f"  Failed transfers: {data_section.get('failedTransfers', 'unknown')}")
+                        if 'totalAmount' in data_section:
+                            logger.info(f"  Total amount returned: {data_section['totalAmount']} SOL")
+                
+                # Check for other common response patterns
+                if "message" in result:
+                    logger.info(f"  Response message: {result['message']}")
+                if "status" in result:
+                    logger.info(f"  Response status: {result['status']}")
+                if "error" in result:
+                    logger.warning(f"  Response error: {result['error']}")
+            
+            return result
+            
+        except Exception as e:
+            error_message = str(e).lower()
+            
+            # Enhanced error detection for insufficient funds scenarios per API documentation
+            insufficient_funds_patterns = [
+                "custom program error: 1",  # Primary insufficient lamports error
+                "insufficient funds",       # Standard insufficient funds
+                "insufficient lamports",    # Lamports-specific error
+                "insufficient balance",     # Balance-specific error
+                "not enough sol",          # Alternative phrasing
+                "insufficient account balance"  # Account balance error
+            ]
+            
+            is_insufficient_funds = any(pattern in error_message for pattern in insufficient_funds_patterns)
+            
+            if is_insufficient_funds:
+                logger.error(f"Insufficient funds detected during return funds operation:")
+                logger.error(f"  Error message: {str(e)}")
+                logger.error(f"  Mother wallet: {mother_wallet_public_key}")
+                logger.error(f"  Required minimum per wallet: {minimum_reserve_lamports} lamports")
+                logger.error(f"  Estimated fee per transaction: {total_estimated_fee_lamports} lamports")
+                logger.error(f"  Recommendation: Ensure each wallet has at least {(minimum_reserve_lamports + total_estimated_fee_lamports) / 1_000_000_000:.6f} SOL")
+                
+                # Enhance the error with specific guidance
+                enhanced_error = PumpFunApiError(
+                    f"Insufficient funds for return operation. {str(e)}. "
+                    f"Each wallet needs at least {(minimum_reserve_lamports + total_estimated_fee_lamports) / 1_000_000_000:.6f} SOL "
+                    f"(minimum reserve: {minimum_reserve_lamports / 1_000_000_000:.6f} SOL + "
+                    f"transaction fee: {total_estimated_fee_lamports / 1_000_000_000:.6f} SOL) for successful operation."
+                )
+                raise enhanced_error
+            else:
+                # Log other types of errors with context
+                logger.error(f"Return funds operation failed with non-balance error:")
+                logger.error(f"  Error type: {type(e).__name__}")
+                logger.error(f"  Error message: {str(e)}")
+                logger.error(f"  Mother wallet: {mother_wallet_public_key}")
+                logger.error(f"  Leave dust setting: {leave_dust}")
+                
+                # Re-raise original exception for non-balance errors
+                raise
 
     def get_wallet_balance(self, public_key: str) -> Dict[str, Any]:
         """
