@@ -760,6 +760,7 @@ class PumpFunClient:
         - Enhanced Fee Calculation: Uses precise priority fee calculation (base 5,000 + priority ~20,000 lamports = ~25,000 lamports total)
         - Wallet Management Operations: 0.0001 SOL minimum reserve for transaction fees
         - Enhanced error detection for insufficient funds scenarios
+        - CRITICAL: Accounts for Solana rent exemption requirements
         
         Args:
             mother_wallet_public_key: Public key of the mother (airdrop) wallet in base58 format
@@ -771,20 +772,35 @@ class PumpFunClient:
         if not mother_wallet_public_key:
             raise PumpFunValidationError("Mother wallet public key cannot be empty")
         
-        # Enhanced fee calculation per API documentation with rent exemption
+        # CRITICAL: Enhanced fee calculation with proper rent exemption accounting
+        # These calculations are based on Solana blockchain requirements and observed transaction failures
         base_fee_lamports = 5000  # Base transaction fee
         priority_fee_lamports = 20000  # Priority fee for faster processing
         total_estimated_fee_lamports = base_fee_lamports + priority_fee_lamports  # ~25,000 lamports
-        rent_exemption_lamports = 2_039_280  # 0.00203928 SOL rent exemption per wallet
-        minimum_reserve_lamports = rent_exemption_lamports + total_estimated_fee_lamports  # Rent + fees
+        
+        # CRITICAL: Solana rent exemption for token accounts (ATA creation/maintenance)
+        # This is the minimum balance required to keep accounts rent-exempt
+        rent_exemption_lamports = 2_039_280  # 0.00203928 SOL rent exemption for ATA creation
+        
+        # Additional safety buffer for wallet management operations
+        wallet_management_reserve_lamports = 100_000  # 0.0001 SOL minimum reserve for wallet management operations
+        
+        # TOTAL minimum reserve that MUST remain in each wallet to avoid "Insufficient Funds For Rent" errors
+        minimum_reserve_lamports = rent_exemption_lamports + total_estimated_fee_lamports + wallet_management_reserve_lamports  # Total: ~0.00216 SOL
+        
+        # Additional safety buffer (10% of minimum reserve) to handle network fee fluctuations
+        safety_buffer_lamports = int(minimum_reserve_lamports * 0.1)  # 10% safety buffer
+        total_required_reserve_lamports = minimum_reserve_lamports + safety_buffer_lamports
         
         # Log detailed fee calculation for debugging
-        logger.info(f"Return funds fee calculation:")
-        logger.info(f"  Base fee: {base_fee_lamports} lamports")
-        logger.info(f"  Priority fee: {priority_fee_lamports} lamports") 
+        logger.info(f"Return funds fee calculation (ENHANCED with rent exemption):")
+        logger.info(f"  Base fee: {base_fee_lamports} lamports ({base_fee_lamports / 1_000_000_000:.6f} SOL)")
+        logger.info(f"  Priority fee: {priority_fee_lamports} lamports ({priority_fee_lamports / 1_000_000_000:.6f} SOL)")
         logger.info(f"  Total estimated fee: {total_estimated_fee_lamports} lamports ({total_estimated_fee_lamports / 1_000_000_000:.6f} SOL)")
-        logger.info(f"  Rent exemption: {rent_exemption_lamports} lamports ({rent_exemption_lamports / 1_000_000_000:.6f} SOL)")
-        logger.info(f"  Minimum reserve: {minimum_reserve_lamports} lamports ({minimum_reserve_lamports / 1_000_000_000:.6f} SOL)")
+        logger.info(f"  Rent exemption (ATA): {rent_exemption_lamports} lamports ({rent_exemption_lamports / 1_000_000_000:.6f} SOL)")
+        logger.info(f"  Wallet mgmt reserve: {wallet_management_reserve_lamports} lamports ({wallet_management_reserve_lamports / 1_000_000_000:.6f} SOL)")
+        logger.info(f"  Safety buffer (10%): {safety_buffer_lamports} lamports ({safety_buffer_lamports / 1_000_000_000:.6f} SOL)")
+        logger.info(f"  TOTAL required reserve: {total_required_reserve_lamports} lamports ({total_required_reserve_lamports / 1_000_000_000:.6f} SOL)")
         logger.info(f"  Mother wallet: {mother_wallet_public_key}")
         logger.info(f"  Leave dust: {leave_dust}")
             
@@ -792,13 +808,22 @@ class PumpFunClient:
         data = {
             "motherWalletPublicKeyBs58": mother_wallet_public_key,
             "leaveDust": leave_dust,
-            # Include fee calculation parameters for server-side validation
+            # CRITICAL: Include enhanced fee calculation parameters for server-side validation
             "feeCalculation": {
                 "baseFee": base_fee_lamports,
                 "priorityFee": priority_fee_lamports,
                 "totalEstimatedFee": total_estimated_fee_lamports,
                 "rentExemption": rent_exemption_lamports,
-                "minimumReserve": minimum_reserve_lamports
+                "walletManagementReserve": wallet_management_reserve_lamports,
+                "minimumReserve": minimum_reserve_lamports,
+                "safetyBuffer": safety_buffer_lamports,
+                "totalRequiredReserve": total_required_reserve_lamports
+            },
+            # CRITICAL: Explicit instruction to server to respect rent exemption
+            "enforceRentExemption": True,
+            "maxTransferableCalculation": {
+                "formula": "wallet_balance - totalRequiredReserve",
+                "description": "Maximum transferable amount accounting for rent exemption and fees"
             }
         }
         
@@ -871,19 +896,35 @@ class PumpFunClient:
             is_insufficient_funds = any(pattern in error_message for pattern in insufficient_funds_patterns)
             
             if is_insufficient_funds:
-                logger.error(f"Insufficient funds detected during return funds operation:")
+                logger.error(f"CRITICAL: Insufficient funds detected during return funds operation:")
                 logger.error(f"  Error message: {str(e)}")
                 logger.error(f"  Mother wallet: {mother_wallet_public_key}")
-                logger.error(f"  Required minimum per wallet: {minimum_reserve_lamports} lamports")
-                logger.error(f"  Estimated fee per transaction: {total_estimated_fee_lamports} lamports")
-                logger.error(f"  Recommendation: Ensure each wallet has at least {(minimum_reserve_lamports + total_estimated_fee_lamports) / 1_000_000_000:.6f} SOL")
+                logger.error(f"  Required minimum per wallet: {minimum_reserve_lamports} lamports ({minimum_reserve_lamports / 1_000_000_000:.6f} SOL)")
+                logger.error(f"  Safety buffer per wallet: {safety_buffer_lamports} lamports ({safety_buffer_lamports / 1_000_000_000:.6f} SOL)")
+                logger.error(f"  TOTAL required reserve per wallet: {total_required_reserve_lamports} lamports ({total_required_reserve_lamports / 1_000_000_000:.6f} SOL)")
+                logger.error(f"  Estimated fee per transaction: {total_estimated_fee_lamports} lamports ({total_estimated_fee_lamports / 1_000_000_000:.6f} SOL)")
+                logger.error(f"  Rent exemption requirement: {rent_exemption_lamports} lamports ({rent_exemption_lamports / 1_000_000_000:.6f} SOL)")
+                logger.error(f"  RECOMMENDATION: Each wallet needs at least {total_required_reserve_lamports / 1_000_000_000:.6f} SOL balance")
                 
-                # Enhance the error with specific guidance
+                # Provide detailed breakdown in error message
+                breakdown_details = (
+                    f"Detailed breakdown per wallet:\n"
+                    f"  • Transaction fees: {total_estimated_fee_lamports / 1_000_000_000:.6f} SOL\n"
+                    f"  • Rent exemption: {rent_exemption_lamports / 1_000_000_000:.6f} SOL\n"
+                    f"  • Wallet management: {wallet_management_reserve_lamports / 1_000_000_000:.6f} SOL\n"
+                    f"  • Safety buffer: {safety_buffer_lamports / 1_000_000_000:.6f} SOL\n"
+                    f"  • TOTAL REQUIRED: {total_required_reserve_lamports / 1_000_000_000:.6f} SOL"
+                )
+                
+                logger.error(f"  {breakdown_details}")
+                
+                # Enhance the error with specific guidance and accurate calculations
                 enhanced_error = PumpFunApiError(
-                    f"Insufficient funds for return operation. {str(e)}. "
-                    f"Each wallet needs at least {(minimum_reserve_lamports + total_estimated_fee_lamports) / 1_000_000_000:.6f} SOL "
-                    f"(minimum reserve: {minimum_reserve_lamports / 1_000_000_000:.6f} SOL + "
-                    f"transaction fee: {total_estimated_fee_lamports / 1_000_000_000:.6f} SOL) for successful operation."
+                    f"INSUFFICIENT FUNDS FOR RENT EXEMPTION: {str(e)}. "
+                    f"Each wallet must maintain at least {total_required_reserve_lamports / 1_000_000_000:.6f} SOL total "
+                    f"to avoid 'Insufficient Funds For Rent' errors. "
+                    f"{breakdown_details}. "
+                    f"Current calculation ensures Solana rent exemption compliance and network fee coverage."
                 )
                 raise enhanced_error
             else:
