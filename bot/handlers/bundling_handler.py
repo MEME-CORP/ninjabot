@@ -2517,9 +2517,16 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
                                     logger.warning(f"UI update during funding failed, continuing: {ui_funding_error}")
                                     # IMPORTANT: Do not raise this error - it would be caught by outer exception handler
                                 
-                                # Execute the actual funding operation
-                                funding_result = pumpfun_client.fund_bundled_wallets(amount_per_wallet)
-                                logger.info(f"Funding operation completed: {funding_result}")
+                                # FIXED: Execute funding with stateless API (no state management needed)
+                                logger.info("=== EXECUTING FUNDING OPERATION ===")
+                                logger.info(f"Funding {bundled_wallets_count} bundled wallets with {amount_per_wallet:.6f} SOL each for user {user.id}")
+                                
+                                # Execute funding directly (stateless API)
+                                funding_result = pumpfun_client.fund_bundled_wallets(
+                                    amount_per_wallet=amount_per_wallet
+                                )
+                                logger.info(f"Funding operation completed successfully: {funding_result}")
+                                logger.info("=== FUNDING OPERATION COMPLETED ===")
                                 
                                 # Store funding results in session
                                 session_manager.update_session_value(user.id, "funding_results", funding_result)
@@ -2634,6 +2641,28 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
                                         f"• API configuration problems\n\n"
                                         f"Try checking prerequisites or retrying the funding operation."
                                     )
+                                elif "mother wallet not found" in error_msg or "wallet not recognized" in error_msg:
+                                    # This shouldn't happen with stateless API, but handle gracefully
+                                    logger.warning(f"Unexpected wallet state error (stateless API): {str(funding_error)}")
+                                    
+                                    text = (
+                                        "❌ **Wallet State Error**\n\n"
+                                        f"There was an unexpected wallet recognition issue.\n\n"
+                                        f"**Error:** {str(funding_error)}\n\n"
+                                        f"**What to try:**\n"
+                                        f"• Re-import the airdrop wallet\n"
+                                        f"• Ensure the wallet has sufficient balance\n"
+                                        f"• Try the funding operation again\n\n"
+                                        f"If this persists, the API may be experiencing issues."
+                                    )
+                                    
+                                    keyboard = InlineKeyboardMarkup([
+                                        [build_button(" Retry Funding", "retry_wallet_funding")],
+                                        [build_button("📱 Re-import Wallets", "reimport_wallets")],
+                                        [build_button("« Back to Balance Check", "check_wallet_balance")]
+                                    ])
+                                    
+                                    error_response = text
                                 else:
                                     keyboard = InlineKeyboardMarkup([
                                         [build_button("🔄 Retry Funding", "retry_wallet_funding")],
