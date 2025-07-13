@@ -497,10 +497,13 @@ class PumpFunClient:
                 # Re-raise original exception for other types of errors
                 raise
 
-    def fund_bundled_wallets(self, amount_per_wallet: float, mother_private_key: Optional[str] = None) -> Dict[str, Any]:
+    def fund_bundled_wallets(self, amount_per_wallet: float, mother_private_key: Optional[str] = None, 
+                           bundled_wallets: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
         """
         Fund bundled wallets from the airdrop wallet with enhanced fee calculation and error detection.
         CRITICAL FIX: Removed incorrect state verification - API is stateless.
+        
+        For stateless API, all wallet credentials must be provided in the request.
         
         Per API documentation:
         - Enhanced Fee Calculation: Uses precise priority fee calculation (base 5,000 + priority ~20,000 lamports = ~25,000 lamports total)
@@ -510,7 +513,8 @@ class PumpFunClient:
         
         Args:
             amount_per_wallet: SOL amount to send to each wallet
-            mother_private_key: Optional mother wallet private key (for backwards compatibility)
+            mother_private_key: Mother wallet private key (for stateless operation)
+            bundled_wallets: List of bundled wallet credentials (for stateless operation)
             
         Returns:
             Dictionary with funding transaction results
@@ -552,10 +556,37 @@ class PumpFunClient:
             
         endpoint = "/api/wallets/fund-bundled"
         
-        # Use the correct parameter name from API documentation
+        # CRITICAL FIX: API server expects 'amountPerWalletSOL' despite documentation showing 'amountPerWallet'
+        # This is confirmed by testing - the server validates for 'amountPerWalletSOL'
+        # For stateless API, we also need to provide all wallet credentials
         data = {
-            "amountPerWallet": amount_per_wallet
+            "amountPerWalletSOL": amount_per_wallet
         }
+        
+        # WORKAROUND: Re-import airdrop wallet immediately before funding
+        # The API claims to be stateless but appears to require persistent wallet registration
+        if mother_private_key:
+            logger.info("Re-importing airdrop wallet for funding operation (API workaround)")
+            try:
+                import_result = self.create_airdrop_wallet(mother_private_key)
+                logger.info(f"Airdrop wallet re-import result: {import_result.get('message', 'Success')}")
+            except Exception as import_error:
+                logger.warning(f"Airdrop wallet re-import failed: {import_error}")
+                # Continue with funding attempt anyway
+        
+        # WORKAROUND: Re-import bundled wallets if provided
+        if bundled_wallets:
+            logger.info("Re-importing bundled wallets for funding operation (API workaround)")
+            try:
+                import_result = self.import_bundled_wallets(bundled_wallets)
+                logger.info(f"Bundled wallets re-import result: {import_result.get('message', 'Success')}")
+            except Exception as import_error:
+                logger.warning(f"Bundled wallets re-import failed: {import_error}")
+                # Continue with funding attempt anyway
+        
+        # Debug log the exact request being sent
+        debug_data = {k: v for k, v in data.items()}
+        logger.info(f"PumpFun API POST {endpoint} - Request body: {debug_data}")
         
         try:
             result = self._make_request_with_retry("POST", endpoint, json=data)
@@ -626,7 +657,7 @@ class PumpFunClient:
             
             # Alternative: Try to fund with 0 amount to test if wallets exist
             test_endpoint = "/api/wallets/fund-bundled"
-            test_data = {"amountPerWallet": 0.0}
+            test_data = {"amountPerWalletSOL": 0.0}  # Use actual server parameter name
             
             logger.info("Verifying bundled wallets exist on API server...")
             

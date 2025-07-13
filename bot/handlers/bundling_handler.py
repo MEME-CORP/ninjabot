@@ -2521,9 +2521,39 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
                                 logger.info("=== EXECUTING FUNDING OPERATION ===")
                                 logger.info(f"Funding {bundled_wallets_count} bundled wallets with {amount_per_wallet:.6f} SOL each for user {user.id}")
                                 
-                                # Execute funding directly (stateless API)
+                                # Get airdrop wallet private key for stateless API call
+                                airdrop_private_key = session_manager.get_session_value(user.id, "airdrop_private_key")
+                                if not airdrop_private_key:
+                                    raise Exception("Airdrop wallet private key not found - please restart the workflow")
+                                
+                                # Convert to API format if needed
+                                if is_base58_private_key(airdrop_private_key):
+                                    api_private_key = airdrop_private_key
+                                else:
+                                    api_private_key = convert_base64_to_base58(airdrop_private_key)
+                                
+                                # Get bundled wallets credentials for stateless API
+                                bundled_wallets_credentials = []
+                                bundled_wallets_original_json = session_manager.get_session_value(user.id, "bundled_wallets_original_json")
+                                if bundled_wallets_original_json and "data" in bundled_wallets_original_json:
+                                    for wallet in bundled_wallets_original_json["data"]:
+                                        # Convert private key format if needed
+                                        wallet_private_key = wallet.get("privateKey", "")
+                                        if not is_base58_private_key(wallet_private_key):
+                                            wallet_private_key = convert_base64_to_base58(wallet_private_key)
+                                        
+                                        bundled_wallets_credentials.append({
+                                            "name": wallet.get("name", "Unknown"),
+                                            "privateKey": wallet_private_key
+                                        })
+                                
+                                logger.info(f"Prepared {len(bundled_wallets_credentials)} bundled wallet credentials for funding")
+                                
+                                # Execute funding with all wallet credentials (stateless API)
                                 funding_result = pumpfun_client.fund_bundled_wallets(
-                                    amount_per_wallet=amount_per_wallet
+                                    amount_per_wallet=amount_per_wallet,
+                                    mother_private_key=api_private_key,
+                                    bundled_wallets=bundled_wallets_credentials
                                 )
                                 logger.info(f"Funding operation completed successfully: {funding_result}")
                                 logger.info("=== FUNDING OPERATION COMPLETED ===")
