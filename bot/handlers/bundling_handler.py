@@ -1575,246 +1575,89 @@ async def execute_return_funds(update: Update, context: CallbackContext) -> int:
             parse_mode=ParseMode.MARKDOWN
         )
         
-        logger.info(
-            f"Starting return funds operation for user {user.id}",
-            extra={"user_id": user.id, "bundled_wallets_count": bundled_wallets_count}
+        # UPDATED: Use new stateless API format - no need for pre-importing wallets
+        logger.info(f"Starting return funds operation for user {user.id} with new API format")
+        
+        # Show initial progress message
+        await query.edit_message_text(
+            format_return_funds_progress_message({
+                "processed": 0,
+                "total": bundled_wallets_count,
+                "successful": 0,
+                "failed": 0,
+                "current_operation": "Preparing return funds operation..."
+            }),
+            parse_mode=ParseMode.MARKDOWN
         )
         
-        # CRITICAL: Import bundled wallets to API before return funds operation
-        # The API needs to know about the wallets before it can return funds from them
-        try:
-            logger.info(f"Importing bundled wallets to API before return funds for user {user.id}")
-            
-            # Load bundled wallet data for import
-            bundled_wallets_data = session_manager.get_session_value(user.id, "bundled_wallets_data")
-            bundled_wallets_original_json = session_manager.get_session_value(user.id, "bundled_wallets_original_json")
-            
-            # FALLBACK: If no wallet data in session, try to load from storage
-            if not bundled_wallets_data and not bundled_wallets_original_json:
-                logger.info(f"No bundled wallet data in session for user {user.id}, attempting to load from storage")
-                try:
-                    # Try to load from bundled wallet storage using airdrop wallet address
-                    storage_wallets = bundled_wallet_storage.load_bundled_wallets(airdrop_wallet_address, user.id)
-                    if storage_wallets:
-                        logger.info(f"Loaded {len(storage_wallets)} wallets from storage for user {user.id}")
-                        bundled_wallets_data = storage_wallets
-                        # Also try to get the original JSON data
-                        original_json_data = bundled_wallet_storage.get_bundled_wallets_by_airdrop(user.id, airdrop_wallet_address)
-                        if original_json_data:
-                            bundled_wallets_original_json = original_json_data
-                            logger.info(f"Loaded original JSON data from storage for user {user.id}")
-                except Exception as storage_error:
-                    logger.warning(f"Failed to load bundled wallets from storage: {str(storage_error)}")
-            
-            # FINAL FALLBACK: Try to load directly from JSON files
-            if not bundled_wallets_data and not bundled_wallets_original_json:
-                logger.info(f"Attempting final fallback: direct JSON file loading for user {user.id}")
-                try:
-                    # Try to load the wallet credentials from the bundled file
-                    wallet_credentials = load_wallet_credentials_from_bundled_file(user.id)
-                    if wallet_credentials and len(wallet_credentials) > 0:
-                        logger.info(f"Successfully loaded {len(wallet_credentials)} wallet credentials from bundled file")
-                        bundled_wallets_data = wallet_credentials
-                        # Create a structured format for session storage
-                        bundled_wallets_original_json = {
-                            "data": wallet_credentials,
-                            "wallets": wallet_credentials
-                        }
-                    else:
-                        logger.warning(f"No wallet credentials found in bundled file for user {user.id}")
-                except Exception as file_error:
-                    logger.error(f"Failed to load wallet credentials from bundled file: {str(file_error)}")
-            
-            # Prefer original JSON data for API import (preserves privateKey format)
-            data_source = bundled_wallets_original_json if bundled_wallets_original_json else bundled_wallets_data
-            
-            if data_source:
-                # Extract wallets from data structure
-                wallets_to_import = []
-                
-                if isinstance(data_source, list):
-                    wallets_to_import = data_source
-                elif isinstance(data_source, dict) and "data" in data_source:
-                    wallets_to_import = data_source["data"]
-                elif isinstance(data_source, dict) and "wallets" in data_source:
-                    wallets_to_import = data_source["wallets"]
-                
-                if wallets_to_import and len(wallets_to_import) > 0:
-                    # Format bundled wallets for API import (name and privateKey fields)
-                    api_wallets = []
-                    for wallet in wallets_to_import:
-                        if isinstance(wallet, dict):
-                            # Handle different key formats (privateKey vs private_key vs privateKeyBs58)
-                            private_key = wallet.get("privateKey") or wallet.get("private_key") or wallet.get("privateKeyBs58")
-                            name = wallet.get("name", f"Wallet_{len(api_wallets) + 1}")
-                            
-                            if private_key:
-                                # CRITICAL: Convert base64 private key to base58 format for API
-                                try:
-                                    # Check if it's already base58 format using proper validation
-                                    if is_base58_private_key(private_key):
-                                        private_key_bs58 = private_key
-                                        logger.info(f"Private key for wallet {name} is already in base58 format (length: {len(private_key)})")
-                                    else:
-                                        # Convert from base64 to base58 format as expected by API
-                                        private_key_bs58 = convert_base64_to_base58(private_key)
-                                        logger.info(f"Successfully converted private key for wallet {name} from base64 to base58 (length: {len(private_key)} -> {len(private_key_bs58)})")
-                                    
-                                    # Validate the final key format before sending to API
-                                    if not is_base58_private_key(private_key_bs58):
-                                        raise ValueError(f"Final private key format validation failed for wallet {name}")
-                                    
-                                    api_wallets.append({
-                                        "name": name,
-                                        "privateKey": private_key_bs58  # PumpFunClient will add both privateKey and privateKeyBs58 fields
-                                    })
-                                except Exception as conversion_error:
-                                    logger.error(f"Failed to convert private key for wallet {name}: {str(conversion_error)}")
-                                    # Log details for debugging but don't expose sensitive data
-                                    logger.error(f"Private key format details - length: {len(private_key)}, starts_with: {private_key[:8] if len(private_key) >= 8 else 'too_short'}")
-                                    # Skip this wallet rather than sending potentially invalid data
-                                    logger.warning(f"Skipping wallet {name} due to private key format issues")
-                    
-                    if api_wallets:
-                        logger.info(f"Importing {len(api_wallets)} bundled wallets to API for return funds operation")
-                        
-                        # Update progress message to show import
-                        await query.edit_message_text(
-                            format_return_funds_progress_message({
-                                "processed": 0,
-                                "total": bundled_wallets_count + 1,
-                                "successful": 0,
-                                "failed": 0,
-                                "current_operation": "Importing bundled wallets to API..."
-                            }),
-                            parse_mode=ParseMode.MARKDOWN
-                        )
-                        
-                        # Import bundled wallets to API
-                        import_result = pumpfun_client.import_bundled_wallets(api_wallets)
-                        logger.info(f"Successfully imported bundled wallets for return funds operation: {import_result}")
-                        
-                        # CRITICAL: Also ensure airdrop wallet is imported to API
-                        try:
-                            # Get airdrop wallet private key from session
-                            airdrop_private_key = session_manager.get_session_value(user.id, "airdrop_private_key")
-                            
-                            # FALLBACK: If no airdrop private key in session, try to load from storage
-                            if not airdrop_private_key:
-                                logger.info(f"No airdrop private key in session for user {user.id}, attempting to load from storage")
-                                try:
-                                    # Try to load from airdrop wallet storage
-                                    stored_airdrop_data = airdrop_wallet_storage.get_airdrop_wallet_by_address(user.id, airdrop_wallet_address)
-                                    if stored_airdrop_data and "private_key" in stored_airdrop_data:
-                                        airdrop_private_key = stored_airdrop_data["private_key"]
-                                        logger.info(f"Successfully loaded airdrop private key from storage for user {user.id}")
-                                    else:
-                                        logger.warning(f"No airdrop private key found in storage for user {user.id}")
-                                except Exception as storage_error:
-                                    logger.warning(f"Failed to load airdrop private key from storage: {str(storage_error)}")
-                            
-                            if airdrop_private_key:
-                                logger.info(f"Importing airdrop wallet to API for return funds operation")
-                                
-                                # Import airdrop wallet to API (convert base64 to base58 if needed)
-                                try:
-                                    # Check if the private key is already in base58 format
-                                    if is_base58_private_key(airdrop_private_key):
-                                        api_private_key = airdrop_private_key
-                                        logger.info(f"Airdrop private key already in base58 format")
-                                    else:
-                                        # Convert from base64 to base58 format
-                                        api_private_key = convert_base64_to_base58(airdrop_private_key)
-                                        logger.info(f"Successfully converted airdrop private key from base64 to base58 for return funds")
-                                    
-                                    airdrop_import_result = pumpfun_client.create_airdrop_wallet(api_private_key)
-                                    logger.info(f"Successfully imported airdrop wallet for return funds operation: {airdrop_import_result}")
-                                except ValueError as conv_error:
-                                    logger.error(f"Failed to convert airdrop private key format for return funds: {conv_error}")
-                                    raise Exception(f"Invalid airdrop private key format: {conv_error}")
-                            else:
-                                logger.warning(f"No airdrop private key found in session for user {user.id}")
-                        except Exception as airdrop_error:
-                            logger.error(f"Failed to import airdrop wallet for return funds operation: {str(airdrop_error)}")
-                            # Continue anyway - airdrop wallet might already be imported
-                        
-                        # Update progress message
-                        await query.edit_message_text(
-                            format_return_funds_progress_message({
-                                "processed": 0,
-                                "total": bundled_wallets_count + 1,
-                                "successful": 0,
-                                "failed": 0,
-                                "current_operation": "All wallets imported. Starting return funds operation..."
-                            }),
-                            parse_mode=ParseMode.MARKDOWN
-                        )
-                    else:
-                        logger.warning(f"No valid wallets found for API import during return funds for user {user.id}")
-                        raise Exception("No valid bundled wallets found for import")
-                else:
-                    logger.warning(f"No wallet data found for API import during return funds for user {user.id}")
-                    raise Exception("No bundled wallet data found for import")
-            else:
-                logger.error(f"No bundled wallet data source found for user {user.id}")
-                
-                # Send error message to user
-                await query.edit_message_text(
-                    f"❌ **Return Funds Failed**\n\n"
-                    f"Unable to find bundled wallet data for your account.\n\n"
-                    f"This can happen if:\n"
-                    f"• Bundled wallets haven't been created yet\n"
-                    f"• Wallet data was cleared from the system\n"
-                    f"• There's a storage issue\n\n"
-                    f"Please try creating bundled wallets first, or contact support if you believe this is an error.",
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=InlineKeyboardMarkup([
-                        [build_button("🔄 Back to Balance Check", "check_wallet_balance")],
-                        [build_button("🏠 Main Menu", "back_to_activities")]
-                    ])
-                )
-                
-                return ConversationState.WALLET_BALANCE_CHECK
-                
-        except Exception as import_error:
-            logger.error(f"Failed to import bundled wallets for return funds operation: {str(import_error)}")
-            
-            # Enhanced error analysis for server-side issues
-            error_message = str(import_error)
-            if "bs58.decode is not a function" in error_message:
-                logger.error("Server-side bs58 library issue detected during return funds import")
-                # This is a critical server configuration issue
-                raise Exception(
-                    "Server configuration error: bs58 library not properly installed. "
-                    "Contact API administrator to install: npm install bs58. "
-                    "Cannot proceed with return funds operation without proper server setup."
-                )
-            elif "bs58" in error_message.lower():
-                logger.error("Server-side base58 processing issue during return funds import")
-                # This might be recoverable by retrying
-                logger.info("Attempting to continue despite base58 processing issues")
-            else:
-                # Continue with return funds operation anyway - wallets might already be imported
-                logger.info("Continuing with return funds operation despite import error")
+        # Store prepared child wallets for new API format
+        child_wallets_credentials = []
         
-        # Execute return funds operation via API with enhanced fee calculation
-        logger.info(f"Executing return funds operation with enhanced fee calculation for user {user.id}")
+        # Get bundled wallets credentials from session or storage
+        bundled_wallets_original_json = session_manager.get_session_value(user.id, "bundled_wallets_original_json")
+        if not bundled_wallets_original_json:
+            bundled_wallets_data = session_manager.get_session_value(user.id, "bundled_wallets_data")
+            if bundled_wallets_data:
+                bundled_wallets_original_json = {"data": bundled_wallets_data}
+        
+        # Load from storage if not in session
+        if not bundled_wallets_original_json:
+            try:
+                storage_wallets = bundled_wallet_storage.get_bundled_wallets_by_user(user.id)
+                if storage_wallets:
+                    bundled_wallets_original_json = {"data": storage_wallets}
+            except Exception:
+                pass
+        
+        # Prepare child wallets credentials for new API format
+        if bundled_wallets_original_json:
+            wallets_to_process = []
+            
+            if isinstance(bundled_wallets_original_json, list):
+                wallets_to_process = bundled_wallets_original_json
+            elif isinstance(bundled_wallets_original_json, dict) and "data" in bundled_wallets_original_json:
+                wallets_to_process = bundled_wallets_original_json["data"]
+            elif isinstance(bundled_wallets_original_json, dict) and "wallets" in bundled_wallets_original_json:
+                wallets_to_process = bundled_wallets_original_json["wallets"]
+            
+            for wallet in wallets_to_process:
+                if isinstance(wallet, dict):
+                    private_key = wallet.get("privateKey") or wallet.get("private_key") or wallet.get("privateKeyBs58")
+                    name = wallet.get("name", "Unknown")
+                    
+                    if private_key:
+                        # Convert to base58 format if needed
+                        if is_base58_private_key(private_key):
+                            private_key_bs58 = private_key
+                        else:
+                            private_key_bs58 = convert_base64_to_base58(private_key)
+                        
+                        child_wallets_credentials.append({
+                            "name": name,
+                            "privateKey": private_key_bs58
+                        })
+        
+        if not child_wallets_credentials:
+            raise Exception("No child wallet credentials found for return funds operation")
+
+        # Execute return funds operation with new API format
+        logger.info(f"Executing return funds operation with {len(child_wallets_credentials)} child wallets")
         
         # Show operation progress
         await query.edit_message_text(
             format_return_funds_progress_message({
                 "processed": 0,
-                "total": bundled_wallets_count + 1,
+                "total": len(child_wallets_credentials),
                 "successful": 0,
                 "failed": 0,
-                "current_operation": "Executing return funds with enhanced fee calculation..."
+                "current_operation": "Executing return funds operation..."
             }),
             parse_mode=ParseMode.MARKDOWN
         )
         
         return_results = pumpfun_client.return_funds_to_mother(
             mother_wallet_public_key=airdrop_wallet_address,
-            leave_dust=True
+            child_wallets=child_wallets_credentials
         )
         
         # Enhanced response validation and logging
@@ -2549,7 +2392,7 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
                                 
                                 logger.info(f"Prepared {len(bundled_wallets_credentials)} bundled wallet credentials for funding")
                                 
-                                # Execute funding with all wallet credentials (stateless API)
+                                # Execute funding with new stateless API format
                                 funding_result = pumpfun_client.fund_bundled_wallets(
                                     amount_per_wallet=amount_per_wallet,
                                     mother_private_key=api_private_key,
@@ -2561,12 +2404,40 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
                                 # Store funding results in session
                                 session_manager.update_session_value(user.id, "funding_results", funding_result)
                                 
-                                # Parse funding results
+                                # Parse funding results with enhanced format handling
                                 if isinstance(funding_result, dict):
-                                    successful_transfers = funding_result.get("successful_transfers", 0)
-                                    failed_transfers = funding_result.get("failed_transfers", 0)
-                                    total_amount = funding_result.get("total_amount", 0)
-                                    bundle_id = funding_result.get("bundle_id", "")
+                                    # Check for dict-with-list-data format (new API response pattern)
+                                    if "data" in funding_result and isinstance(funding_result["data"], list):
+                                        transfers_list = funding_result["data"]
+                                        successful_transfers = len([t for t in transfers_list if isinstance(t, dict) and t.get("status") == "success"])
+                                        failed_transfers = len([t for t in transfers_list if isinstance(t, dict) and t.get("status") == "failed"])
+                                        skipped_transfers = len([t for t in transfers_list if isinstance(t, dict) and t.get("status") == "skipped"])
+                                        total_amount = sum(t.get("amountSent", 0) for t in transfers_list if isinstance(t, dict) and t.get("status") == "success")
+                                        bundle_id = funding_result.get("bundleId", "")
+                                        
+                                        logger.info(f"Parsed dict-with-list-data format: {successful_transfers} successful, {failed_transfers} failed, {skipped_transfers} skipped, {total_amount:.6f} SOL total")
+                                    
+                                    # Check for normalized response format (dict-with-dict-data)
+                                    elif "data" in funding_result and isinstance(funding_result["data"], dict):
+                                        data_section = funding_result["data"]
+                                        successful_transfers = data_section.get("successfulTransfers", 0)
+                                        failed_transfers = data_section.get("failedTransfers", 0)
+                                        total_amount = data_section.get("totalAmount", 0)
+                                        bundle_id = data_section.get("bundleId", "")
+                                        
+                                        # If totalAmount is 0, calculate from amount per wallet
+                                        if total_amount == 0 and successful_transfers > 0:
+                                            total_amount = amount_per_wallet * successful_transfers
+                                        
+                                        logger.info(f"Parsed dict-with-dict-data format: {successful_transfers} successful, {failed_transfers} failed, {total_amount:.6f} SOL total")
+                                    else:
+                                        # Legacy response format
+                                        successful_transfers = funding_result.get("successful_transfers", 0)
+                                        failed_transfers = funding_result.get("failed_transfers", 0)
+                                        total_amount = funding_result.get("total_amount", 0)
+                                        bundle_id = funding_result.get("bundle_id", "")
+                                        
+                                        logger.info(f"Parsed legacy format: {successful_transfers} successful, {failed_transfers} failed, {total_amount:.6f} SOL total")
                                 else:
                                     # Assume success if no detailed results
                                     successful_transfers = bundled_wallets_count

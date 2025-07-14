@@ -498,27 +498,49 @@ class PumpFunClient:
                 raise
 
     def fund_bundled_wallets(self, amount_per_wallet: float, mother_private_key: Optional[str] = None, 
-                           bundled_wallets: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
+                           bundled_wallets: Optional[List[Dict[str, str]]] = None,
+                           target_wallet_names: Optional[List[str]] = None) -> Dict[str, Any]:
         """
-        Fund bundled wallets from the airdrop wallet with enhanced fee calculation and error detection.
-        CRITICAL FIX: Removed incorrect state verification - API is stateless.
+        Fund bundled wallets from the airdrop wallet using the new stateless API format.
         
-        For stateless API, all wallet credentials must be provided in the request.
+        Updated to use the new API endpoint format that requires all wallet credentials
+        to be provided directly in the request body without server-side state management.
         
-        Per API documentation:
-        - Enhanced Fee Calculation: Uses precise priority fee calculation (base 5,000 + priority ~20,000 lamports = ~25,000 lamports total)
-        - Wallet Management Operations: 0.0001 SOL minimum reserve for transaction fees
-        - Enhanced error detection for insufficient funds scenarios
-        - FIXED: Removed non-existent state verification for stateless API
+        New API Format:
+        {
+            "amountPerWalletSOL": <number>,
+            "childWallets": [
+                { "name": "DevWallet", "privateKey": "<base58 string>" },
+                { "name": "First Bundled Wallet 1", "privateKey": "<base58 string>" }
+            ],
+            "motherWalletPrivateKeyBs58": "<base58 string>",
+            "targetWalletNames": ["DevWallet"] // optional
+        }
         
         Args:
             amount_per_wallet: SOL amount to send to each wallet
-            mother_private_key: Mother wallet private key (for stateless operation)
-            bundled_wallets: List of bundled wallet credentials (for stateless operation)
+            mother_private_key: Mother wallet private key in base58 format
+            bundled_wallets: List of bundled wallet credentials with name and privateKey
+            target_wallet_names: Optional list of specific wallet names to fund
             
         Returns:
             Dictionary with funding transaction results
         """
+        # Validate required parameters for new API format
+        if not mother_private_key:
+            raise PumpFunValidationError("Mother wallet private key is required for stateless API")
+        if not bundled_wallets or len(bundled_wallets) == 0:
+            raise PumpFunValidationError("Bundled wallets list is required and cannot be empty")
+        
+        # Validate each bundled wallet has required fields
+        for i, wallet in enumerate(bundled_wallets):
+            if not isinstance(wallet, dict):
+                raise PumpFunValidationError(f"Bundled wallet {i} must be a dictionary")
+            if "name" not in wallet or not wallet["name"]:
+                raise PumpFunValidationError(f"Bundled wallet {i} missing required 'name' field")
+            if "privateKey" not in wallet or not wallet["privateKey"]:
+                raise PumpFunValidationError(f"Bundled wallet {i} missing required 'privateKey' field")
+
         if amount_per_wallet <= 0:
             raise PumpFunValidationError("Amount per wallet must be greater than 0")
 
@@ -556,49 +578,84 @@ class PumpFunClient:
             
         endpoint = "/api/wallets/fund-bundled"
         
-        # CRITICAL FIX: API server expects 'amountPerWalletSOL' despite documentation showing 'amountPerWallet'
-        # This is confirmed by testing - the server validates for 'amountPerWalletSOL'
-        # For stateless API, we also need to provide all wallet credentials
+        # New API format: provide all wallet credentials directly in request
         data = {
-            "amountPerWalletSOL": amount_per_wallet
+            "amountPerWalletSOL": amount_per_wallet,
+            "childWallets": bundled_wallets,
+            "motherWalletPrivateKeyBs58": mother_private_key
         }
         
-        # WORKAROUND: Re-import airdrop wallet immediately before funding
-        # The API claims to be stateless but appears to require persistent wallet registration
-        if mother_private_key:
-            logger.info("Re-importing airdrop wallet for funding operation (API workaround)")
-            try:
-                import_result = self.create_airdrop_wallet(mother_private_key)
-                logger.info(f"Airdrop wallet re-import result: {import_result.get('message', 'Success')}")
-            except Exception as import_error:
-                logger.warning(f"Airdrop wallet re-import failed: {import_error}")
-                # Continue with funding attempt anyway
+        # Add optional target wallet names if specified
+        if target_wallet_names:
+            data["targetWalletNames"] = target_wallet_names
         
-        # WORKAROUND: Re-import bundled wallets if provided
-        if bundled_wallets:
-            logger.info("Re-importing bundled wallets for funding operation (API workaround)")
-            try:
-                import_result = self.import_bundled_wallets(bundled_wallets)
-                logger.info(f"Bundled wallets re-import result: {import_result.get('message', 'Success')}")
-            except Exception as import_error:
-                logger.warning(f"Bundled wallets re-import failed: {import_error}")
-                # Continue with funding attempt anyway
+        logger.info(f"Funding {len(bundled_wallets)} bundled wallets with new API format")
+        logger.info(f"Amount per wallet: {amount_per_wallet} SOL")
+        if target_wallet_names:
+            logger.info(f"Target wallets: {target_wallet_names}")
         
-        # Debug log the exact request being sent
-        debug_data = {k: v for k, v in data.items()}
-        logger.info(f"PumpFun API POST {endpoint} - Request body: {debug_data}")
+        # Debug log (excluding sensitive data)
+        debug_data = {
+            "amountPerWalletSOL": amount_per_wallet,
+            "childWalletsCount": len(bundled_wallets),
+            "childWalletNames": [w.get("name", "Unknown") for w in bundled_wallets],
+            "motherWalletProvided": bool(mother_private_key),
+            "targetWalletNames": target_wallet_names
+        }
+        logger.info(f"PumpFun API POST {endpoint} - Request summary: {debug_data}")
         
         try:
             result = self._make_request_with_retry("POST", endpoint, json=data)
             
+            # Normalize response: convert list to expected dict format (API contract change fix)
+            if isinstance(result, list):
+                logger.info(f"API returned list response, normalizing to dict format")
+                transfers = result
+                total_amount = sum(item.get("amount", 0) for item in transfers if isinstance(item, dict))
+                successful_transfers = len([item for item in transfers if isinstance(item, dict) and item.get("status") != "failed"])
+                failed_transfers = len(transfers) - successful_transfers
+                
+                result = {
+                    "status": "success",
+                    "message": "Fund bundled wallets operation completed successfully",
+                    "data": {
+                        "transfers": transfers,
+                        "totalWallets": len(transfers),
+                        "successfulTransfers": successful_transfers,
+                        "failedTransfers": failed_transfers,
+                        "totalAmount": total_amount,
+                        "walletsCount": len(transfers),
+                        "amountPerWallet": amount_per_wallet
+                    }
+                }
+                logger.info(f"Normalized list response: {successful_transfers} successful, {failed_transfers} failed, {total_amount:.6f} SOL total")
+            
             # Log successful operation details
             logger.info(f"Fund bundled wallets operation completed successfully")
-            if "data" in result:
-                logger.info(f"  Wallets funded: {result['data'].get('walletsCount', 'unknown')}")
-                logger.info(f"  Amount per wallet: {result['data'].get('amountPerWallet', 'unknown')} SOL")
-                logger.info(f"  Total amount sent: {result['data'].get('totalAmount', 'unknown')} SOL")
-                if 'bundleId' in result['data']:
-                    logger.info(f"  Bundle ID: {result['data']['bundleId']}")
+            logger.info(f"Final response type: {type(result)}")
+            
+            if isinstance(result, dict):
+                logger.info(f"Response keys: {list(result.keys())}")
+                
+                # Log data section details if present
+                if "data" in result:
+                    data_section = result["data"]
+                    logger.info(f"  Data section type: {type(data_section)}")
+                    
+                    if isinstance(data_section, dict):
+                        logger.info(f"  Wallets funded: {data_section.get('walletsCount', 'unknown')}")
+                        logger.info(f"  Amount per wallet: {data_section.get('amountPerWallet', 'unknown')} SOL")
+                        logger.info(f"  Total amount sent: {data_section.get('totalAmount', 'unknown')} SOL")
+                        if 'bundleId' in data_section:
+                            logger.info(f"  Bundle ID: {data_section['bundleId']}")
+                
+                # Check for other common response patterns
+                if "message" in result:
+                    logger.info(f"  Response message: {result['message']}")
+                if "status" in result:
+                    logger.info(f"  Response status: {result['status']}")
+                if "error" in result:
+                    logger.warning(f"  Response error: {result['error']}")
             
             return result
             
@@ -782,90 +839,82 @@ class PumpFunClient:
         
         return diagnostics
 
-    def return_funds_to_mother(self, mother_wallet_public_key: str, leave_dust: bool = False) -> Dict[str, Any]:
+    def return_funds_to_mother(self, mother_wallet_public_key: str, child_wallets: List[Dict[str, str]],
+                              source_wallet_names: Optional[List[str]] = None) -> Dict[str, Any]:
         """
-        Return funds from bundled wallets to the airdrop wallet with enhanced fee calculation and error detection.
+        Return funds from bundled wallets to the airdrop wallet using the new stateless API format.
         
-        Per API documentation:
-        - Enhanced Fee Calculation: Uses precise priority fee calculation (base 5,000 + priority ~20,000 lamports = ~25,000 lamports total)
-        - Wallet Management Operations: 0.0001 SOL minimum reserve for transaction fees
-        - Enhanced error detection for insufficient funds scenarios
-        - CRITICAL: Accounts for Solana rent exemption requirements
+        Updated to use the new API endpoint format that requires all wallet credentials
+        to be provided directly in the request body.
+        
+        New API Format:
+        {
+            "childWallets": [
+                { "name": "DevWallet", "privateKey": "<base58 string>" },
+                { "name": "First Bundled Wallet 1", "privateKey": "<base58 string>" }
+            ],
+            "motherWalletPublicKeyBs58": "<base58 string>",
+            "sourceWalletNames": ["DevWallet"] // optional
+        }
         
         Args:
             mother_wallet_public_key: Public key of the mother (airdrop) wallet in base58 format
-            leave_dust: Whether to leave small amounts in wallets
+            child_wallets: List of child wallet credentials with name and privateKey
+            source_wallet_names: Optional list of specific wallet names to return funds from
             
         Returns:
             Dictionary with return transaction results
         """
+        # Validate required parameters for new API format
         if not mother_wallet_public_key:
             raise PumpFunValidationError("Mother wallet public key cannot be empty")
+        if not child_wallets or len(child_wallets) == 0:
+            raise PumpFunValidationError("Child wallets list is required and cannot be empty")
         
-        # CRITICAL: Enhanced fee calculation with proper rent exemption accounting
-        # These calculations are based on Solana blockchain requirements and observed transaction failures
-        base_fee_lamports = 5000  # Base transaction fee
-        priority_fee_lamports = 20000  # Priority fee for faster processing
-        total_estimated_fee_lamports = base_fee_lamports + priority_fee_lamports  # ~25,000 lamports
-        
-        # CRITICAL: Solana rent exemption for token accounts (ATA creation/maintenance)
-        # This is the minimum balance required to keep accounts rent-exempt
-        rent_exemption_lamports = 2_039_280  # 0.00203928 SOL rent exemption for ATA creation
-        
-        # Additional safety buffer for wallet management operations
-        wallet_management_reserve_lamports = 100_000  # 0.0001 SOL minimum reserve for wallet management operations
-        
-        # TOTAL minimum reserve that MUST remain in each wallet to avoid "Insufficient Funds For Rent" errors
-        minimum_reserve_lamports = rent_exemption_lamports + total_estimated_fee_lamports + wallet_management_reserve_lamports  # Total: ~0.00216 SOL
-        
-        # Additional safety buffer (10% of minimum reserve) to handle network fee fluctuations
-        safety_buffer_lamports = int(minimum_reserve_lamports * 0.1)  # 10% safety buffer
-        total_required_reserve_lamports = minimum_reserve_lamports + safety_buffer_lamports
-        
-        # Log detailed fee calculation for debugging
-        logger.info(f"Return funds fee calculation (ENHANCED with rent exemption):")
-        logger.info(f"  Base fee: {base_fee_lamports} lamports ({base_fee_lamports / 1_000_000_000:.6f} SOL)")
-        logger.info(f"  Priority fee: {priority_fee_lamports} lamports ({priority_fee_lamports / 1_000_000_000:.6f} SOL)")
-        logger.info(f"  Total estimated fee: {total_estimated_fee_lamports} lamports ({total_estimated_fee_lamports / 1_000_000_000:.6f} SOL)")
-        logger.info(f"  Rent exemption (ATA): {rent_exemption_lamports} lamports ({rent_exemption_lamports / 1_000_000_000:.6f} SOL)")
-        logger.info(f"  Wallet mgmt reserve: {wallet_management_reserve_lamports} lamports ({wallet_management_reserve_lamports / 1_000_000_000:.6f} SOL)")
-        logger.info(f"  Safety buffer (10%): {safety_buffer_lamports} lamports ({safety_buffer_lamports / 1_000_000_000:.6f} SOL)")
-        logger.info(f"  TOTAL required reserve: {total_required_reserve_lamports} lamports ({total_required_reserve_lamports / 1_000_000_000:.6f} SOL)")
-        logger.info(f"  Mother wallet: {mother_wallet_public_key}")
-        logger.info(f"  Leave dust: {leave_dust}")
+        # Validate each child wallet has required fields
+        for i, wallet in enumerate(child_wallets):
+            if not isinstance(wallet, dict):
+                raise PumpFunValidationError(f"Child wallet {i} must be a dictionary")
+            if "name" not in wallet or not wallet["name"]:
+                raise PumpFunValidationError(f"Child wallet {i} missing required 'name' field")
+            if "privateKey" not in wallet or not wallet["privateKey"]:
+                raise PumpFunValidationError(f"Child wallet {i} missing required 'privateKey' field")
+
+        logger.info(f"Returning funds from {len(child_wallets)} child wallets to mother wallet")
+        logger.info(f"Mother wallet: {mother_wallet_public_key}")
+        if source_wallet_names:
+            logger.info(f"Source wallets: {source_wallet_names}")
             
         endpoint = "/api/wallets/return-funds"
+        
+        # New API format: provide all wallet credentials directly in request
         data = {
-            "motherWalletPublicKeyBs58": mother_wallet_public_key,
-            "leaveDust": leave_dust,
-            # CRITICAL: Include enhanced fee calculation parameters for server-side validation
-            "feeCalculation": {
-                "baseFee": base_fee_lamports,
-                "priorityFee": priority_fee_lamports,
-                "totalEstimatedFee": total_estimated_fee_lamports,
-                "rentExemption": rent_exemption_lamports,
-                "walletManagementReserve": wallet_management_reserve_lamports,
-                "minimumReserve": minimum_reserve_lamports,
-                "safetyBuffer": safety_buffer_lamports,
-                "totalRequiredReserve": total_required_reserve_lamports
-            },
-            # CRITICAL: Explicit instruction to server to respect rent exemption
-            "enforceRentExemption": True,
-            "maxTransferableCalculation": {
-                "formula": "wallet_balance - totalRequiredReserve",
-                "description": "Maximum transferable amount accounting for rent exemption and fees"
-            }
+            "childWallets": child_wallets,
+            "motherWalletPublicKeyBs58": mother_wallet_public_key
         }
+        
+        # Add optional source wallet names if specified
+        if source_wallet_names:
+            data["sourceWalletNames"] = source_wallet_names
+        
+        # Debug log (excluding sensitive data)
+        debug_data = {
+            "childWalletsCount": len(child_wallets),
+            "childWalletNames": [w.get("name", "Unknown") for w in child_wallets],
+            "motherWalletPublicKey": mother_wallet_public_key,
+            "sourceWalletNames": source_wallet_names
+        }
+        logger.info(f"PumpFun API POST {endpoint} - Request summary: {debug_data}")
         
         try:
             result = self._make_request_with_retry("POST", endpoint, json=data)
             
-            # Normalize response: convert list to expected dict format (API contract change fix)
+            # Normalize response: handle both list response and dict with list data
             if isinstance(result, list):
                 logger.info(f"API returned list response, normalizing to dict format")
                 transfers = result
-                total_amount = sum(item.get("amount", 0) for item in transfers if isinstance(item, dict))
-                successful_transfers = len([item for item in transfers if isinstance(item, dict) and item.get("status") != "failed"])
+                total_amount = sum(item.get("amountReturned", 0) for item in transfers if isinstance(item, dict))
+                successful_transfers = len([item for item in transfers if isinstance(item, dict) and item.get("status") not in ["failed", "skipped_low_balance"]])
                 failed_transfers = len(transfers) - successful_transfers
                 
                 result = {
@@ -880,6 +929,22 @@ class PumpFunClient:
                     }
                 }
                 logger.info(f"Normalized list response: {successful_transfers} successful, {failed_transfers} failed, {total_amount:.6f} SOL total")
+            elif isinstance(result, dict) and "data" in result and isinstance(result["data"], list):
+                logger.info(f"API returned dict with list data, normalizing data section")
+                transfers = result["data"]
+                total_amount = sum(item.get("amountReturned", 0) for item in transfers if isinstance(item, dict))
+                successful_transfers = len([item for item in transfers if isinstance(item, dict) and item.get("status") not in ["failed", "skipped_low_balance"]])
+                failed_transfers = len(transfers) - successful_transfers
+                
+                # Normalize the data section to expected format
+                result["data"] = {
+                    "transfers": transfers,
+                    "totalWallets": len(transfers),
+                    "successfulTransfers": successful_transfers,
+                    "failedTransfers": failed_transfers,
+                    "totalAmount": total_amount
+                }
+                logger.info(f"Normalized dict data section: {successful_transfers} successful, {failed_transfers} failed, {total_amount:.6f} SOL total")
             
             # Enhanced logging for debugging response structure
             logger.info(f"Return funds operation completed successfully")
@@ -926,35 +991,17 @@ class PumpFunClient:
             is_insufficient_funds = any(pattern in error_message for pattern in insufficient_funds_patterns)
             
             if is_insufficient_funds:
-                logger.error(f"CRITICAL: Insufficient funds detected during return funds operation:")
+                logger.error(f"Insufficient funds detected during return funds operation:")
                 logger.error(f"  Error message: {str(e)}")
                 logger.error(f"  Mother wallet: {mother_wallet_public_key}")
-                logger.error(f"  Required minimum per wallet: {minimum_reserve_lamports} lamports ({minimum_reserve_lamports / 1_000_000_000:.6f} SOL)")
-                logger.error(f"  Safety buffer per wallet: {safety_buffer_lamports} lamports ({safety_buffer_lamports / 1_000_000_000:.6f} SOL)")
-                logger.error(f"  TOTAL required reserve per wallet: {total_required_reserve_lamports} lamports ({total_required_reserve_lamports / 1_000_000_000:.6f} SOL)")
-                logger.error(f"  Estimated fee per transaction: {total_estimated_fee_lamports} lamports ({total_estimated_fee_lamports / 1_000_000_000:.6f} SOL)")
-                logger.error(f"  Rent exemption requirement: {rent_exemption_lamports} lamports ({rent_exemption_lamports / 1_000_000_000:.6f} SOL)")
-                logger.error(f"  RECOMMENDATION: Each wallet needs at least {total_required_reserve_lamports / 1_000_000_000:.6f} SOL balance")
+                logger.error(f"  Child wallets count: {len(child_wallets)}")
+                if source_wallet_names:
+                    logger.error(f"  Source wallets: {source_wallet_names}")
                 
-                # Provide detailed breakdown in error message
-                breakdown_details = (
-                    f"Detailed breakdown per wallet:\n"
-                    f"  • Transaction fees: {total_estimated_fee_lamports / 1_000_000_000:.6f} SOL\n"
-                    f"  • Rent exemption: {rent_exemption_lamports / 1_000_000_000:.6f} SOL\n"
-                    f"  • Wallet management: {wallet_management_reserve_lamports / 1_000_000_000:.6f} SOL\n"
-                    f"  • Safety buffer: {safety_buffer_lamports / 1_000_000_000:.6f} SOL\n"
-                    f"  • TOTAL REQUIRED: {total_required_reserve_lamports / 1_000_000_000:.6f} SOL"
-                )
-                
-                logger.error(f"  {breakdown_details}")
-                
-                # Enhance the error with specific guidance and accurate calculations
+                # Enhance the error with specific guidance
                 enhanced_error = PumpFunApiError(
-                    f"INSUFFICIENT FUNDS FOR RENT EXEMPTION: {str(e)}. "
-                    f"Each wallet must maintain at least {total_required_reserve_lamports / 1_000_000_000:.6f} SOL total "
-                    f"to avoid 'Insufficient Funds For Rent' errors. "
-                    f"{breakdown_details}. "
-                    f"Current calculation ensures Solana rent exemption compliance and network fee coverage."
+                    f"Insufficient funds for return funds operation: {str(e)}. "
+                    f"Please ensure all child wallets have sufficient balance for transaction fees and rent exemption."
                 )
                 raise enhanced_error
             else:
@@ -963,7 +1010,7 @@ class PumpFunClient:
                 logger.error(f"  Error type: {type(e).__name__}")
                 logger.error(f"  Error message: {str(e)}")
                 logger.error(f"  Mother wallet: {mother_wallet_public_key}")
-                logger.error(f"  Leave dust setting: {leave_dust}")
+                logger.error(f"  Child wallets count: {len(child_wallets)}")
                 
                 # Re-raise original exception for non-balance errors
                 raise
