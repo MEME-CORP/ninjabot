@@ -1449,7 +1449,7 @@ class PumpFunClient:
 
     def create_token_and_buy(self, token_params: TokenCreationParams, 
                            buy_amounts: BuyAmounts, wallets: List[Dict[str, str]], slippage_bps: int = 2500,
-                           image_file_path: Optional[str] = None) -> Dict[str, Any]:
+                           image_file_path: Optional[str] = None, create_amount_sol: float = 0.001) -> Dict[str, Any]:
         """
         Create a token and perform initial buys with proper multipart/form-data support.
         Enhanced with wallet loading error recovery.
@@ -1460,6 +1460,7 @@ class PumpFunClient:
             wallets: List of wallet dictionaries with 'name' and 'privateKey' fields
             slippage_bps: Slippage in basis points
             image_file_path: Local path to image file (if any)
+            create_amount_sol: SOL amount for token creation (default: 0.001)
             
         Returns:
             Dictionary with token creation and buy results
@@ -1507,7 +1508,7 @@ class PumpFunClient:
             # Try multipart/form-data first for image upload
             logger.info(f"Creating token with image upload: {image_file_path}")
             try:
-                token_result = self._create_token_with_image(token_params, buy_amounts_dict, wallets, slippage_bps, image_file_path)
+                token_result = self._create_token_with_image(token_params, buy_amounts_dict, wallets, slippage_bps, image_file_path, create_amount_sol)
             except PumpFunApiError as e:
                 # Enhanced error handling for server-side wallet loading issues
                 error_msg = str(e).lower()
@@ -1517,12 +1518,12 @@ class PumpFunClient:
                     
                     # Try fallback to JSON without image
                     logger.info("Attempting fallback to JSON without image due to server-side error")
-                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, wallets, slippage_bps)
+                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, wallets, slippage_bps, create_amount_sol)
                 elif "buyAmountsSOL" in str(e):
                     logger.warning(f"Multipart upload failed with buyAmountsSOL error: {str(e)}")
                     logger.info("Attempting fallback to JSON without image due to multipart parsing issue")
                     # Fallback to JSON without image
-                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, wallets, slippage_bps)
+                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, wallets, slippage_bps, create_amount_sol)
                 else:
                     # Re-raise other API errors
                     raise e
@@ -1531,7 +1532,7 @@ class PumpFunClient:
                     logger.warning(f"Multipart upload failed with buyAmountsSOL error: {str(e)}")
                     logger.info("Attempting fallback to JSON without image due to multipart parsing issue")
                     # Fallback to JSON without image
-                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, wallets, slippage_bps)
+                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, wallets, slippage_bps, create_amount_sol)
                 else:
                     # Re-raise non-buyAmountsSOL validation errors
                     raise e
@@ -1539,7 +1540,7 @@ class PumpFunClient:
             # Use JSON for token creation without image
             logger.info("Creating token without image using JSON request")
             try:
-                token_result = self._create_token_without_image(token_params, buy_amounts_dict, wallets, slippage_bps)
+                token_result = self._create_token_without_image(token_params, buy_amounts_dict, wallets, slippage_bps, create_amount_sol)
             except PumpFunApiError as e:
                 # Enhanced error handling for server-side wallet loading issues
                 error_msg = str(e).lower()
@@ -1604,7 +1605,7 @@ class PumpFunClient:
 
     def _create_token_with_image(self, token_params: TokenCreationParams, 
                                 buy_amounts_dict: Dict[str, float], wallets: List[Dict[str, str]], slippage_bps: int,
-                                image_file_path: str) -> Dict[str, Any]:
+                                image_file_path: str, create_amount_sol: float = 0.001) -> Dict[str, Any]:
         """
         Create token with image using multipart/form-data upload.
         
@@ -1614,6 +1615,7 @@ class PumpFunClient:
             wallets: List of wallet dictionaries with 'name' and 'privateKey' fields
             slippage_bps: Slippage in basis points
             image_file_path: Path to image file
+            create_amount_sol: SOL amount for token creation
             
         Returns:
             Dictionary with token creation results
@@ -1650,7 +1652,7 @@ class PumpFunClient:
             'telegram': token_params.telegram or '',  # Ensure empty string instead of None
             'website': token_params.website or '',  # Ensure empty string instead of None
             'showName': 'true' if token_params.show_name else 'false',  # Exact boolean string format
-            'initialSupplyAmount': token_params.initial_supply_amount,
+            'createAmountSOL': str(create_amount_sol),  # SOL amount for token creation
             'buyAmountsSOL': buy_amounts_json,  # Validated JSON string
             'wallets': wallets_json,  # New required field as JSON string
             'slippageBps': str(slippage_bps)
@@ -1715,7 +1717,8 @@ class PumpFunClient:
             raise PumpFunApiError(f"Image upload failed: {str(e)}")
 
     def _create_token_without_image(self, token_params: TokenCreationParams, 
-                                   buy_amounts_dict: Dict[str, float], wallets: List[Dict[str, str]], slippage_bps: int) -> Dict[str, Any]:
+                                   buy_amounts_dict: Dict[str, float], wallets: List[Dict[str, str]], slippage_bps: int,
+                                   create_amount_sol: float = 0.001) -> Dict[str, Any]:
         """
         Create token without image using JSON request.
         
@@ -1724,21 +1727,21 @@ class PumpFunClient:
             buy_amounts_dict: Buy amounts dictionary
             wallets: List of wallet dictionaries with 'name' and 'privateKey' fields
             slippage_bps: Slippage in basis points
+            create_amount_sol: SOL amount for token creation
             
         Returns:
             Dictionary with token creation results
         """
-        # Transform token params to API-expected format (snake_case -> camelCase)
-        transformed_token_params = self._transform_token_params_for_api(token_params)
-        
-        # Remove image field since no image is provided
-        transformed_token_params.pop("imageFileName", None)
-        
-        # Pre-request validation to catch field format issues early
-        self._validate_api_request_format(transformed_token_params, "token_creation")
-        
+        # Direct JSON request with new API field names
         data = {
-            **transformed_token_params,
+            "name": token_params.name,
+            "symbol": token_params.symbol,
+            "description": token_params.description,
+            "twitter": token_params.twitter or "",
+            "telegram": token_params.telegram or "",
+            "website": token_params.website or "",
+            "showName": token_params.show_name,
+            "createAmountSOL": create_amount_sol,  # SOL amount for token creation
             "buyAmountsSOL": buy_amounts_dict,
             "wallets": wallets,  # Include wallets directly as list for JSON request
             "slippageBps": slippage_bps
