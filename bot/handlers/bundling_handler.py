@@ -53,6 +53,8 @@ from bot.utils.message_utils import (
 )
 from bot.state.session_manager import session_manager
 from bot.utils.wallet_storage import airdrop_wallet_storage, bundled_wallet_storage
+from bot.utils.token_storage import token_storage
+from bot.utils.token_message_utils import format_token_storage_success_message
 import os
 import json
 import base64
@@ -2953,6 +2955,25 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
         session_manager.update_session_value(user.id, "token_address", mint_address)
         session_manager.update_session_value(user.id, "token_creation_signature", bundle_id)
         session_manager.update_session_value(user.id, "final_creation_results", token_result)
+        
+        # Store the created token in persistent storage
+        if mint_address:
+            # Get token parameters for storage
+            token_params = session_manager.get_session_value(user.id, "token_params") or {}
+            token_name = token_params.get("name", "Unknown Token")
+            
+            # Store the created token
+            storage_success = token_storage.store_token(
+                user_id=user.id,
+                mint_address=mint_address,
+                token_name=token_name,
+                bundle_id=bundle_id
+            )
+            
+            if storage_success:
+                logger.info(f"Token {mint_address} stored successfully for user {user.id}")
+            else:
+                logger.warning(f"Failed to store token {mint_address} for user {user.id}")
         
         # Execute additional buys for remaining child wallets if configured
         additional_child_amount = buy_amounts.get("Additional Child Wallets")
