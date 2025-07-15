@@ -9,6 +9,7 @@ and bundle operation execution.
 from typing import Dict, List, Any, Optional
 import asyncio
 import time
+import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import CallbackContext
@@ -2854,6 +2855,10 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             image_file_path=image_file_path if has_custom_image else None
         )
         
+        # Debug: Log the exact API response structure
+        logger.info(f"Token creation API response keys: {list(token_result.keys()) if isinstance(token_result, dict) else 'Not a dict'}")
+        logger.info(f"Token creation API response structure: {token_result}")
+        
         execution_time = time.time() - start_time
         
         # Cleanup temporary image file after successful creation
@@ -2866,9 +2871,87 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             except Exception as cleanup_error:
                 logger.warning(f"Failed to cleanup temp image files: {cleanup_error}")
         
-        # Store final results
-        session_manager.update_session_value(user.id, "token_address", token_result["mint_address"])
-        session_manager.update_session_value(user.id, "token_creation_signature", token_result.get("bundle_id", ""))
+        # Store final results - normalize API response format
+        logger.info("Attempting to extract mint address from API response")
+        
+        mint_address = None
+        bundle_id = ""
+        
+        try:
+            # Try multiple possible field names where mint address might be stored
+            possible_mint_fields = [
+                "mintAddress", "mint_address", "mint", "tokenAddress", "token_address", 
+                "contractAddress", "contract_address", "address", "tokenMint", "token_mint"
+            ]
+            
+            for field in possible_mint_fields:
+                if field in token_result and token_result[field]:
+                    mint_address = token_result[field]
+                    logger.info(f"Found mint address in field '{field}': {mint_address}")
+                    break
+            
+            # Try nested fields if mint address not found at top level
+            if not mint_address:
+                logger.info("Mint address not found at top level, checking nested fields")
+                for key, value in token_result.items():
+                    if isinstance(value, dict):
+                        for nested_field in possible_mint_fields:
+                            if nested_field in value and value[nested_field]:
+                                mint_address = value[nested_field]
+                                logger.info(f"Found mint address in nested field '{key}.{nested_field}': {mint_address}")
+                                break
+                        if mint_address:
+                            break
+            
+            # Try to extract from message or any string field that might contain the mint address
+            if not mint_address:
+                logger.info("Mint address not found in structured fields, checking message content")
+                mint_pattern = r'[A-Za-z0-9]{32,50}'  # Solana address pattern
+                for key, value in token_result.items():
+                    if isinstance(value, str) and len(value) > 30:
+                        matches = re.findall(mint_pattern, value)
+                        if matches:
+                            # Look for addresses that might be mint addresses (not transaction signatures)
+                            for match in matches:
+                                if len(match) >= 32 and len(match) <= 44:  # Typical Solana address length
+                                    mint_address = match
+                                    logger.info(f"Extracted mint address from string field '{key}': {mint_address}")
+                                    break
+                            if mint_address:
+                                break
+            
+            # Extract bundle ID
+            bundle_id = token_result.get("bundleId") or token_result.get("bundle_id", "")
+            
+        except Exception as extraction_error:
+            logger.error(f"Error during mint address extraction: {str(extraction_error)}")
+            # Continue with empty mint_address to trigger the fallback below
+        
+        logger.info(f"Final extracted mint_address: {mint_address}")
+        logger.info(f"Final extracted bundle_id: {bundle_id}")
+        
+        if not mint_address:
+            logger.error(f"Mint address extraction failed. Available keys: {list(token_result.keys())}")
+            logger.error(f"Full response for debugging: {token_result}")
+            
+            # Try one more time with a hardcoded extraction from known API log format
+            try:
+                # From API logs: "Token NAME created and initial buys completed successfully in bundle ID. Mint: ADDRESS"
+                response_str = str(token_result)
+                mint_match = re.search(r'Mint[:\s]+([A-Za-z0-9]{32,50})', response_str, re.IGNORECASE)
+                if mint_match:
+                    mint_address = mint_match.group(1)
+                    logger.info(f"Extracted mint address using regex pattern: {mint_address}")
+            except Exception as regex_error:
+                logger.error(f"Regex extraction also failed: {str(regex_error)}")
+                
+            if not mint_address:
+                raise Exception(f"Token creation succeeded but mint address not found in response. Available keys: {list(token_result.keys())}")
+            
+        logger.info(f"Successfully extracted mint address: {mint_address}")
+            
+        session_manager.update_session_value(user.id, "token_address", mint_address)
+        session_manager.update_session_value(user.id, "token_creation_signature", bundle_id)
         session_manager.update_session_value(user.id, "final_creation_results", token_result)
         
         # Execute additional buys for remaining child wallets if configured
@@ -2880,7 +2963,7 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
                 try:
                     # Execute batch buy for remaining wallets
                     additional_result = pumpfun_client.batch_buy_token(
-                        mint_address=token_result["mint_address"],
+                        mint_address=mint_address,
                         sol_amount_per_wallet=additional_child_amount,
                         slippage_bps=2500
                     )
@@ -2892,7 +2975,7 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             f"Final token creation completed for user {user.id}",
             extra={
                 "user_id": user.id,
-                "token_address": token_result["mint_address"],
+                "token_address": mint_address,
                 "execution_time": execution_time
             }
         )
@@ -2910,7 +2993,7 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
         results_with_token = {
             "operation_type": "token_creation_with_buys",
             "success": True,
-            "token_address": token_result["mint_address"],
+            "token_address": mint_address,
             "total_operations": total_participating_wallets,
             "successful_operations": total_participating_wallets,  # Assume all successful for now
             "failed_operations": 0,
@@ -2919,11 +3002,31 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             "wallet_group_counts": wallet_group_counts
         }
         
-        await query.edit_message_text(
-            format_bundle_operation_results(results_with_token),
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN
-        )
+        try:
+            await query.edit_message_text(
+                format_bundle_operation_results(results_with_token),
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as telegram_error:
+            # If there's a Telegram parsing error, try sending without markdown
+            logger.warning(f"Telegram markdown parsing failed, retrying without markdown: {str(telegram_error)}")
+            try:
+                # Create a simple text version without markdown
+                simple_message = (
+                    f"✅ Token Creation Successful!\n\n"
+                    f"Token Address: {mint_address}\n"
+                    f"Execution Time: {execution_time:.2f}s\n"
+                    f"Total Operations: {total_participating_wallets}\n\n"
+                    f"Your token is now live on the blockchain!"
+                )
+                await query.edit_message_text(
+                    simple_message,
+                    reply_markup=keyboard
+                )
+            except Exception as fallback_error:
+                logger.error(f"Both markdown and fallback message failed: {str(fallback_error)}")
+                raise telegram_error
         
         return ConversationState.BUNDLE_OPERATION_COMPLETE
         

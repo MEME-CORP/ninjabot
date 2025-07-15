@@ -1,5 +1,6 @@
 from typing import Dict, List, Any, Optional
 from datetime import datetime
+import re
 
 def format_welcome_message() -> str:
     """
@@ -27,7 +28,7 @@ def format_wallet_created_message(address: str) -> str:
     """
     return (
         f"✅ Mother wallet created successfully!\n\n"
-        f"Address: `{address}`\n\n"
+        f"Address: `{_escape_markdown_safely(address)}`\n\n"
         f"Now, how many child wallets would you like to create? (min: 10)"
     )
 
@@ -43,7 +44,7 @@ def format_wallet_imported_message(address: str) -> str:
     """
     return (
         f"✅ Wallet imported successfully!\n\n"
-        f"Address: `{address}`\n\n"
+        f"Address: `{_escape_markdown_safely(address)}`\n\n"
         f"Now, how many child wallets would you like to create? (min: 10)"
     )
 
@@ -59,7 +60,7 @@ def format_existing_child_wallets_found_message(wallet_address: str, num_existin
         Formatted message for existing child wallets
     """
     return (
-        f"✅ Using saved wallet: `{wallet_address}`\n\n"
+        f"✅ Using saved wallet: `{_escape_markdown_safely(wallet_address)}`\n\n"
         f"Found {num_existing} existing child wallets associated with this mother wallet.\n\n"
         f"You can use these existing wallets or create a new set (this will replace the existing ones)."
     )
@@ -75,7 +76,7 @@ def format_no_child_wallets_found_message(wallet_address: str) -> str:
         Formatted message for no existing child wallets
     """
     return (
-        f"✅ Using saved wallet: `{wallet_address}`\n\n"
+        f"✅ Using saved wallet: `{_escape_markdown_safely(wallet_address)}`\n\n"
         f"No child wallets found for this mother wallet.\n\n"
         f"How many child wallets would you like to create? (min: 10)"
     )
@@ -1152,10 +1153,12 @@ def format_bundle_operation_results(results_data: Dict[str, Any]) -> str:
     message += f"• Success rate: {(successful_operations/total_operations)*100:.1f}%\n\n" if total_operations > 0 else ""
     
     if bundle_id:
-        message += f"📦 **Bundle ID:** `{bundle_id}`\n"
+        safe_bundle_id = _escape_markdown_safely(bundle_id)
+        message += f"📦 **Bundle ID:** `{safe_bundle_id}`\n"
     
     if mint_address:
-        message += f"🪙 **Token Address:** `{mint_address}`\n"
+        safe_mint_address = _escape_markdown_safely(mint_address)
+        message += f"🪙 **Token Address:** `{safe_mint_address}`\n"
     
     message += "\n"
     
@@ -1770,6 +1773,7 @@ def format_return_funds_results_message(results: Dict[str, Any]) -> str:
         total_returned = sum(r.get('amount', 0) for r in results if r.get('status') == 'success')
         
         message = f"✅ **Funds Return Complete**\n\n"
+
         message += f"📊 **Summary:**\n"
         message += f"• Total wallets processed: {total}\n"
         message += f"• Successful returns: {successful}\n"
@@ -1898,3 +1902,26 @@ def format_return_funds_option_message(current_balance: float, required_balance:
         message += f"• **Edit Buy Amounts:** Adjust purchase amounts\n"
     
     return message
+
+def _escape_markdown_safely(text: str) -> str:
+    """
+    Safely escape text for Telegram markdown, handling edge cases that might cause parsing errors.
+    
+    Args:
+        text: Text to escape
+        
+    Returns:
+        Safely escaped text
+    """
+    if not text:
+        return text
+        
+    # Remove any potentially problematic characters that might break markdown parsing
+    # Keep only alphanumeric, common punctuation, and safe symbols
+    safe_text = re.sub(r'[^\w\-\.\_\+\=\@\#\$\%\&\*\(\)\[\]\{\}\|\\\:\;\"\'\,\<\>\?\!\~\`\^]', '', str(text))
+    
+    # Ensure backticks are balanced
+    if safe_text.count('`') % 2 != 0:
+        safe_text = safe_text.replace('`', '')
+    
+    return safe_text

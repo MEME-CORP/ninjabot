@@ -1601,6 +1601,9 @@ class PumpFunClient:
                         "error": str(e)
                     })
         
+        # Normalize response fields for backward compatibility
+        token_result = self._normalize_response_fields(token_result)
+        
         return token_result
 
     def _create_token_with_image(self, token_params: TokenCreationParams, 
@@ -1708,7 +1711,7 @@ class PumpFunClient:
                 response = self._make_multipart_request_with_retry("POST", url, data=form_data, files=files)
                 
                 logger.info("Token creation with image upload completed successfully")
-                return response
+                return self._normalize_response_fields(response)
                 
         except IOError as e:
             raise PumpFunValidationError(f"Failed to read image file: {str(e)}")
@@ -1751,7 +1754,8 @@ class PumpFunClient:
         logger.info(f"JSON token creation request - Fields: {list(data.keys())}")
         
         # Use enhanced retry for critical token creation operations
-        return self._make_request_for_critical_operations("POST", "/api/pump/create-and-buy", json=data)
+        response = self._make_request_for_critical_operations("POST", "/api/pump/create-and-buy", json=data)
+        return self._normalize_response_fields(response)
 
     def _get_content_type(self, file_extension: str) -> str:
         """
@@ -1783,6 +1787,7 @@ class PumpFunClient:
             url: Full URL
             data: Form data
             files: Files to upload
+           
             max_retries: Maximum retry attempts
             
         Returns:
@@ -2413,3 +2418,43 @@ except Exception as e:
         base58_key = base58.b58encode(decoded_bytes).decode('utf-8')
         
         return base58_key
+
+    def _normalize_response_fields(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Normalize API response field names to ensure backward compatibility.
+        Converts camelCase to snake_case for consistency with existing code.
+        
+        Args:
+            response: Raw API response
+            
+        Returns:
+            Normalized response with both camelCase and snake_case keys
+        """
+        if not isinstance(response, dict):
+            logger.warning(f"Response is not a dict, cannot normalize: {type(response)}")
+            return response
+            
+        normalized = response.copy()
+        
+        # Debug: Log original response structure
+        logger.info(f"Normalizing response with keys: {list(response.keys())}")
+        
+        # Add snake_case versions of camelCase fields for backward compatibility
+        field_mappings = {
+            'mintAddress': 'mint_address',
+            'bundleId': 'bundle_id',
+            'txHash': 'tx_hash',
+            'blockHash': 'block_hash',
+            'tokenName': 'token_name',
+            'tokenSymbol': 'token_symbol'
+        }
+        
+        for camel_key, snake_key in field_mappings.items():
+            if camel_key in normalized and snake_key not in normalized:
+                normalized[snake_key] = normalized[camel_key]
+                logger.info(f"Mapped {camel_key} -> {snake_key}: {normalized[camel_key]}")
+                
+        # Debug: Log final normalized response structure
+        logger.info(f"Normalized response keys: {list(normalized.keys())}")
+        
+        return normalized
