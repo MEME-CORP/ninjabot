@@ -2103,34 +2103,46 @@ def register_start_handler(application):
     """Register the start command handler."""
     # Import bundling handlers
     from bot.handlers.bundling_handler import (
-        create_airdrop_wallet,
-        import_airdrop_wallet,
-        process_airdrop_wallet_import,
-        use_existing_airdrop_wallet,
-        select_existing_airdrop_wallet,
-        continue_to_bundled_wallets_setup,
-        bundled_wallets_count,
         token_creation_start,
-        token_parameter_input,
-        process_token_image_upload,
-        skip_image_upload,
-        proceed_to_preview,
         configure_buy_amounts,
         start_buy_amounts_input,
         buy_amounts_input,
         edit_buy_amounts,
-        back_to_token_preview,
-        edit_token_parameters,
+        bundle_operation_progress
+    )
+    
+    # Import wallet handlers
+    from bot.handlers.wallet_handler import (
+        create_airdrop_wallet,
+        import_airdrop_wallet,
+        process_airdrop_wallet_import,
+        continue_to_bundled_wallets_setup,
+        bundled_wallets_count,
         check_wallet_balance,
         fund_bundled_wallets_now,
         start_wallet_funding,
-        create_token_final,
         retry_wallet_funding,
-        bundle_operation_progress,
         wait_and_retry_airdrop,
         return_funds_confirmation,
         execute_return_funds,
-        return_funds_complete
+        return_funds_complete,
+        use_existing_airdrop_wallet,
+        select_existing_airdrop_wallet
+    )
+    
+    # Import token config handlers
+    from bot.handlers.token_config_handler import (
+        token_parameter_input,
+        process_token_image_upload,
+        skip_image_upload,
+        proceed_to_preview,
+        edit_token_parameters
+    )
+    
+    # Import token creation handlers
+    from bot.handlers.token_creation_handler import (
+        back_to_token_preview,
+        create_token_final
     )
     
     conv_handler = ConversationHandler(
