@@ -31,6 +31,7 @@ from bot.utils.message_utils import (
 from bot.state.session_manager import session_manager
 from bot.utils.token_storage import token_storage
 from bot.api.api_client import api_client
+from bot.api.pumpfun_client import PumpFunClient  # Added for token trading operations
 from bot.utils.wallet_storage import airdrop_wallet_storage, bundled_wallet_storage
 
 
@@ -496,39 +497,66 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
         mint_address = selected_token.get('mint_address')
         slippage_bps = 2500  # 25% slippage
         
-        # Get wallet data from session (should have been stored during token creation)
+        # Get wallet data - try multiple methods for robustness
         session_data = session_manager.get_session_data(user.id)
         airdrop_wallet = session_data.get('airdrop_wallet')
+        airdrop_address = None
         
-        # Try to get wallets from storage
-        wallets_data = None
+        # Method 1: Try to get airdrop address from session
         if airdrop_wallet and 'address' in airdrop_wallet:
             airdrop_address = airdrop_wallet['address']
+            logger.info(f"Found airdrop wallet in session: {airdrop_address[:8]}...")
+        
+        # Method 2: Try to get airdrop address from token record
+        if not airdrop_address and 'airdrop_wallet_address' in selected_token:
+            airdrop_address = selected_token['airdrop_wallet_address']
+            logger.info(f"Found airdrop wallet in token record: {airdrop_address[:8]}...")
+        
+        # Method 3: Search for wallets by user ID (fallback)
+        if not airdrop_address:
+            user_bundled_wallets = bundled_wallet_storage.list_user_bundled_wallets(user.id)
+            if user_bundled_wallets:
+                # Use the most recent wallet
+                latest_wallet = max(user_bundled_wallets, key=lambda x: x.get('timestamp', 0))
+                airdrop_address = latest_wallet.get('airdrop_wallet_address')
+                if airdrop_address:
+                    logger.info(f"Found airdrop wallet via user search: {airdrop_address[:8]}...")
+        
+        if not airdrop_address:
+            raise Exception("Could not find airdrop wallet address for this token")
+        
+        # Load bundled wallets from storage
+        bundled_wallets = bundled_wallet_storage.load_bundled_wallets(airdrop_address, user.id)
+        
+        if not bundled_wallets:
+            raise Exception(f"No bundled wallets found for airdrop address: {airdrop_address[:8]}...")
+        
+        logger.info(f"Loaded {len(bundled_wallets)} wallets for sell operation")
             
-            # Load bundled wallets from storage
-            bundled_wallets = bundled_wallet_storage.load_bundled_wallets(airdrop_address, user.id)
-            
-            if bundled_wallets:
-                # Prepare wallets for API call
-                wallets_data = []
-                
-                # Add DevWallet first (if needed for the operation)
-                if operation in ["sell_dev", "sell_all"]:
-                    dev_wallet = next((w for w in bundled_wallets if w.get('name') == 'DevWallet'), None)
-                    if dev_wallet and 'private_key' in dev_wallet:
-                        wallets_data.append({
-                            "name": dev_wallet['name'],
-                            "privateKey": dev_wallet['private_key']
-                        })
-                
-                # Add bundled wallets (if needed for the operation)
-                if operation in ["sell_bundled", "sell_all"]:
-                    for wallet in bundled_wallets:
-                        if wallet.get('name') != 'DevWallet' and 'private_key' in wallet:
-                            wallets_data.append({
-                                "name": wallet['name'],
-                                "privateKey": wallet['private_key']
-                            })
+        logger.info(f"Loaded {len(bundled_wallets)} wallets for sell operation")
+        
+        # Prepare wallets for API call
+        wallets_data = []
+        
+        # Add DevWallet first (if needed for the operation)
+        if operation in ["sell_dev", "sell_all"]:
+            dev_wallet = next((w for w in bundled_wallets if w.get('name') == 'DevWallet'), None)
+            if dev_wallet and 'private_key' in dev_wallet:
+                wallets_data.append({
+                    "name": dev_wallet['name'],
+                    "privateKey": dev_wallet['private_key']
+                })
+                logger.info(f"Added DevWallet to sell operation")
+        
+        # Add bundled wallets (if needed for the operation)
+        if operation in ["sell_bundled", "sell_all"]:
+            for wallet in bundled_wallets:
+                if wallet.get('name') != 'DevWallet' and 'private_key' in wallet:
+                    wallets_data.append({
+                        "name": wallet['name'],
+                        "privateKey": wallet['private_key']
+                    })
+            logger.info(f"Added {len([w for w in wallets_data if w['name'] != 'DevWallet'])} bundled wallets to sell operation")
         
         if not wallets_data:
             # No wallets found - show error
@@ -551,6 +579,9 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
         # Execute the sell operations based on operation type
         results = {}
         
+        # Initialize PumpFun client for trading operations
+        pumpfun_client = PumpFunClient()
+        
         if operation == "sell_dev":
             # Sell with DevWallet only
             progress_data['current_step'] = 'Executing DevWallet sell...'
@@ -561,11 +592,13 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
             
             dev_wallets = [w for w in wallets_data if w['name'] == 'DevWallet']
             if dev_wallets:
-                results = api_client.sell_token_dev_wallet(
+                # Extract dev wallet credentials for PumpFun API
+                dev_wallet = dev_wallets[0]
+                results = pumpfun_client.sell_dev_wallet(
+                    dev_wallet_private_key=dev_wallet.get('privateKey'),
                     mint_address=mint_address,
                     sell_percentage=sell_percentage,
-                    slippage_bps=slippage_bps,
-                    wallets=dev_wallets
+                    slippage_bps=slippage_bps
                 )
             else:
                 raise Exception("DevWallet not found in wallet data")
@@ -580,11 +613,13 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
             
             bundled_wallets_only = [w for w in wallets_data if w['name'] != 'DevWallet']
             if bundled_wallets_only:
-                results = api_client.batch_sell_tokens(
+                # Extract wallet credentials for PumpFun API
+                wallet_private_keys = [w.get('privateKey') for w in bundled_wallets_only if w.get('privateKey')]
+                results = pumpfun_client.batch_sell_token(
+                    wallet_private_keys=wallet_private_keys,
                     mint_address=mint_address,
                     sell_percentage=sell_percentage,
-                    slippage_bps=slippage_bps,
-                    wallets=bundled_wallets_only
+                    slippage_bps=slippage_bps
                 )
             else:
                 raise Exception("No bundled wallets found in wallet data")
@@ -603,11 +638,13 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
             
             dev_wallets = [w for w in wallets_data if w['name'] == 'DevWallet']
             if dev_wallets:
-                dev_result = api_client.sell_token_dev_wallet(
+                # Extract dev wallet credentials for PumpFun API
+                dev_wallet = dev_wallets[0]
+                dev_result = pumpfun_client.sell_dev_wallet(
+                    dev_wallet_private_key=dev_wallet.get('privateKey'),
                     mint_address=mint_address,
                     sell_percentage=sell_percentage,
-                    slippage_bps=slippage_bps,
-                    wallets=dev_wallets
+                    slippage_bps=slippage_bps
                 )
                 all_results['dev_wallet'] = dev_result
             
@@ -621,11 +658,13 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
             
             bundled_wallets_only = [w for w in wallets_data if w['name'] != 'DevWallet']
             if bundled_wallets_only:
-                batch_result = api_client.batch_sell_tokens(
+                # Extract wallet credentials for PumpFun API
+                wallet_private_keys = [w.get('privateKey') for w in bundled_wallets_only if w.get('privateKey')]
+                batch_result = pumpfun_client.batch_sell_token(
+                    wallet_private_keys=wallet_private_keys,
                     mint_address=mint_address,
                     sell_percentage=sell_percentage,
-                    slippage_bps=slippage_bps,
-                    wallets=bundled_wallets_only
+                    slippage_bps=slippage_bps
                 )
                 all_results['bundled_wallets'] = batch_result
             

@@ -1909,12 +1909,13 @@ class PumpFunClient:
             
         return self._make_request_with_retry("POST", endpoint, json=data)
 
-    def sell_dev_wallet(self, mint_address: str, sell_percentage: float, 
+    def sell_dev_wallet(self, dev_wallet_private_key: str, mint_address: str, sell_percentage: float, 
                        slippage_bps: int = 2500) -> Dict[str, Any]:
         """
-        Sell tokens from DevWallet.
+        Sell tokens from DevWallet using stateless API.
         
         Args:
+            dev_wallet_private_key: Private key of the dev wallet
             mint_address: Token mint address
             sell_percentage: Percentage to sell (0-100)
             slippage_bps: Slippage in basis points
@@ -1922,6 +1923,8 @@ class PumpFunClient:
         Returns:
             Dictionary with sell results
         """
+        if not dev_wallet_private_key:
+            raise PumpFunValidationError("Dev wallet private key cannot be empty")
         if not mint_address:
             raise PumpFunValidationError("Mint address cannot be empty")
         if not 0 <= sell_percentage <= 100:
@@ -1931,17 +1934,24 @@ class PumpFunClient:
         data = {
             "mintAddress": mint_address,
             "sellAmountPercentage": f"{sell_percentage}%",
-            "slippageBps": slippage_bps
+            "slippageBps": slippage_bps,
+            "wallets": [
+                {
+                    "name": "DevWallet",
+                    "privateKey": dev_wallet_private_key
+                }
+            ]
         }
         
         return self._make_request_with_retry("POST", endpoint, json=data)
 
-    def batch_sell_token(self, mint_address: str, sell_percentage: float, 
+    def batch_sell_token(self, wallet_private_keys: List[str], mint_address: str, sell_percentage: float, 
                         slippage_bps: int = 2500, target_wallet_names: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Batch sell tokens from multiple wallets (excluding DevWallet).
         
         Args:
+            wallet_private_keys: List of wallet private keys for the sell operation
             mint_address: Token mint address
             sell_percentage: Percentage to sell (0-100)
             slippage_bps: Slippage in basis points
@@ -1950,6 +1960,8 @@ class PumpFunClient:
         Returns:
             Dictionary with batch sell results
         """
+        if not wallet_private_keys:
+            raise PumpFunValidationError("Wallet private keys cannot be empty")
         if not mint_address:
             raise PumpFunValidationError("Mint address cannot be empty")
         if not 0 <= sell_percentage <= 100:
@@ -1959,7 +1971,13 @@ class PumpFunClient:
         data = {
             "mintAddress": mint_address,
             "sellAmountPercentage": f"{sell_percentage}%",
-            "slippageBps": slippage_bps
+            "slippageBps": slippage_bps,
+            "wallets": [
+                {
+                    "name": f"BundledWallet{i+1}",
+                    "privateKey": private_key
+                } for i, private_key in enumerate(wallet_private_keys)
+            ]
         }
         
         if target_wallet_names:

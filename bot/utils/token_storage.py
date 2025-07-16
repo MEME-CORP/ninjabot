@@ -42,7 +42,8 @@ class TokenStorage:
         return os.path.join(self.data_dir, f"user_{user_id}_tokens.json")
     
     def store_token(self, user_id: int, mint_address: str, 
-                   token_name: str = None, bundle_id: str = None) -> bool:
+                   token_name: str = None, bundle_id: str = None, 
+                   airdrop_wallet_address: str = None) -> bool:
         """
         Store a newly created token.
         
@@ -51,6 +52,7 @@ class TokenStorage:
             mint_address: Token mint address from API response
             token_name: Optional token name
             bundle_id: Optional bundle ID from creation
+            airdrop_wallet_address: Optional airdrop wallet address used for creation
             
         Returns:
             True if stored successfully, False otherwise
@@ -63,7 +65,8 @@ class TokenStorage:
                 "created_at": datetime.now().isoformat(),
                 "user_id": user_id,
                 "token_name": token_name,
-                "bundle_id": bundle_id
+                "bundle_id": bundle_id,
+                "airdrop_wallet_address": airdrop_wallet_address
             }
             
             logger.info(f"📝 Token record created: {token_record}")

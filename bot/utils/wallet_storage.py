@@ -9,6 +9,8 @@ wallet management system.
 import os
 import json
 import time
+import base64
+import base58
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from loguru import logger
@@ -446,12 +448,17 @@ class BundledWalletStorage:
                         continue
                     
                     # Handle private key field - actual files use "privateKey"
+                    private_key_raw = None
                     if "privateKey" in wallet:
-                        normalized_wallet["private_key"] = wallet["privateKey"]
+                        private_key_raw = wallet["privateKey"]
                     elif "private_key" in wallet:
-                        normalized_wallet["private_key"] = wallet["private_key"]
+                        private_key_raw = wallet["private_key"]
                     elif "secretKey" in wallet:
-                        normalized_wallet["private_key"] = wallet["secretKey"]
+                        private_key_raw = wallet["secretKey"]
+                    
+                    # Convert private key to base58 format if needed
+                    if private_key_raw:
+                        normalized_wallet["private_key"] = self._convert_private_key_to_base58(private_key_raw)
                     
                     # Keep other fields as-is (name, etc.)
                     for k, v in wallet.items():
@@ -479,8 +486,45 @@ class BundledWalletStorage:
                 exc_info=True
             )
             return []
+    
+    def _convert_private_key_to_base58(self, private_key_str: str) -> str:
+        """
+        Convert private key from base64 to base58 format if needed.
+        
+        Args:
+            private_key_str: Private key string (base64 or base58)
+            
+        Returns:
+            Base58 encoded private key string
+        """
+        try:
+            # Check if it's already base58 (typical Solana private key length is ~88 chars)
+            if len(private_key_str) > 80 and len(private_key_str) < 100:
+                try:
+                    # Try to decode as base58 - if it works, it's already base58
+                    base58.b58decode(private_key_str)
+                    return private_key_str
+                except:
+                    pass
+            
+            # Try to decode as base64 and convert to base58
+            try:
+                decoded_bytes = base64.b64decode(private_key_str)
+                # Solana private keys should be 64 bytes
+                if len(decoded_bytes) == 64:
+                    return base58.b58encode(decoded_bytes).decode('utf-8')
+            except:
+                pass
+            
+            # If all conversion attempts fail, return original
+            logger.warning(f"Could not convert private key format, using original: {private_key_str[:10]}...")
+            return private_key_str
+            
+        except Exception as e:
+            logger.error(f"Error converting private key format: {str(e)}")
+            return private_key_str
 
 
 # Global instances for use in handlers
 airdrop_wallet_storage = AirdropWalletStorage()
-bundled_wallet_storage = BundledWalletStorage() 
+bundled_wallet_storage = BundledWalletStorage()
