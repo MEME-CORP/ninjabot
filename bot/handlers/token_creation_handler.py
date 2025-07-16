@@ -501,10 +501,13 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
         session_manager.update_session_value(user.id, "final_creation_results", token_result)
         
         # Store the created token in persistent storage
+        storage_status = "❌ Storage failed"
         if mint_address:
             # Get token parameters for storage
             token_params = session_manager.get_session_value(user.id, "token_params") or {}
             token_name = token_params.get("name", "Unknown Token")
+            
+            logger.info(f"Attempting to store token: mint_address={mint_address}, token_name={token_name}, user_id={user.id}")
             
             # Store the created token
             storage_success = token_storage.store_token(
@@ -515,9 +518,13 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             )
             
             if storage_success:
-                logger.info(f"Token {mint_address} stored successfully for user {user.id}")
+                storage_status = "✅ Token saved to storage"
+                logger.info(f"✅ Token {mint_address} ({token_name}) stored successfully for user {user.id}")
             else:
-                logger.warning(f"Failed to store token {mint_address} for user {user.id}")
+                storage_status = "❌ Token storage failed"
+                logger.error(f"❌ Failed to store token {mint_address} ({token_name}) for user {user.id}")
+        else:
+            logger.error(f"❌ Cannot store token - mint_address is empty for user {user.id}")
         
         # Execute additional buys for remaining child wallets if configured
         additional_child_amount = buy_amounts.get("Additional Child Wallets")
@@ -564,7 +571,8 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             "failed_operations": 0,
             "execution_time": execution_time,
             "buy_amounts": buy_amounts,
-            "wallet_group_counts": wallet_group_counts
+            "wallet_group_counts": wallet_group_counts,
+            "storage_status": storage_status  # Add storage status to results
         }
         
         try:
@@ -582,7 +590,8 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
                     f"✅ Token Creation Successful!\n\n"
                     f"Token Address: {mint_address}\n"
                     f"Execution Time: {execution_time:.2f}s\n"
-                    f"Total Operations: {total_participating_wallets}\n\n"
+                    f"Total Operations: {total_participating_wallets}\n"
+                    f"Storage: {storage_status}\n\n"
                     f"Your token is now live on the blockchain!"
                 )
                 await query.edit_message_text(

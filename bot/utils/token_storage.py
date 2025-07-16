@@ -1,6 +1,11 @@
 """
 Simple token storage utility for persisting created tokens.
-Stores minimal essential data: mint address, creation timestamp, and user ID.
+Stores mini                json.dump(existing_tokens, f, indent=2)
+            
+            logger.info(f"✅ Token storage completed successfully for user {user_id}. File contains {len(existing_tokens)} tokens")
+            return True
+            
+        except Exception as e:sential data: mint address, creation timestamp, and user ID.
 """
 
 import os
@@ -51,6 +56,8 @@ class TokenStorage:
             True if stored successfully, False otherwise
         """
         try:
+            logger.info(f"📝 Starting token storage process: user_id={user_id}, mint_address={mint_address}, token_name={token_name}")
+            
             token_record = {
                 "mint_address": mint_address,
                 "created_at": datetime.now().isoformat(),
@@ -59,22 +66,28 @@ class TokenStorage:
                 "bundle_id": bundle_id
             }
             
+            logger.info(f"📝 Token record created: {token_record}")
+            
             # Load existing tokens for user
             existing_tokens = self.get_user_tokens(user_id)
+            logger.info(f"📝 Loaded {len(existing_tokens)} existing tokens for user {user_id}")
             
             # Add new token to the list
             existing_tokens.append(token_record)
             
             # Save updated list
             user_file = self._get_user_token_file(user_id)
+            logger.info(f"📝 Saving tokens to file: {user_file}")
+            
             with open(user_file, 'w') as f:
                 json.dump(existing_tokens, f, indent=2)
             
-            logger.info(f"Stored token {mint_address} for user {user_id}")
+            logger.info(f"✅ Token storage completed successfully for user {user_id}. File contains {len(existing_tokens)} tokens")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to store token {mint_address} for user {user_id}: {e}")
+            logger.error(f"❌ Failed to store token for user {user_id}: {str(e)}")
+            logger.error(f"❌ Token record that failed to store: {token_record if 'token_record' in locals() else 'Not created'}")
             return False
     
     def get_user_tokens(self, user_id: int) -> List[Dict[str, Any]]:

@@ -823,7 +823,7 @@ def format_sell_remaining_balance_summary(sell_results: Dict[str, Any], token_ad
 
 def format_activity_selection_message() -> str:
     """
-    Format activity selection message for choosing between Volume Generation and Bundling.
+    Format activity selection message for choosing between Volume Generation, Bundling, and Management.
     
     Returns:
         Formatted activity selection message
@@ -840,6 +840,11 @@ def format_activity_selection_message() -> str:
     message += "• Create custom tokens\n"
     message += "• Batch wallet operations\n"
     message += "• Bundle transactions via Jito\n\n"
+    message += "🎛️ **Bundler Management**\n"
+    message += "Manage your created tokens and execute buy/sell operations.\n"
+    message += "• View created tokens\n"
+    message += "• Buy/sell with dev & bundled wallets\n"
+    message += "• Token balance management\n\n"
     message += "Choose your preferred activity to continue:"
     
     return message
@@ -1160,6 +1165,11 @@ def format_bundle_operation_results(results_data: Dict[str, Any]) -> str:
         safe_mint_address = _escape_markdown_safely(mint_address)
         message += f"🪙 **Token Address:** `{safe_mint_address}`\n"
     
+    # Add storage status if available
+    storage_status = results_data.get('storage_status')
+    if storage_status:
+        message += f"💾 **Storage:** {storage_status}\n"
+    
     message += "\n"
     
     # Status-specific messaging
@@ -1269,7 +1279,7 @@ def format_bundled_wallets_created_message(wallet_count: int, wallet_details: Li
     """
     message = f"✅ **{wallet_count} Bundled Wallets Created Successfully!**\n\n"
     
-    if wallet_details and len(wallet_details) <= 10:  # Show details for small numbers
+    if wallet_details and len(wallet_details) <= 10: # Show details for small numbers
         message += "📋 **Wallet Overview:**\n"
         for i, wallet in enumerate(wallet_details[:10]):
             name = wallet.get('name', f'Wallet {i+1}')
@@ -1925,3 +1935,406 @@ def _escape_markdown_safely(text: str) -> str:
         safe_text = safe_text.replace('`', '')
     
     return safe_text
+
+# =============================================================================
+# BUNDLER MANAGEMENT MESSAGE FORMATTERS
+# =============================================================================
+
+def format_bundler_management_selection_message() -> str:
+    """
+    Format bundler management selection message.
+    
+    Returns:
+        Formatted bundler management selection message
+    """
+    message = "📊 **Bundler Management**\n\n"
+    message += "Manage your created tokens and execute trading operations.\n\n"
+    message += "**Available Operations:**\n"
+    message += "• View your created tokens\n"
+    message += "• Buy tokens with dev & bundled wallets\n"
+    message += "• Sell tokens with dev & bundled wallets\n"
+    message += "• Check token balances\n\n"
+    message += "Select an option to continue:"
+    
+    return message
+
+def format_token_list_message(tokens: List[Dict[str, Any]]) -> str:
+    """
+    Format token list message for management.
+    
+    Args:
+        tokens: List of user's created tokens
+        
+    Returns:
+        Formatted token list message
+    """
+    if not tokens:
+        return (
+            "📭 **No Tokens Found**\n\n"
+            "You haven't created any tokens yet.\n\n"
+            "Use 'Token Bundling (PumpFun)' to create your first token!"
+        )
+    
+    message = f"🪙 **Your Created Tokens** ({len(tokens)} total)\n\n"
+    
+    for i, token in enumerate(tokens[:10], 1):  # Show max 10 tokens
+        token_name = token.get('token_name', 'Unknown Token')
+        mint_address = token.get('mint_address', 'N/A')
+        created_at = token.get('created_at', 'Unknown')
+        
+        # Format creation date
+        try:
+            from datetime import datetime
+            date_obj = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+            formatted_date = date_obj.strftime('%Y-%m-%d %H:%M')
+        except:
+            formatted_date = created_at
+        
+        # Truncate mint address for display
+        mint_display = f"{mint_address[:8]}...{mint_address[-8:]}" if len(mint_address) > 16 else mint_address
+        
+        message += f"**{i}.** {token_name}\n"
+        message += f"   • **Mint:** `{mint_display}`\n"
+        message += f"   • **Created:** {formatted_date}\n\n"
+    
+    if len(tokens) > 10:
+        message += f"... and {len(tokens) - 10} more tokens\n\n"
+    
+    message += "Select a token to manage:"
+    
+    return message
+
+def format_token_management_options_message(token_data: Dict[str, Any]) -> str:
+    """
+    Format token management options message.
+    
+    Args:
+        token_data: Token data dictionary
+        
+    Returns:
+        Formatted token management options message
+    """
+    token_name = token_data.get('token_name', 'Unknown Token')
+    mint_address = token_data.get('mint_address', 'N/A')
+    mint_display = f"{mint_address[:8]}...{mint_address[-8:]}" if len(mint_address) > 16 else mint_address
+    
+    message = f"🎛️ **Token Management: {token_name}**\n\n"
+    message += f"**Mint Address:** `{mint_display}`\n\n"
+    message += "**Trading Operations:**\n\n"
+    message += "🟢 **Buy Operations**\n"
+    message += "• Buy with Dev Wallet\n"
+    message += "• Buy with Bundled Wallets\n"
+    message += "• Buy with All Wallets\n\n"
+    message += "🔴 **Sell Operations**\n"
+    message += "• Sell with Dev Wallet\n"
+    message += "• Sell with Bundled Wallets\n"
+    message += "• Sell with All Wallets\n\n"
+    message += "Select an operation:"
+    
+    return message
+
+def format_sell_percentage_selection_message(token_data: Dict[str, Any], operation: str) -> str:
+    """
+    Format sell percentage selection message.
+    
+    Args:
+        token_data: Token data dictionary
+        operation: The sell operation type (sell_dev, sell_bundled, sell_all)
+        
+    Returns:
+        Formatted sell percentage selection message
+    """
+    token_name = token_data.get('token_name', 'Unknown Token')
+    mint_address = token_data.get('mint_address', 'N/A')
+    mint_display = f"{mint_address[:8]}...{mint_address[-8:]}" if len(mint_address) > 16 else mint_address
+    
+    operation_titles = {
+        "sell_dev": "🔴 Sell with Dev Wallet",
+        "sell_bundled": "🔴 Sell with Bundled Wallets", 
+        "sell_all": "🔴 Sell with All Wallets"
+    }
+    
+    operation_descriptions = {
+        "sell_dev": "Sell tokens from your DevWallet only",
+        "sell_bundled": "Sell tokens from all bundled wallets (excluding DevWallet)",
+        "sell_all": "Sell tokens from DevWallet and all bundled wallets"
+    }
+    
+    title = operation_titles.get(operation, "🔴 Sell Tokens")
+    description = operation_descriptions.get(operation, "Sell tokens from selected wallets")
+    
+    message = f"{title}\n\n"
+    message += f"**Token:** {token_name}\n"
+    message += f"**Mint:** `{mint_display}`\n\n"
+    message += f"**Operation:** {description}\n\n"
+    message += f"📊 **Select Sell Percentage**\n\n"
+    message += f"Choose what percentage of your token holdings to sell:\n\n"
+    message += f"💡 **Guidelines:**\n"
+    message += f"• 25% - Conservative partial sell\n"
+    message += f"• 50% - Moderate partial sell\n"
+    message += f"• 75% - Aggressive partial sell\n"
+    message += f"• 100% - Complete sell (all tokens)\n"
+    message += f"• Custom - Enter your own percentage\n\n"
+    message += f"⚠️ **Note:** This percentage applies to the token balance in each wallet."
+    
+    return message
+
+def format_sell_confirmation_message(token_data: Dict[str, Any], operation: str, 
+                                   sell_percentage: float, estimated_wallets: int = 0) -> str:
+    """
+    Format sell operation confirmation message.
+    
+    Args:
+        token_data: Token data dictionary
+        operation: The sell operation type
+        sell_percentage: Percentage to sell
+        estimated_wallets: Estimated number of wallets involved
+        
+    Returns:
+        Formatted confirmation message
+    """
+    token_name = token_data.get('token_name', 'Unknown Token')
+    mint_address = token_data.get('mint_address', 'N/A')
+    mint_display = f"{mint_address[:8]}...{mint_address[-8:]}" if len(mint_address) > 16 else mint_address
+    
+    operation_titles = {
+        "sell_dev": "🔴 Sell with Dev Wallet",
+        "sell_bundled": "🔴 Sell with Bundled Wallets",
+        "sell_all": "🔴 Sell with All Wallets"
+    }
+    
+    title = operation_titles.get(operation, "🔴 Sell Tokens")
+    
+    message = f"✅ **Confirm Sell Operation**\n\n"
+    message += f"**{title}**\n\n"
+    message += f"**Token:** {token_name}\n"
+    message += f"**Mint:** `{mint_display}`\n"
+    message += f"**Sell Percentage:** {sell_percentage}%\n"
+    
+    if estimated_wallets > 0:
+        message += f"**Estimated Wallets:** {estimated_wallets}\n"
+    
+    message += f"\n📋 **Operation Details:**\n"
+    
+    if operation == "sell_dev":
+        message += f"• Sell {sell_percentage}% of tokens from DevWallet only\n"
+        message += f"• Single wallet transaction via /api/pump/sell-dev\n"
+        message += f"• Requires minimum 0.055 SOL in DevWallet\n"
+    elif operation == "sell_bundled":
+        message += f"• Sell {sell_percentage}% of tokens from all bundled wallets\n"
+        message += f"• Excludes DevWallet from the operation\n"
+        message += f"• Batch transaction via /api/pump/batch-sell\n"
+        message += f"• Each wallet needs minimum 0.025 SOL\n"
+    elif operation == "sell_all":
+        message += f"• Sell {sell_percentage}% of tokens from ALL wallets\n"
+        message += f"• Includes DevWallet and all bundled wallets\n"
+        message += f"• Separate API calls for DevWallet and batch operation\n"
+        message += f"• DevWallet: 0.055 SOL minimum, Others: 0.025 SOL minimum\n"
+    
+    message += f"\n⚠️ **Important:**\n"
+    message += f"• Transactions are irreversible once confirmed\n"
+    message += f"• Slippage is set to 25% for market volatility protection\n"
+    message += f"• You will receive SOL in exchange for your tokens\n"
+    message += f"• All wallets must have sufficient SOL for transaction fees\n\n"
+    message += f"Do you want to proceed with this sell operation?"
+    
+    return message
+
+def format_sell_operation_progress(progress_data: Dict[str, Any]) -> str:
+    """
+    Format sell operation progress message.
+    
+    Args:
+        progress_data: Progress information
+        
+    Returns:
+        Formatted progress message
+    """
+    operation_type = progress_data.get('operation_type', 'Sell Operation')
+    current_step = progress_data.get('current_step', 'Processing...')
+    completed_operations = progress_data.get('completed_operations', 0)
+    total_operations = progress_data.get('total_operations', 1)
+    
+    message = f"🔄 **{operation_type} in Progress**\n\n"
+    message += f"📊 **Status:** {current_step}\n"
+    
+    if total_operations > 1:
+        progress_percent = int((completed_operations / total_operations) * 100)
+        message += f"**Progress:** {completed_operations}/{total_operations} ({progress_percent}%)\n"
+        
+        # Add progress bar
+        bar_length = 10
+        filled_length = int(bar_length * progress_percent / 100)
+        progress_bar = "█" * filled_length + "░" * (bar_length - filled_length)
+        message += f"[{progress_bar}]\n"
+    
+    message += f"\n⏳ **Please wait...** This operation may take a few moments to complete."
+    
+    return message
+
+def format_sell_operation_results(results_data: Dict[str, Any]) -> str:
+    """
+    Format sell operation completion results message.
+    
+    Args:
+        results_data: Results from sell operation
+        
+    Returns:
+        Formatted results message
+    """
+    # Handle different possible response structures
+    data = results_data.get("data", results_data)
+    
+    # Check if this is a combined "sell_all" operation
+    if "operations" in data:
+        return format_combined_sell_results(results_data)
+    
+    # Extract key information for single operation
+    status = data.get("status", "unknown")
+    bundle_id = data.get("bundleId", "N/A")
+    mint_address = data.get("mintAddress", "N/A")
+    sell_percentage = data.get("sellPercentage", 0)
+    
+    # Format mint address for display
+    mint_display = f"{mint_address[:8]}...{mint_address[-8:]}" if len(mint_address) > 16 else mint_address
+    
+    # Status emoji
+    status_emoji = "✅" if status == "success" else "⚠️" if status == "partial_success" else "❌"
+    
+    message = f"{status_emoji} **Sell Operation Complete**\n\n"
+    message += f"**Status:** {status.replace('_', ' ').title()}\n"
+    message += f"**Token:** `{mint_display}`\n"
+    message += f"**Sell Percentage:** {sell_percentage}%\n"
+    
+    if bundle_id != "N/A":
+        message += f"**Bundle ID:** `{bundle_id}`\n"
+    
+    # Add specific results based on operation type
+    if "walletsProcessed" in data:
+        # Batch sell results
+        wallets_processed = data.get("walletsProcessed", 0)
+        successful_sells = data.get("successfulSells", 0) 
+        failed_sells = data.get("failedSells", 0)
+        total_sell_amount = data.get("totalSellAmount", 0)
+        total_sol_received = data.get("totalSolReceived", 0)
+        
+        message += f"\n📊 **Batch Sell Summary:**\n"
+        message += f"• Wallets Processed: {wallets_processed}\n"
+        message += f"• Successful Sells: {successful_sells}\n"
+        message += f"• Failed Sells: {failed_sells}\n"
+        
+        if total_sell_amount > 0:
+            message += f"• Total Tokens Sold: {total_sell_amount:,.6f}\n"
+        if total_sol_received > 0:
+            message += f"• Total SOL Received: {total_sol_received:.6f} SOL\n"
+            
+    else:
+        # Dev wallet sell results
+        sell_amount = data.get("sellAmount", 0)
+        sol_received = data.get("solReceived", 0)
+        
+        message += f"\n📊 **DevWallet Sell Summary:**\n"
+        if sell_amount > 0:
+            message += f"• Tokens Sold: {sell_amount:,.6f}\n"
+        if sol_received > 0:
+            message += f"• SOL Received: {sol_received:.6f} SOL\n"
+    
+    # Add transaction signatures if available
+    signatures = data.get("transactionSignatures", [])
+    if signatures and isinstance(signatures, list):
+        message += f"\n📝 **Transaction Signatures:**\n"
+        for i, sig in enumerate(signatures[:3]):  # Show first 3
+            short_sig = f"{sig[:8]}...{sig[-8:]}" if len(sig) > 16 else sig
+            message += f"• `{short_sig}`\n"
+        if len(signatures) > 3:
+            message += f"• ... and {len(signatures) - 3} more\n"
+    
+    if status == "success":
+        message += f"\n🎉 **Operation completed successfully!**"
+    elif status == "partial_success":
+        message += f"\n⚠️ **Operation partially completed.** Some wallets may have failed to sell."
+    else:
+        message += f"\n❌ **Operation failed.** Please check wallet balances and try again."
+    
+    return message
+
+def format_combined_sell_results(results_data: Dict[str, Any]) -> str:
+    """
+    Format combined sell operation results for "sell_all" operations.
+    
+    Args:
+        results_data: Combined results from DevWallet and batch sell operations
+        
+    Returns:
+        Formatted results message
+    """
+    data = results_data.get("data", results_data)
+    operations = data.get("operations", {})
+    mint_address = data.get("mintAddress", "N/A")
+    sell_percentage = data.get("sellPercentage", 0)
+    
+    # Format mint address for display
+    mint_display = f"{mint_address[:8]}...{mint_address[-8:]}" if len(mint_address) > 16 else mint_address
+    
+    message = f"✅ **All Wallets Sell Complete**\n\n"
+    message += f"**Token:** `{mint_display}`\n"
+    message += f"**Sell Percentage:** {sell_percentage}%\n\n"
+    
+    # DevWallet results
+    dev_result = operations.get("dev_wallet", {})
+    if dev_result:
+        dev_data = dev_result.get("data", dev_result)
+        dev_status = dev_data.get("status", "unknown")
+        dev_emoji = "✅" if dev_status == "success" else "❌"
+        
+        message += f"{dev_emoji} **DevWallet Sell:**\n"
+        message += f"• Status: {dev_status.replace('_', ' ').title()}\n"
+        
+        if "sellAmount" in dev_data:
+            message += f"• Tokens Sold: {dev_data['sellAmount']:,.6f}\n"
+        if "solReceived" in dev_data:
+            message += f"• SOL Received: {dev_data['solReceived']:.6f} SOL\n"
+        
+        if "bundleId" in dev_data:
+            bundle_id = dev_data["bundleId"]
+            message += f"• Bundle ID: `{bundle_id[:8]}...{bundle_id[-8:]}`\n"
+        
+        message += "\n"
+    
+    # Bundled wallets results
+    batch_result = operations.get("bundled_wallets", {})
+    if batch_result:
+        batch_data = batch_result.get("data", batch_result)
+        batch_status = batch_data.get("status", "unknown")
+        batch_emoji = "✅" if batch_status == "success" else "⚠️" if batch_status == "partial_success" else "❌"
+        
+        message += f"{batch_emoji} **Bundled Wallets Sell:**\n"
+        message += f"• Status: {batch_status.replace('_', ' ').title()}\n"
+        
+        if "walletsProcessed" in batch_data:
+            message += f"• Wallets Processed: {batch_data['walletsProcessed']}\n"
+        if "successfulSells" in batch_data:
+            message += f"• Successful Sells: {batch_data['successfulSells']}\n"
+        if "failedSells" in batch_data:
+            message += f"• Failed Sells: {batch_data['failedSells']}\n"
+        if "totalSellAmount" in batch_data:
+            message += f"• Total Tokens Sold: {batch_data['totalSellAmount']:,.6f}\n"
+        if "totalSolReceived" in batch_data:
+            message += f"• Total SOL Received: {batch_data['totalSolReceived']:.6f} SOL\n"
+        
+        if "bundleId" in batch_data:
+            bundle_id = batch_data["bundleId"]
+            message += f"• Bundle ID: `{bundle_id[:8]}...{bundle_id[-8:]}`\n"
+    
+    # Calculate overall status
+    dev_success = dev_result and dev_result.get("data", {}).get("status") == "success"
+    batch_success = batch_result and batch_result.get("data", {}).get("status") in ["success", "partial_success"]
+    
+    if dev_success and batch_success:
+        message += f"\n🎉 **All operations completed successfully!**"
+    elif dev_success or batch_success:
+        message += f"\n⚠️ **Operations partially completed.** Some sells may have failed."
+    else:
+        message += f"\n❌ **Operations failed.** Please check wallet balances and try again."
+    
+    return message

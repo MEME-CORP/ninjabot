@@ -100,6 +100,14 @@ class ConversationState:
     BUNDLE_OPERATION_PROGRESS = 58
     BUNDLE_OPERATION_COMPLETE = 59
     BUNDLED_WALLETS_CHOICE = "bundled_wallets_choice"
+    
+    # Bundler Management States
+    BUNDLER_MANAGEMENT = 60
+    TOKEN_LIST = 61
+    TOKEN_MANAGEMENT_OPTIONS = 62
+    TOKEN_TRADING_OPERATION = 63
+    SELL_PERCENTAGE_SELECTION = 64
+    SELL_CONFIRM_EXECUTE = 65
 
 # Volume generation strategies
 class VolumeStrategy:
@@ -126,12 +134,18 @@ class CallbackPrefix:
     ACTIVITY = "activity_"
     VOLUME_GENERATION = "volume_gen"
     BUNDLING = "bundling"
+    BUNDLER_MANAGEMENT = "bundler_mgmt"
 
     # Bundling Workflow prefixes
     BUNDLING_SETUP = "bundle_setup_"
     TOKEN_PARAM = "token_param_"
     BUY_AMOUNT = "buy_amt_"
     BATCH_OPERATION = "batch_op_"
+    
+    # Bundler Management prefixes
+    TOKEN_SELECT = "token_select_"
+    TOKEN_OPERATION = "token_op_"
+    SELL_PERCENTAGE = "sell_pct_"
 
 # Make everything available at package level
 __all__ = [

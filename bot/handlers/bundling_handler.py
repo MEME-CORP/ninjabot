@@ -515,6 +515,15 @@ async def bundle_operation_progress(update: Update, context: CallbackContext) ->
 # MAIN ORCHESTRATOR FUNCTIONS
 # =============================================================================
 
+# Import token trading operations from dedicated handler
+from .token_trading_handler import (
+    bundler_management_choice,
+    show_token_list,
+    token_selection,
+    token_operation_choice,
+    back_to_token_options
+)
+
 # Note: The actual ConversationHandler assembly would be added here
 # This is where all the handlers from different modules get wired together
 # into the complete workflow. This keeps the orchestration logic centralized
