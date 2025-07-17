@@ -623,7 +623,8 @@ def register_start_handler(application):
             ],
             ConversationState.WALLET_FUNDING_PROGRESS: [
                 CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
-                CallbackQueryHandler(return_funds_confirmation, pattern=r"^return_funds_confirmation$")
+                CallbackQueryHandler(return_funds_confirmation, pattern=r"^return_funds_confirmation$"),
+                CallbackQueryHandler(create_token_final, pattern=r"^create_token_final$")
             ],
             # Add missing TOKEN_CREATION_START state
             ConversationState.TOKEN_CREATION_START: [
