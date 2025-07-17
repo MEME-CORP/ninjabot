@@ -1908,13 +1908,13 @@ class PumpFunClient:
         
         return self._make_request_with_retry("POST", endpoint, json=data)
 
-    def batch_sell_token(self, wallet_private_keys: List[str], mint_address: str, sell_percentage: float, 
+    def batch_sell_token(self, wallets: List[Dict[str, str]], mint_address: str, sell_percentage: float, 
                         slippage_bps: int = 2500, target_wallet_names: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Batch sell tokens from multiple wallets (excluding DevWallet).
         
         Args:
-            wallet_private_keys: List of wallet private keys for the sell operation
+            wallets: List of wallet dictionaries with 'name' and 'privateKey' fields
             mint_address: Token mint address
             sell_percentage: Percentage to sell (0-100)
             slippage_bps: Slippage in basis points
@@ -1923,24 +1923,24 @@ class PumpFunClient:
         Returns:
             Dictionary with batch sell results
         """
-        if not wallet_private_keys:
-            raise PumpFunValidationError("Wallet private keys cannot be empty")
+        if not wallets:
+            raise PumpFunValidationError("Wallets cannot be empty")
         if not mint_address:
             raise PumpFunValidationError("Mint address cannot be empty")
         if not 0 <= sell_percentage <= 100:
             raise PumpFunValidationError("Sell percentage must be between 0 and 100")
+            
+        # Validate wallet format
+        for wallet in wallets:
+            if not isinstance(wallet, dict) or 'name' not in wallet or 'privateKey' not in wallet:
+                raise PumpFunValidationError("Each wallet must have 'name' and 'privateKey' fields")
             
         endpoint = "/api/pump/batch-sell"
         data = {
             "mintAddress": mint_address,
             "sellAmountPercentage": f"{sell_percentage}%",
             "slippageBps": slippage_bps,
-            "wallets": [
-                {
-                    "name": f"BundledWallet{i+1}",
-                    "privateKey": private_key
-                } for i, private_key in enumerate(wallet_private_keys)
-            ]
+            "wallets": wallets  # Use actual wallet objects with correct names
         }
         
         if target_wallet_names:

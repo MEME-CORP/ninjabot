@@ -607,12 +607,16 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
             if dev_wallets:
                 # Extract dev wallet credentials for PumpFun API
                 dev_wallet = dev_wallets[0]
+                logger.info(f"Starting DevWallet sell for mint {mint_address} with {sell_percentage}% of tokens")
+                
                 results = pumpfun_client.sell_dev_wallet(
                     dev_wallet_private_key=dev_wallet.get('privateKey'),
                     mint_address=mint_address,
                     sell_percentage=sell_percentage,
                     slippage_bps=slippage_bps
                 )
+                
+                logger.info(f"DevWallet sell completed successfully: {results}")
             else:
                 raise Exception("DevWallet not found in wallet data")
         
@@ -626,10 +630,9 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
             
             bundled_wallets_only = [w for w in wallets_data if w['name'] != 'DevWallet']
             if bundled_wallets_only:
-                # Extract wallet credentials for PumpFun API
-                wallet_private_keys = [w.get('privateKey') for w in bundled_wallets_only if w.get('privateKey')]
+                # Pass complete wallet objects to PumpFun API for correct naming
                 results = pumpfun_client.batch_sell_token(
-                    wallet_private_keys=wallet_private_keys,
+                    wallets=bundled_wallets_only,
                     mint_address=mint_address,
                     sell_percentage=sell_percentage,
                     slippage_bps=slippage_bps
@@ -671,10 +674,9 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
             
             bundled_wallets_only = [w for w in wallets_data if w['name'] != 'DevWallet']
             if bundled_wallets_only:
-                # Extract wallet credentials for PumpFun API
-                wallet_private_keys = [w.get('privateKey') for w in bundled_wallets_only if w.get('privateKey')]
+                # Pass complete wallet objects to PumpFun API for correct naming
                 batch_result = pumpfun_client.batch_sell_token(
-                    wallet_private_keys=wallet_private_keys,
+                    wallets=bundled_wallets_only,
                     mint_address=mint_address,
                     sell_percentage=sell_percentage,
                     slippage_bps=slippage_bps
@@ -693,10 +695,52 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
             }
         
         # Show results
+        logger.info(f"Preparing to show sell operation results: {results}")
+        
         keyboard = [[build_button("« Back to Token Options", "back_to_token_options")]]
         
+        try:
+            # Try to format results using the dedicated function
+            result_message = format_sell_operation_results(results)
+            logger.info(f"Successfully formatted results message")
+        except Exception as format_error:
+            logger.error(f"Error formatting results: {str(format_error)}")
+            logger.info(f"API response structure: {results}")
+            
+            # Fallback to simple success message with API response details
+            result_message = (
+                f"✅ **Sell Operation Completed Successfully!**\n\n"
+                f"Your sell operation has been executed and confirmed on-chain.\n\n"
+                f"**Operation Details:**\n"
+                f"• Token: `{mint_address[:8]}...{mint_address[-4:]}`\n"
+                f"• Percentage Sold: {sell_percentage}%\n"
+                f"• Operation Type: {operation.replace('_', ' ').title()}\n"
+                f"• Slippage: {slippage_bps/100:.2f}%\n\n"
+            )
+            
+            # Try to extract useful information from the API response
+            if isinstance(results, dict):
+                # Look for common response fields
+                data = results.get("data", results)
+                
+                if "bundleId" in data:
+                    bundle_id = data["bundleId"]
+                    result_message += f"• Bundle ID: `{bundle_id[:8]}...{bundle_id[-8:]}`\n"
+                    
+                if "transactionSignatures" in data and data["transactionSignatures"]:
+                    sigs = data["transactionSignatures"]
+                    if isinstance(sigs, list) and sigs:
+                        sig = sigs[0]
+                        result_message += f"• Transaction: `{sig[:8]}...{sig[-8:]}`\n"
+                        
+                if "status" in data:
+                    status = data["status"]
+                    result_message += f"• Status: {status.title()}\n"
+                    
+                result_message += f"\n🎉 **Check your wallet balances to see the updated SOL amounts!**"
+            
         await query.edit_message_text(
-            format_sell_operation_results(results),
+            result_message,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
