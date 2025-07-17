@@ -579,8 +579,10 @@ class PumpFunClient:
         endpoint = "/api/wallets/fund-bundled"
         
         # New API format: provide all wallet credentials directly in request
+        # Round amount to 9 decimal places to avoid floating point precision issues with lamport conversion
+        rounded_amount = round(amount_per_wallet, 9)
         data = {
-            "amountPerWalletSOL": amount_per_wallet,
+            "amountPerWalletSOL": rounded_amount,
             "childWallets": bundled_wallets,
             "motherWalletPrivateKeyBs58": mother_private_key
         }
@@ -590,7 +592,7 @@ class PumpFunClient:
             data["targetWalletNames"] = target_wallet_names
         
         logger.info(f"Funding {len(bundled_wallets)} bundled wallets with new API format")
-        logger.info(f"Amount per wallet: {amount_per_wallet} SOL")
+        logger.info(f"Amount per wallet: {rounded_amount} SOL (rounded from {amount_per_wallet})")
         if target_wallet_names:
             logger.info(f"Target wallets: {target_wallet_names}")
         

@@ -628,6 +628,7 @@ def register_start_handler(application):
             # Add missing TOKEN_CREATION_START state
             ConversationState.TOKEN_CREATION_START: [
                 CallbackQueryHandler(token_creation_start, pattern=r"^start_token_creation$"),
+                CallbackQueryHandler(create_token_final, pattern=r"^create_token_final$"),
                 CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
             ],
             # Token creation workflow states
