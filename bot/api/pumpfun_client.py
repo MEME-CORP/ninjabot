@@ -1017,7 +1017,7 @@ class PumpFunClient:
 
     def get_wallet_balance(self, public_key: str) -> Dict[str, Any]:
         """
-        Get wallet SOL balance (updated to use enhanced balance endpoint with fallback).
+        Get wallet SOL balance (updated to use legacy endpoint that works).
         
         Args:
             public_key: Wallet public key
@@ -1028,36 +1028,8 @@ class PumpFunClient:
         if not public_key:
             raise PumpFunValidationError("Public key cannot be empty")
             
-        # First try the enhanced endpoint
-        endpoint = f"/api/wallets/{public_key}/balance/sol"
-        
-        try:
-            response = self._make_request_with_retry("GET", endpoint)
-            
-            # Extract SOL balance from new response format
-            if "data" in response and "sol" in response["data"]:
-                sol_data = response["data"]["sol"]
-                # Return in backward-compatible format
-                return {
-                    "message": response.get("message", "Balance retrieved successfully."),
-                    "data": {
-                        "publicKey": response["data"]["publicKey"],
-                        "balance": sol_data["balance"],
-                        "lamports": sol_data["lamports"]
-                    }
-                }
-            else:
-                # Fallback for unexpected response format
-                return response
-                
-        except PumpFunApiError as e:
-            # If 404 or similar error, fall back to legacy endpoint
-            if "404" in str(e) or "Cannot GET" in str(e):
-                logger.warning(f"Enhanced balance endpoint not available, falling back to legacy endpoint: {str(e)}")
-                return self._get_wallet_balance_legacy(public_key)
-            else:
-                # Re-raise other API errors
-                raise e
+        # Use legacy endpoint directly since enhanced endpoints are not available
+        return self._get_wallet_balance_legacy(public_key)
 
     def _get_wallet_balance_legacy(self, public_key: str) -> Dict[str, Any]:
         """
@@ -1073,6 +1045,7 @@ class PumpFunClient:
         
         try:
             response = self._make_request_with_retry("GET", legacy_endpoint)
+            logger.info(f"Legacy balance response for {public_key[:8]}...{public_key[-4:]}: {response}")
             
             # Transform legacy response to match enhanced format
             if "data" in response:
@@ -1103,7 +1076,7 @@ class PumpFunClient:
                 }
                 
         except Exception as e:
-            logger.error(f"Legacy balance endpoint also failed: {str(e)}")
+            logger.error(f"Legacy balance endpoint failed for {public_key[:8]}...{public_key[-4:]}: {str(e)}")
             # Return zero balance as last resort
             return {
                 "message": "Balance check failed, returning zero balance",
@@ -1117,7 +1090,7 @@ class PumpFunClient:
 
     def get_wallet_sol_balance(self, public_key: str) -> Dict[str, Any]:
         """
-        Get wallet SOL balance using enhanced endpoint with fallback.
+        Get wallet SOL balance using legacy endpoint that works.
         
         Args:
             public_key: Wallet public key
@@ -1128,18 +1101,8 @@ class PumpFunClient:
         if not public_key:
             raise PumpFunValidationError("Public key cannot be empty")
             
-        endpoint = f"/api/wallets/{public_key}/balance/sol"
-        
-        try:
-            return self._make_request_with_retry("GET", endpoint)
-        except PumpFunApiError as e:
-            # If 404 or similar error, fall back to legacy endpoint
-            if "404" in str(e) or "Cannot GET" in str(e):
-                logger.warning(f"Enhanced SOL balance endpoint not available, falling back to legacy: {str(e)}")
-                return self._get_wallet_balance_legacy(public_key)
-            else:
-                # Re-raise other API errors
-                raise e
+        # Use legacy endpoint directly since enhanced endpoints are not available
+        return self._get_wallet_balance_legacy(public_key)
 
     def get_wallet_token_balance(self, public_key: str, mint_address: str) -> Dict[str, Any]:
         """

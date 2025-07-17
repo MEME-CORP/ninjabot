@@ -103,11 +103,13 @@ class ConversationState:
     
     # Bundler Management States
     BUNDLER_MANAGEMENT = 60
-    TOKEN_LIST = 61
-    TOKEN_MANAGEMENT_OPTIONS = 62
-    TOKEN_TRADING_OPERATION = 63
-    SELL_PERCENTAGE_SELECTION = 64
-    SELL_CONFIRM_EXECUTE = 65
+    AIRDROP_WALLET_SELECTION = 61  # New state for selecting airdrop wallet
+    WALLET_BALANCE_OVERVIEW = 62   # New state for showing wallet balances
+    TOKEN_LIST = 63                # Updated index
+    TOKEN_MANAGEMENT_OPTIONS = 64  # Updated index
+    TOKEN_TRADING_OPERATION = 65   # Updated index
+    SELL_PERCENTAGE_SELECTION = 66 # Updated index
+    SELL_CONFIRM_EXECUTE = 67      # Updated index
 
 # Volume generation strategies
 class VolumeStrategy:
@@ -143,6 +145,8 @@ class CallbackPrefix:
     BATCH_OPERATION = "batch_op_"
     
     # Bundler Management prefixes
+    AIRDROP_WALLET_SELECT = "airdrop_select_"  # New prefix for airdrop wallet selection
+    WALLET_BALANCE_VIEW = "wallet_balance_"    # New prefix for wallet balance actions
     TOKEN_SELECT = "token_select_"
     TOKEN_OPERATION = "token_op_"
     SELL_PERCENTAGE = "sell_pct_"
@@ -165,4 +169,4 @@ __all__ = [
     'BALANCE_POLL_INTERVAL',
     'CONVERSATION_TIMEOUT',
     'LOG_LEVEL'
-] 
+]

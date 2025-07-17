@@ -507,7 +507,9 @@ def register_start_handler(application):
         token_operation_choice,
         back_to_token_options,
         sell_percentage_choice,
-        sell_confirmation_choice
+        sell_confirmation_choice,
+        airdrop_wallet_selection_choice,
+        wallet_balance_overview_choice
     )
     
     # Simple conversation handler for essential functionality
@@ -520,6 +522,12 @@ def register_start_handler(application):
             ],
             ConversationState.BUNDLER_MANAGEMENT: [
                 CallbackQueryHandler(bundler_management_choice)
+            ],
+            ConversationState.AIRDROP_WALLET_SELECTION: [
+                CallbackQueryHandler(airdrop_wallet_selection_choice)
+            ],
+            ConversationState.WALLET_BALANCE_OVERVIEW: [
+                CallbackQueryHandler(wallet_balance_overview_choice)
             ],
             ConversationState.TOKEN_LIST: [
                 CallbackQueryHandler(token_selection)

@@ -57,7 +57,7 @@ async def bundler_management_choice(update: Update, context: CallbackContext) ->
     choice = query.data
     
     if choice == "view_tokens":
-        return await show_token_list(update, context)
+        return await show_airdrop_wallet_selection(update, context)
     elif choice == "back_to_activities":
         # Import and redirect to activity selection
         from .start_handler import start
@@ -85,7 +85,7 @@ async def show_token_list(update: Update, context: CallbackContext) -> int:
     user_tokens = token_storage.get_user_tokens(user.id)
     
     if not user_tokens:
-        keyboard = [[build_button("« Back to Bundler Management", "back_to_bundler_mgmt")]]
+        keyboard = [[build_button("« Back to Wallet Overview", "back_to_wallet_overview")]]
         
         await query.edit_message_text(
             "📭 **No Tokens Found**\n\n"
@@ -95,7 +95,7 @@ async def show_token_list(update: Update, context: CallbackContext) -> int:
             parse_mode=ParseMode.MARKDOWN
         )
         
-        return ConversationState.BUNDLER_MANAGEMENT
+        return ConversationState.WALLET_BALANCE_OVERVIEW
     
     # Build keyboard with token options (max 10 tokens)
     keyboard = []
@@ -106,7 +106,7 @@ async def show_token_list(update: Update, context: CallbackContext) -> int:
         keyboard.append([build_button(f"🪙 {display_name}", f"{CallbackPrefix.TOKEN_SELECT}{i}")])
     
     # Add navigation buttons
-    keyboard.append([build_button("« Back to Bundler Management", "back_to_bundler_mgmt")])
+    keyboard.append([build_button("« Back to Wallet Overview", "back_to_wallet_overview")])
     
     # Store tokens in session for later reference
     session_manager.update_session_value(user.id, "management_tokens", user_tokens)
@@ -138,9 +138,15 @@ async def token_selection(update: Update, context: CallbackContext) -> int:
     choice = query.data
     
     if choice == "back_to_bundler_mgmt":
-        # Go back to bundler management
-        from .start_handler import start_bundler_management_workflow
-        return await start_bundler_management_workflow(update, context)
+        # Go back to airdrop wallet selection (updated flow)
+        return await show_airdrop_wallet_selection(update, context)
+    elif choice == "back_to_wallet_overview":
+        # Go back to wallet balance overview
+        selected_airdrop_wallet = session_manager.get_session_value(user.id, "selected_airdrop_wallet")
+        if selected_airdrop_wallet:
+            return await show_wallet_balance_overview(update, context, selected_airdrop_wallet)
+        else:
+            return await show_airdrop_wallet_selection(update, context)
     
     # Extract token index from callback data
     if choice.startswith(CallbackPrefix.TOKEN_SELECT):
@@ -497,22 +503,29 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
         mint_address = selected_token.get('mint_address')
         slippage_bps = 2500  # 25% slippage
         
-        # Get wallet data - try multiple methods for robustness
-        session_data = session_manager.get_session_data(user.id)
-        airdrop_wallet = session_data.get('airdrop_wallet')
+        # Get wallet data - use selected airdrop wallet from new flow
+        selected_airdrop_wallet = session_manager.get_session_value(user.id, "selected_airdrop_wallet")
         airdrop_address = None
         
-        # Method 1: Try to get airdrop address from session
-        if airdrop_wallet and 'address' in airdrop_wallet:
-            airdrop_address = airdrop_wallet['address']
-            logger.info(f"Found airdrop wallet in session: {airdrop_address[:8]}...")
+        # Method 1: Use selected airdrop wallet from new flow (preferred)
+        if selected_airdrop_wallet and 'address' in selected_airdrop_wallet:
+            airdrop_address = selected_airdrop_wallet['address']
+            logger.info(f"Using selected airdrop wallet: {airdrop_address[:8]}...")
         
-        # Method 2: Try to get airdrop address from token record
+        # Method 2: Fallback to session airdrop wallet (legacy support)
+        if not airdrop_address:
+            session_data = session_manager.get_session_data(user.id)
+            airdrop_wallet = session_data.get('airdrop_wallet')
+            if airdrop_wallet and 'address' in airdrop_wallet:
+                airdrop_address = airdrop_wallet['address']
+                logger.info(f"Found airdrop wallet in session: {airdrop_address[:8]}...")
+        
+        # Method 3: Try to get airdrop address from token record
         if not airdrop_address and 'airdrop_wallet_address' in selected_token:
             airdrop_address = selected_token['airdrop_wallet_address']
             logger.info(f"Found airdrop wallet in token record: {airdrop_address[:8]}...")
         
-        # Method 3: Search for wallets by user ID (fallback)
+        # Method 4: Search for wallets by user ID (fallback)
         if not airdrop_address:
             user_bundled_wallets = bundled_wallet_storage.list_user_bundled_wallets(user.id)
             if user_bundled_wallets:
@@ -712,9 +725,99 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
         return ConversationState.TOKEN_TRADING_OPERATION
 
 
-async def back_to_token_options(update: Update, context: CallbackContext) -> int:
+async def show_airdrop_wallet_selection(update: Update, context: CallbackContext) -> int:
     """
-    Go back to token management options.
+    Show airdrop wallet selection for bundler management.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    
+    # Get user's bundled wallet records to find airdrop wallets
+    user_bundled_wallets = bundled_wallet_storage.list_user_bundled_wallets(user.id)
+    
+    if not user_bundled_wallets:
+        keyboard = [[build_button("« Back to Bundler Management", "back_to_bundler_mgmt")]]
+        
+        await query.edit_message_text(
+            "📭 **No Airdrop Wallets Found**\n\n"
+            "You haven't created any bundled wallets yet.\n\n"
+            "Use 'Token Bundling (PumpFun)' to create your first token with bundled wallets!",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.BUNDLER_MANAGEMENT
+    
+    # Get unique airdrop wallets
+    airdrop_wallets = {}
+    for wallet_record in user_bundled_wallets:
+        airdrop_address = wallet_record.get('airdrop_wallet_address')
+        if airdrop_address and airdrop_address not in airdrop_wallets:
+            airdrop_wallets[airdrop_address] = {
+                'address': airdrop_address,
+                'created_at': wallet_record.get('created_at', ''),
+                'wallet_count': wallet_record.get('wallet_count', 0)
+            }
+    
+    if not airdrop_wallets:
+        keyboard = [[build_button("« Back to Bundler Management", "back_to_bundler_mgmt")]]
+        
+        await query.edit_message_text(
+            "📭 **No Valid Airdrop Wallets Found**\n\n"
+            "No airdrop wallet addresses found in your bundled wallet records.\n\n"
+            "Please create new bundled wallets through the bundling system.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.BUNDLER_MANAGEMENT
+    
+    # Build keyboard with airdrop wallet options
+    keyboard = []
+    for i, (address, wallet_info) in enumerate(list(airdrop_wallets.items())[:10]):
+        display_address = f"{address[:8]}...{address[-4:]}"
+        wallet_count = wallet_info.get('wallet_count', 0)
+        keyboard.append([build_button(
+            f"🎯 {display_address} ({wallet_count} wallets)", 
+            f"{CallbackPrefix.AIRDROP_WALLET_SELECT}{i}"
+        )])
+    
+    # Add navigation buttons
+    keyboard.append([build_button("« Back to Bundler Management", "back_to_bundler_mgmt")])
+    
+    # Store airdrop wallets in session for later reference
+    session_manager.update_session_value(user.id, "airdrop_wallets", list(airdrop_wallets.values()))
+    
+    message_text = "🎯 **Select Airdrop Wallet**\n\n"
+    message_text += "Choose an airdrop wallet to view its bundled wallets and manage tokens:\n\n"
+    
+    for address, wallet_info in airdrop_wallets.items():
+        display_address = f"{address[:8]}...{address[-4:]}"
+        wallet_count = wallet_info.get('wallet_count', 0)
+        created_at = wallet_info.get('created_at', 'Unknown')
+        message_text += f"🎯 **{display_address}**\n"
+        message_text += f"   └ {wallet_count} bundled wallets\n"
+        message_text += f"   └ Created: {created_at[:10] if created_at else 'Unknown'}\n\n"
+    
+    await query.edit_message_text(
+        message_text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    return ConversationState.AIRDROP_WALLET_SELECTION
+
+
+async def airdrop_wallet_selection_choice(update: Update, context: CallbackContext) -> int:
+    """
+    Handle airdrop wallet selection and show wallet balances.
     
     Args:
         update: The update object
@@ -727,13 +830,305 @@ async def back_to_token_options(update: Update, context: CallbackContext) -> int
     query = update.callback_query
     await query.answer()
     
-    # Get selected token from session
-    selected_token = session_manager.get_session_value(user.id, "selected_token")
+    choice = query.data
     
+    if choice == "back_to_bundler_mgmt":
+        from .start_handler import bundler_management
+        return await bundler_management(update, context)
+    
+    # Handle airdrop wallet selection
+    if choice.startswith(CallbackPrefix.AIRDROP_WALLET_SELECT):
+        try:
+            # Extract wallet index from callback data
+            wallet_index = int(choice.replace(CallbackPrefix.AIRDROP_WALLET_SELECT, ""))
+            
+            # Get stored airdrop wallets from session
+            airdrop_wallets = session_manager.get_session_value(user.id, "airdrop_wallets", [])
+            
+            if 0 <= wallet_index < len(airdrop_wallets):
+                selected_airdrop_wallet = airdrop_wallets[wallet_index]
+                
+                # Store selected airdrop wallet in session
+                session_manager.update_session_value(user.id, "selected_airdrop_wallet", selected_airdrop_wallet)
+                
+                return await show_wallet_balance_overview(update, context, selected_airdrop_wallet)
+            else:
+                logger.error(f"Invalid airdrop wallet index: {wallet_index}")
+                
+        except (ValueError, IndexError) as e:
+            logger.error(f"Error parsing airdrop wallet selection: {str(e)}")
+    
+    return ConversationState.AIRDROP_WALLET_SELECTION
+
+
+async def show_wallet_balance_overview(update: Update, context: CallbackContext, airdrop_wallet: Dict[str, Any]) -> int:
+    """
+    Show balance overview for selected airdrop wallet and its bundled wallets.
+    
+    Args:
+        update: The update object
+        context: The context object
+        airdrop_wallet: Selected airdrop wallet information
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    
+    try:
+        airdrop_address = airdrop_wallet['address']
+        
+        # Show loading message
+        await query.edit_message_text(
+            f"🔍 **Checking Wallet Balances**\n\n"
+            f"Loading balance information for airdrop wallet:\n"
+            f"`{airdrop_address[:8]}...{airdrop_address[-4:]}`\n\n"
+            f"⏳ Please wait...",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Load bundled wallets
+        bundled_wallets = bundled_wallet_storage.load_bundled_wallets(airdrop_address, user.id)
+        
+        if not bundled_wallets:
+            keyboard = [[build_button("« Back to Airdrop Selection", "back_to_airdrop_selection")]]
+            
+            await query.edit_message_text(
+                f"❌ **No Bundled Wallets Found**\n\n"
+                f"No bundled wallets found for airdrop wallet:\n"
+                f"`{airdrop_address[:8]}...{airdrop_address[-4:]}`\n\n"
+                f"Please create bundled wallets through the bundling system.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            return ConversationState.WALLET_BALANCE_OVERVIEW
+        
+        # Initialize PumpFun client for balance checking
+        pumpfun_client = PumpFunClient()
+        
+        # Check balances for all wallets
+        wallet_balances = []
+        dev_wallet_balance = None
+        
+        for wallet in bundled_wallets:
+            wallet_address = wallet.get('address') or wallet.get('public_key')
+            wallet_name = wallet.get('name', 'Unknown')
+            
+            if wallet_address:
+                try:
+                    # Get SOL balance using the working legacy endpoint
+                    balance_response = pumpfun_client.get_wallet_balance(wallet_address)
+                    
+                    # Parse balance from response (handles both enhanced and legacy formats)
+                    sol_balance = 0.0
+                    if balance_response and 'data' in balance_response:
+                        data = balance_response['data']
+                        sol_balance = data.get('balance', 0.0)
+                    
+                    # Try to get complete balance (SOL + SPL tokens) if available
+                    token_info = []
+                    try:
+                        complete_balance = pumpfun_client.get_wallet_complete_balance(wallet_address)
+                        if complete_balance and 'data' in complete_balance:
+                            complete_data = complete_balance['data']
+                            tokens = complete_data.get('tokens', [])
+                            for token in tokens:
+                                if token.get('balance', 0) > 0:  # Only include tokens with positive balance
+                                    token_info.append({
+                                        'mint': token.get('mint'),
+                                        'balance': token.get('balance', 0),
+                                        'uiAmount': token.get('uiAmount', 0.0),
+                                        'decimals': token.get('decimals', 6),
+                                        'symbol': token.get('symbol')
+                                    })
+                    except Exception as token_error:
+                        logger.warning(f"Could not fetch SPL tokens for {wallet_name}: {str(token_error)}")
+                    
+                    logger.info(f"Balance check for {wallet_name} ({wallet_address[:8]}...{wallet_address[-4:]}): {sol_balance} SOL, {len(token_info)} SPL tokens")
+                    
+                    wallet_info = {
+                        'name': wallet_name,
+                        'address': wallet_address,
+                        'sol_balance': sol_balance,
+                        'spl_tokens': token_info,
+                        'token_count': len(token_info),
+                        'is_dev_wallet': wallet_name == 'DevWallet'
+                    }
+                    
+                    wallet_balances.append(wallet_info)
+                    
+                    if wallet_name == 'DevWallet':
+                        dev_wallet_balance = sol_balance
+                        
+                except Exception as e:
+                    logger.error(f"Error checking balance for wallet {wallet_name}: {str(e)}")
+                    wallet_balances.append({
+                        'name': wallet_name,
+                        'address': wallet_address,
+                        'sol_balance': 0.0,
+                        'spl_tokens': [],
+                        'token_count': 0,
+                        'error': str(e),
+                        'is_dev_wallet': wallet_name == 'DevWallet'
+                    })
+        
+        # Store wallet information in session
+        session_manager.update_session_value(user.id, "wallet_balances", wallet_balances)
+        
+        # Build balance overview message
+        message_text = f"💰 **Wallet Balance Overview**\n\n"
+        message_text += f"**Airdrop Wallet:** `{airdrop_address[:8]}...{airdrop_address[-4:]}`\n\n"
+        
+        # Show DevWallet first
+        dev_wallets = [w for w in wallet_balances if w['is_dev_wallet']]
+        if dev_wallets:
+            dev_wallet = dev_wallets[0]
+            message_text += f"🏆 **DevWallet**\n"
+            message_text += f"   └ Address: `{dev_wallet['address'][:8]}...{dev_wallet['address'][-4:]}`\n"
+            message_text += f"   └ SOL Balance: **{dev_wallet['sol_balance']:.6f} SOL**\n"
+            
+            # Show SPL tokens if any
+            spl_tokens = dev_wallet.get('spl_tokens', [])
+            if spl_tokens:
+                message_text += f"   └ SPL Tokens: **{len(spl_tokens)} token(s)**\n"
+                for token in spl_tokens[:3]:  # Show first 3 tokens
+                    symbol = token.get('symbol') or f"{token.get('mint', '')[:8]}..."
+                    ui_amount = token.get('uiAmount', 0.0)
+                    message_text += f"     • {symbol}: {ui_amount:.4f}\n"
+                if len(spl_tokens) > 3:
+                    message_text += f"     • ... and {len(spl_tokens) - 3} more\n"
+            
+            if dev_wallet.get('error'):
+                message_text += f"   └ ⚠️ Error: {dev_wallet['error']}\n"
+            message_text += "\n"
+        
+        # Show bundled wallets
+        bundled_only = [w for w in wallet_balances if not w['is_dev_wallet']]
+        if bundled_only:
+            message_text += f"🎯 **Bundled Wallets ({len(bundled_only)})**\n"
+            total_bundled_balance = 0.0
+            total_bundled_tokens = 0
+            
+            for wallet in bundled_only[:5]:  # Show first 5 bundled wallets
+                token_count = wallet.get('token_count', 0)
+                total_bundled_tokens += token_count
+                message_text += f"   └ {wallet['name']}: **{wallet['sol_balance']:.6f} SOL**"
+                if token_count > 0:
+                    message_text += f" + {token_count} tokens"
+                message_text += "\n"
+                total_bundled_balance += wallet['sol_balance']
+            
+            if len(bundled_only) > 5:
+                remaining_wallets = bundled_only[5:]
+                remaining_balance = sum(w['sol_balance'] for w in remaining_wallets)
+                remaining_tokens = sum(w.get('token_count', 0) for w in remaining_wallets)
+                total_bundled_balance += remaining_balance
+                total_bundled_tokens += remaining_tokens
+                message_text += f"   └ ... and {len(remaining_wallets)} more wallets\n"
+            
+            message_text += f"\n**Total Bundled Balance:** {total_bundled_balance:.6f} SOL"
+            if total_bundled_tokens > 0:
+                message_text += f" + {total_bundled_tokens} SPL tokens"
+            message_text += "\n\n"
+        
+        # Add trading readiness assessment
+        min_sol_for_trading = 0.001  # Minimum SOL needed per wallet for trading
+        
+        if dev_wallet_balance is not None and dev_wallet_balance >= min_sol_for_trading:
+            message_text += "✅ **DevWallet Ready for Trading**\n"
+        else:
+            message_text += "❌ **DevWallet Needs Funding** (min 0.001 SOL)\n"
+        
+        tradeable_bundled = len([w for w in bundled_only if w['sol_balance'] >= min_sol_for_trading])
+        message_text += f"🎯 **{tradeable_bundled}/{len(bundled_only)} Bundled Wallets Ready**\n\n"
+        
+        # Build keyboard
+        keyboard = [
+            [build_button("🪙 View Tokens for Trading", f"{CallbackPrefix.WALLET_BALANCE_VIEW}view_tokens")],
+            [build_button("🔄 Refresh Balances", f"{CallbackPrefix.WALLET_BALANCE_VIEW}refresh")],
+            [build_button("« Back to Airdrop Selection", "back_to_airdrop_selection")]
+        ]
+        
+        await query.edit_message_text(
+            message_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.WALLET_BALANCE_OVERVIEW
+        
+    except Exception as e:
+        logger.error(f"Error showing wallet balance overview: {str(e)}")
+        
+        keyboard = [[build_button("« Back to Airdrop Selection", "back_to_airdrop_selection")]]
+        
+        await query.edit_message_text(
+            f"❌ **Error Loading Wallet Balances**\n\n"
+            f"An error occurred while checking wallet balances:\n\n"
+            f"`{str(e)}`\n\n"
+            f"Please try again or select a different airdrop wallet.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.WALLET_BALANCE_OVERVIEW
+
+
+async def wallet_balance_overview_choice(update: Update, context: CallbackContext) -> int:
+    """
+    Handle wallet balance overview choices.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+    
+    choice = query.data
+    
+    if choice == "back_to_airdrop_selection":
+        return await show_airdrop_wallet_selection(update, context)
+    
+    # Handle balance overview actions
+    if choice.startswith(CallbackPrefix.WALLET_BALANCE_VIEW):
+        action = choice.replace(CallbackPrefix.WALLET_BALANCE_VIEW, "")
+        
+        if action == "view_tokens":
+            return await show_token_list(update, context)
+        elif action == "refresh":
+            # Refresh balances by re-showing the overview
+            selected_airdrop_wallet = session_manager.get_session_value(user.id, "selected_airdrop_wallet")
+            if selected_airdrop_wallet:
+                return await show_wallet_balance_overview(update, context, selected_airdrop_wallet)
+    
+    return ConversationState.WALLET_BALANCE_OVERVIEW
+
+
+async def back_to_token_options(update: Update, context: CallbackContext) -> int:
+    """
+    Handle back to token options navigation.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+    
+    # Get selected token from session and return to its management options
+    selected_token = session_manager.get_session_value(user.id, "selected_token")
     if selected_token:
         return await show_token_management_options(update, context, selected_token)
     else:
         return await show_token_list(update, context)
-
-
-logger.info("Token trading handler loaded with post-creation trading operations")
