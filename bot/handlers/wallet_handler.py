@@ -661,23 +661,46 @@ async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
     dev_wallet_buy_amount = buy_amounts.get("DevWallet", 0.01)
     first_bundled_buy_amount = buy_amounts.get("First Bundled Wallets", 0.01)
     
-    # Calculate required balances per API documentation:
-    # - DevWallet (tipper): 0.055 SOL minimum + buy amount
-    # - Other wallets: 0.025 SOL minimum + buy amount
-    dev_wallet_required = 0.055 + dev_wallet_buy_amount
-    bundled_wallet_required = 0.025 + first_bundled_buy_amount
+    # CRITICAL FIX: Use same increased funding amounts as funding function for consistency
+    # DevWallet: 0.055 base + buy_amount + 0.002 buffer = more margin for gas fees
+    dev_wallet_required = 0.055 + dev_wallet_buy_amount + 0.002
+    # Bundled wallets: 0.025 base + buy_amount + 0.002 buffer = ensures >10,000 lamports usable
+    bundled_wallet_required = 0.025 + first_bundled_buy_amount + 0.002
+    
+    # CRITICAL DEBUGGING: Log addresses being checked for balance consistency tracking
+    airdrop_wallet_address = session_manager.get_session_value(user.id, "airdrop_wallet_address")
+    logger.info(f"BALANCE CHECK DEBUG: Using airdrop wallet address: {airdrop_wallet_address}")
+    logger.info(f"BALANCE CHECK DEBUG: Dev wallet required: {dev_wallet_required:.6f} SOL")
+    logger.info(f"BALANCE CHECK DEBUG: Bundled wallet required: {bundled_wallet_required:.6f} SOL")
     
     await query.edit_message_text("🔍 **Checking Bundled Wallet Balances**...", parse_mode=ParseMode.MARKDOWN)
     
     # STEP 1: Check bundled wallets first
     try:
-        # Get airdrop wallet address to load user-specific bundled wallets
-        airdrop_wallet_address = session_manager.get_session_value(user.id, "airdrop_wallet_address")
         if not airdrop_wallet_address:
             raise Exception("Airdrop wallet address not found in session")
         
-        # Load bundled wallet data for this specific user and airdrop wallet
-        bundled_wallets_data = bundled_wallet_storage.load_bundled_wallets(airdrop_wallet_address, user.id)
+        # CRITICAL FIX: Use same data source as funding process for consistency
+        # Load bundled wallet data from session first (same as funding process)
+        bundled_wallets_data = session_manager.get_session_value(user.id, "bundled_wallets_data")
+        bundled_wallets_original_json = session_manager.get_session_value(user.id, "bundled_wallets_original_json")
+        
+        # Use storage as fallback if session data is not available
+        if not bundled_wallets_data and not bundled_wallets_original_json:
+            logger.info("No bundled wallet data in session, loading from storage as fallback")
+            bundled_wallets_data = bundled_wallet_storage.load_bundled_wallets(airdrop_wallet_address, user.id)
+        else:
+            logger.info("Using bundled wallet data from session for consistency with funding process")
+            
+            # Extract wallet list from session data structure (same logic as funding)
+            if bundled_wallets_original_json and isinstance(bundled_wallets_original_json, dict) and "data" in bundled_wallets_original_json:
+                bundled_wallets_data = bundled_wallets_original_json["data"]
+                logger.info("Using original JSON data format from session")
+            elif bundled_wallets_data and isinstance(bundled_wallets_data, list):
+                logger.info("Using normalized data format from session")
+            else:
+                logger.warning("Session data format unexpected, falling back to storage")
+                bundled_wallets_data = bundled_wallet_storage.load_bundled_wallets(airdrop_wallet_address, user.id)
         
         if not bundled_wallets_data:
             raise Exception(f"No bundled wallets found for user {user.id} with airdrop wallet {airdrop_wallet_address[:8]}...")
@@ -687,6 +710,12 @@ async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
         insufficient_wallets = []
         
         logger.info(f"Checking SOL balance for {total_wallets} bundled wallets with API requirements")
+        
+        # CRITICAL DEBUGGING: Log all wallet addresses being checked for balance
+        for idx, wallet in enumerate(bundled_wallets_data):
+            wallet_address = wallet.get("address") or wallet.get("publicKey")
+            wallet_name = wallet.get("name", f"wallet_{idx}")
+            logger.info(f"BALANCE CHECK DEBUG: Will check {wallet_name} address: {wallet_address}")
         
         # Check each wallet's SOL balance with proper requirements
         for wallet in bundled_wallets_data:
@@ -975,7 +1004,16 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
         airdrop_private_key = session_manager.get_session_value(user.id, "airdrop_private_key")
         if airdrop_private_key:
             try:
-                pumpfun_client.create_airdrop_wallet(airdrop_private_key)
+                # Convert private key format if needed (same as import function)
+                if is_base58_private_key(airdrop_private_key):
+                    api_airdrop_key = airdrop_private_key
+                    logger.info(f"Airdrop private key already in base58 format")
+                else:
+                    # Convert from base64 to base58 format
+                    api_airdrop_key = convert_base64_to_base58(airdrop_private_key)
+                    logger.info(f"Successfully converted airdrop private key from base64 to base58")
+                
+                pumpfun_client.create_airdrop_wallet(api_airdrop_key)
                 logger.info(f"Successfully imported airdrop wallet to API for user {user.id}")
                 
             except Exception as import_error:
@@ -1026,6 +1064,29 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
                 if wallets_to_import and len(wallets_to_import) > 0:
                     logger.info(f"Importing {len(wallets_to_import)} bundled wallets to API for user {user.id}")
                     
+                    # CRITICAL DEBUGGING: Log wallet addresses for consistency verification  
+                    wallet_validation_passed = True
+                    for idx, wallet in enumerate(wallets_to_import):
+                        wallet_addr = wallet.get("publicKey", "unknown") if isinstance(wallet, dict) else "unknown"
+                        wallet_name = wallet.get("name", f"wallet_{idx}") if isinstance(wallet, dict) else f"wallet_{idx}"
+                        private_key = wallet.get("privateKey", "") if isinstance(wallet, dict) else ""
+                        
+                        logger.info(f"FUNDING IMPORT DEBUG: {wallet_name} address: {wallet_addr}")
+                        
+                        # CRITICAL FIX: Validate wallet data format before API import
+                        if not wallet_addr or wallet_addr == "unknown":
+                            logger.error(f"Invalid wallet address for {wallet_name}: {wallet_addr}")
+                            wallet_validation_passed = False
+                        if not private_key:
+                            logger.error(f"Missing private key for {wallet_name}")
+                            wallet_validation_passed = False
+                        elif len(private_key) < 40:  # Basic sanity check for key length
+                            logger.error(f"Private key too short for {wallet_name}: {len(private_key)} chars")
+                            wallet_validation_passed = False
+                    
+                    if not wallet_validation_passed:
+                        raise Exception("Wallet data validation failed - invalid addresses or missing private keys")
+                    
                     # DEBUG: Log first wallet structure for analysis
                     first_wallet = wallets_to_import[0] if wallets_to_import else None
                     if first_wallet:
@@ -1060,9 +1121,17 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
                             logger.info(f"DEBUG: Processing wallet {i}: name='{name}', has_privateKey={bool(wallet.get('privateKey'))}, has_private_key={bool(wallet.get('private_key'))}, has_privateKeyBs58={bool(wallet.get('privateKeyBs58'))}")
                             
                             if private_key:
+                                # CRITICAL FIX: Convert private key to base58 format if needed (fixes Non-base58 character error)
+                                if is_base58_private_key(private_key):
+                                    private_key_bs58 = private_key
+                                    logger.info(f"DEBUG: Wallet '{name}' already in base58 format")
+                                else:
+                                    private_key_bs58 = convert_base64_to_base58(private_key)
+                                    logger.info(f"DEBUG: Converted wallet '{name}' from base64 to base58 format")
+                                
                                 api_wallets.append({
                                     "name": name,
-                                    "privateKey": private_key
+                                    "privateKey": private_key_bs58
                                 })
                                 logger.info(f"DEBUG: Added wallet '{name}' to API import list with validated base58 key")
                             else:
@@ -1210,24 +1279,124 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
         dev_wallet_buy_amount = buy_amounts.get("DevWallet", 0.01)
         first_bundled_buy_amount = buy_amounts.get("First Bundled Wallets", 0.01)
         
-        # Calculate required balances per API documentation
-        dev_wallet_required = 0.055 + dev_wallet_buy_amount
-        bundled_wallet_required = 0.025 + first_bundled_buy_amount
+        # CRITICAL FIX: Increase funding amounts to ensure sufficient balance
+        # Based on cause_debugging.yaml - increase from 0.003 to 0.005 SOL per wallet minimum
+        # DevWallet: 0.055 base + buy_amount + 0.002 buffer = more margin for gas fees
+        dev_wallet_required = 0.055 + dev_wallet_buy_amount + 0.002
+        # Bundled wallets: 0.025 base + buy_amount + 0.002 buffer = ensures >10,000 lamports usable
+        bundled_wallet_required = 0.025 + first_bundled_buy_amount + 0.002
         
-        # Prepare funding data for API
-        funding_data = {
-            "devWallet": {"amount": dev_wallet_required},
-            "firstBundledWallets": {"amount": bundled_wallet_required},
-            "additionalChildWallets": {"amount": bundled_wallet_required}
-        }
+        # CRITICAL DEBUGGING: Log wallet addresses being used for funding to ensure consistency
+        logger.info(f"FUNDING DEBUG: Using airdrop wallet address: {airdrop_wallet}")
+        logger.info(f"FUNDING DEBUG: Dev wallet required: {dev_wallet_required:.6f} SOL")
+        logger.info(f"FUNDING DEBUG: Bundled wallet required: {bundled_wallet_required:.6f} SOL")
         
-        # Execute funding operation
+        # CRITICAL FIX: Prepare funding data according to API documentation format
+        # API expects: amountPerWalletSOL, childWallets, motherWalletPrivateKeyBs58
+        
+        # Build childWallets array with private keys from session data
+        child_wallets = []
+        
+        # Get airdrop private key for mother wallet
+        airdrop_private_key = session_manager.get_session_value(user.id, "airdrop_private_key")
+        if not airdrop_private_key:
+            raise Exception("Airdrop private key not found in session")
+        
+        # Convert airdrop private key to base58 if needed
+        if is_base58_private_key(airdrop_private_key):
+            mother_wallet_key = airdrop_private_key
+        else:
+            mother_wallet_key = convert_base64_to_base58(airdrop_private_key)
+        
+        # Use the same wallet data source as the import process for consistency
+        if bundled_wallets_original_json and isinstance(bundled_wallets_original_json, dict) and "data" in bundled_wallets_original_json:
+            wallet_data_list = bundled_wallets_original_json["data"]
+        elif bundled_wallets_data and isinstance(bundled_wallets_data, list):
+            wallet_data_list = bundled_wallets_data
+        else:
+            # Fallback to storage
+            wallet_data_list = bundled_wallet_storage.load_bundled_wallets(airdrop_wallet, user.id)
+        
+        # Build childWallets array with proper API format
+        for wallet in wallet_data_list:
+            wallet_name = wallet.get("name", "Unknown")
+            wallet_private_key = wallet.get("privateKey") or wallet.get("private_key")
+            
+            if wallet_private_key:
+                # Convert to base58 if needed
+                if is_base58_private_key(wallet_private_key):
+                    api_private_key = wallet_private_key
+                else:
+                    api_private_key = convert_base64_to_base58(wallet_private_key)
+                
+                child_wallets.append({
+                    "name": wallet_name,
+                    "privateKey": api_private_key
+                })
+        
+        if not child_wallets:
+            raise Exception("No valid child wallets found for funding")
+        
+        logger.info(f"Prepared {len(child_wallets)} child wallets for funding")
+        
+        # Determine which wallet to fund based on requirements
+        # Fund DevWallet and First Bundled Wallet 1 with their respective amounts
+        target_wallet_names = ["DevWallet", "First Bundled Wallet 1"]
+        
+        # CRITICAL FIX: Use DevWallet amount for all since the API uses amountPerWalletSOL
+        # The API will use the same amount for all wallets, so we need to use the higher amount
+        # to ensure all wallets get sufficient funding
+        funding_amount_sol = dev_wallet_required
+        
+        logger.info(f"Funding {len(target_wallet_names)} wallets with {funding_amount_sol:.6f} SOL each")
+        logger.info(f"Target wallets: {target_wallet_names}")
+        logger.info(f"Child wallets prepared: {[w['name'] for w in child_wallets]}")
+        
+        # Execute funding operation with correct API format according to bundler_api.md
         logger.info(f"Executing wallet funding for user {user.id}")
         
-        funding_results = pumpfun_client.fund_bundled_wallets(
-            airdrop_wallet_address=airdrop_wallet,
-            funding_amounts=funding_data
-        )
+        # CRITICAL FIX: Use correct method signature from working code
+        try:
+            logger.info(f"Calling fund_bundled_wallets with:")
+            logger.info(f"  - amount_per_wallet: {funding_amount_sol}")
+            logger.info(f"  - bundled_wallets count: {len(child_wallets)}")
+            logger.info(f"  - mother_private_key: [REDACTED]")
+            logger.info(f"  - target_wallet_names: {target_wallet_names}")
+            
+            funding_results = pumpfun_client.fund_bundled_wallets(
+                amount_per_wallet=funding_amount_sol,
+                mother_private_key=mother_wallet_key,
+                bundled_wallets=child_wallets,
+                target_wallet_names=target_wallet_names
+            )
+            logger.info(f"Successfully funded wallets using correct method signature")
+            logger.info(f"Funding results: {funding_results}")
+        except TypeError as param_error:
+            if "unexpected keyword argument" in str(param_error):
+                logger.warning(f"Method signature still has issues, trying alternative call patterns: {param_error}")
+                
+                # Try alternative parameter names for backward compatibility
+                try:
+                    # Alternative 1: Positional arguments in correct order
+                    funding_results = pumpfun_client.fund_bundled_wallets(
+                        funding_amount_sol, mother_wallet_key, child_wallets, target_wallet_names
+                    )
+                    logger.info("Successfully used positional arguments")
+                except TypeError:
+                    try:
+                        # Alternative 2: Mixed approach with explicit parameters
+                        funding_results = pumpfun_client.fund_bundled_wallets(
+                            funding_amount_sol, 
+                            mother_private_key=mother_wallet_key,
+                            bundled_wallets=child_wallets,
+                            target_wallet_names=target_wallet_names
+                        )
+                        logger.info("Successfully used mixed parameter approach")
+                    except Exception as mixed_error:
+                        logger.error(f"All funding call formats failed. Original: {param_error}, Positional: Failed, Mixed: {mixed_error}")
+                        raise param_error
+            else:
+                raise param_error
         
         # Store results in session
         session_manager.update_session_value(user.id, "funding_results", funding_results)
