@@ -1900,7 +1900,7 @@ class PumpFunClient:
         return self._make_request_with_retry("POST", endpoint, json=data)
 
     def sell_dev_wallet(self, dev_wallet_private_key: str, mint_address: str, sell_percentage: float, 
-                       slippage_bps: int = 2500) -> Dict[str, Any]:
+                       slippage_bps: int = 5000) -> Dict[str, Any]:
         """
         Sell tokens from DevWallet using stateless API.
         
@@ -1936,7 +1936,7 @@ class PumpFunClient:
         return self._make_request_with_retry("POST", endpoint, json=data)
 
     def batch_sell_token(self, wallets: List[Dict[str, str]], mint_address: str, sell_percentage: float, 
-                        slippage_bps: int = 2500, target_wallet_names: Optional[List[str]] = None) -> Dict[str, Any]:
+                        slippage_bps: int = 5000, target_wallet_names: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Batch sell tokens from multiple wallets (excluding DevWallet).
         
