@@ -621,7 +621,9 @@ def register_start_handler(application):
             ],
             ConversationState.WALLET_FUNDING_REQUIRED: [
                 CallbackQueryHandler(start_wallet_funding, pattern=r"^start_wallet_funding$"),
-                CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$")
+                CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
+                CallbackQueryHandler(return_funds_confirmation, pattern=r"^return_funds_confirmation$"),
+                CallbackQueryHandler(edit_buy_amounts, pattern=r"^edit_buy_amounts$")
             ],
             ConversationState.WALLET_FUNDING_PROGRESS: [
                 CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
@@ -663,6 +665,16 @@ def register_start_handler(application):
                 CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
                 CallbackQueryHandler(edit_buy_amounts, pattern=r"^edit_buy_amounts$"),
                 CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            # Return funds workflow states
+            ConversationState.RETURN_FUNDS_CONFIRMATION: [
+                CallbackQueryHandler(execute_return_funds, pattern=r"^execute_return_funds$"),
+                CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
+                CallbackQueryHandler(edit_buy_amounts, pattern=r"^edit_buy_amounts$")
+            ],
+            ConversationState.RETURN_FUNDS_COMPLETE: [
+                CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
+                CallbackQueryHandler(create_token_final, pattern=r"^create_token_final$")
             ]
         },
         fallbacks=[CommandHandler("start", start)],

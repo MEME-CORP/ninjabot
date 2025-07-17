@@ -1669,6 +1669,8 @@ async def return_funds_confirmation(update: Update, context: CallbackContext) ->
     query = update.callback_query
     await query.answer()
     
+    logger.info(f"🔧 RETURN_FUNDS_CONFIRMATION: User {user.id} clicked return funds confirmation button")
+    
     try:
         # Get wallet counts for confirmation display
         bundled_wallets_count = session_manager.get_session_value(user.id, "bundled_wallets_count", 0)
@@ -1730,6 +1732,8 @@ async def execute_return_funds(update: Update, context: CallbackContext) -> int:
     user = update.callback_query.from_user
     query = update.callback_query
     await query.answer()
+    
+    logger.info(f"🔧 EXECUTE_RETURN_FUNDS: User {user.id} confirmed return funds execution")
     
     try:
         # Get required data from session

@@ -229,12 +229,16 @@ async def token_operation_choice(update: Update, context: CallbackContext) -> in
     if choice == "back_to_token_list":
         return await show_token_list(update, context)
     
-    # Handle trading operations
-    if choice.startswith(CallbackPrefix.TOKEN_OPERATION):
-        operation = choice.replace(CallbackPrefix.TOKEN_OPERATION, "")
+    # Handle trading operations (support both old and new callback patterns)
+    if choice.startswith(CallbackPrefix.TOKEN_OPERATION) or choice.startswith("token_operation_"):
+        if choice.startswith(CallbackPrefix.TOKEN_OPERATION):
+            operation = choice.replace(CallbackPrefix.TOKEN_OPERATION, "")
+        else:
+            operation = choice.replace("token_operation_", "")
         
         # Get selected token from session
         selected_token = session_manager.get_session_value(user.id, "selected_token")
+        logger.info(f"Token operation {operation} selected for token: {selected_token.get('token_name', 'Unknown') if selected_token else 'None'}")
         
         if not selected_token:
             logger.error(f"No selected token found for user {user.id}")
