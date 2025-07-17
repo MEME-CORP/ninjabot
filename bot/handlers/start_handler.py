@@ -530,6 +530,30 @@ def register_start_handler(application):
         use_existing_airdrop_wallet,
         select_existing_airdrop_wallet
     )
+    
+    # Import the token creation handlers
+    from bot.handlers.bundling_handler import (
+        token_creation_start,
+        configure_buy_amounts,
+        start_buy_amounts_input,
+        buy_amounts_input,
+        edit_buy_amounts
+    )
+    
+    # Import the token config handlers
+    from bot.handlers.token_config_handler import (
+        token_parameter_input,
+        process_token_image_upload,
+        skip_image_upload,
+        proceed_to_preview,
+        edit_token_parameters
+    )
+    
+    # Import the token creation final handler
+    from bot.handlers.token_creation_handler import (
+        back_to_token_preview,
+        create_token_final
+    )
 
     # Simple conversation handler for essential functionality including bundling workflow
     conversation_handler = ConversationHandler(
@@ -583,12 +607,15 @@ def register_start_handler(application):
             ConversationState.BUNDLED_WALLETS_COUNT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bundled_wallets_count),
                 CallbackQueryHandler(continue_to_bundled_wallets_setup, pattern=r"^continue_to_bundled_count$"),
+                CallbackQueryHandler(token_creation_start, pattern=r"^start_token_creation$"),
                 CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
             ],
             ConversationState.WALLET_BALANCE_CHECK: [
                 CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
                 CallbackQueryHandler(fund_bundled_wallets_now, pattern=r"^fund_bundled_wallets_now$"),
-                CallbackQueryHandler(return_funds_confirmation, pattern=r"^return_funds_confirmation$")
+                CallbackQueryHandler(return_funds_confirmation, pattern=r"^return_funds_confirmation$"),
+                CallbackQueryHandler(token_creation_start, pattern=r"^start_token_creation$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
             ],
             ConversationState.WALLET_FUNDING_REQUIRED: [
                 CallbackQueryHandler(start_wallet_funding, pattern=r"^start_wallet_funding$"),
@@ -597,6 +624,41 @@ def register_start_handler(application):
             ConversationState.WALLET_FUNDING_PROGRESS: [
                 CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
                 CallbackQueryHandler(return_funds_confirmation, pattern=r"^return_funds_confirmation$")
+            ],
+            # Add missing TOKEN_CREATION_START state
+            ConversationState.TOKEN_CREATION_START: [
+                CallbackQueryHandler(token_creation_start, pattern=r"^start_token_creation$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            # Token creation workflow states
+            ConversationState.TOKEN_PARAMETER_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, token_parameter_input),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.TOKEN_IMAGE_UPLOAD: [
+                MessageHandler(filters.PHOTO, process_token_image_upload),
+                CallbackQueryHandler(skip_image_upload, pattern=r"^skip_image$"),
+                CallbackQueryHandler(proceed_to_preview, pattern=r"^proceed_to_preview$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.TOKEN_CREATION_PREVIEW: [
+                CallbackQueryHandler(configure_buy_amounts, pattern=r"^configure_buy_amounts$"),
+                CallbackQueryHandler(edit_token_parameters, pattern=r"^edit_token_parameters$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.BUY_AMOUNTS_CONFIG: [
+                CallbackQueryHandler(start_buy_amounts_input, pattern=r"^start_buy_amounts_input$"),
+                CallbackQueryHandler(back_to_token_preview, pattern=r"^back_to_token_preview$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.BUY_AMOUNTS_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, buy_amounts_input),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.BUY_AMOUNTS_PREVIEW: [
+                CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
+                CallbackQueryHandler(edit_buy_amounts, pattern=r"^edit_buy_amounts$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
             ]
         },
         fallbacks=[CommandHandler("start", start)],

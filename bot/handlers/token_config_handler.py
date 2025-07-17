@@ -266,6 +266,8 @@ async def proceed_to_preview(update: Update, context: CallbackContext) -> int:
     preview_text = format_token_creation_preview(token_params)
     if has_image:
         preview_text += "\n🖼️ **Image:** Custom image uploaded ✅"
+    else:
+        preview_text += "\n🖼️ **Image:** No image (default will be used)"
     
     keyboard = InlineKeyboardMarkup([
         [build_button("💰 Configure Buy Amounts", "configure_buy_amounts")],
