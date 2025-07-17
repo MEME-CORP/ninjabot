@@ -700,44 +700,80 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
         keyboard = [[build_button("« Back to Token Options", "back_to_token_options")]]
         
         try:
-            # Try to format results using the dedicated function
-            result_message = format_sell_operation_results(results)
-            logger.info(f"Successfully formatted results message")
+            # Handle the specific API response structure for sell operations
+            if isinstance(results, dict) and "data" in results:
+                api_data = results["data"]
+                
+                # Check if the operation was successful
+                if api_data.get("success", False):
+                    result_message = (
+                        f"✅ **Sell Operation Completed Successfully!**\n\n"
+                        f"Your tokens have been sold and confirmed on-chain.\n\n"
+                        f"**Operation Summary:**\n"
+                        f"• Token: `{mint_address[:8]}...{mint_address[-4:]}`\n"
+                        f"• Percentage Sold: {sell_percentage}%\n"
+                        f"• Operation Type: {operation.replace('_', ' ').title()}\n"
+                        f"• Bundles Sent: {api_data.get('totalBundlesSent', 'N/A')}\n"
+                        f"• Successful Bundles: {api_data.get('successfulBundles', 'N/A')}\n"
+                        f"• Failed Bundles: {api_data.get('failedBundles', 0)}\n\n"
+                    )
+                    
+                    # Add bundle details if available
+                    bundle_results = api_data.get("bundleResults", [])
+                    if bundle_results:
+                        result_message += f"**Transaction Details:**\n"
+                        for i, bundle in enumerate(bundle_results[:3]):  # Show max 3 bundles
+                            if bundle.get("success"):
+                                bundle_id = bundle.get("bundleId", "N/A")
+                                result_message += f"• Bundle {i+1}: `{bundle_id[:8]}...{bundle_id[-8:]}`\n"
+                                
+                                # Add transaction count if available
+                                transactions = bundle.get("transactions", [])
+                                if transactions:
+                                    result_message += f"  └ {len(transactions)} wallet(s) processed\n"
+                        
+                        if len(bundle_results) > 3:
+                            result_message += f"• ... and {len(bundle_results) - 3} more bundle(s)\n"
+                    
+                    result_message += f"\n🎉 **Check your wallet balances to see the updated SOL amounts!**"
+                    
+                else:
+                    # Handle failed operations
+                    result_message = (
+                        f"❌ **Sell Operation Failed**\n\n"
+                        f"The sell operation was not successful.\n\n"
+                        f"**Details:**\n"
+                        f"• Token: `{mint_address[:8]}...{mint_address[-4:]}`\n"
+                        f"• Attempted Percentage: {sell_percentage}%\n"
+                        f"• Error: {api_data.get('message', 'Unknown error')}\n"
+                    )
+            else:
+                # Fallback for unexpected response format
+                logger.warning(f"Unexpected API response format: {results}")
+                result_message = (
+                    f"✅ **Sell Operation Completed**\n\n"
+                    f"Your sell operation has been processed.\n\n"
+                    f"**Operation Details:**\n"
+                    f"• Token: `{mint_address[:8]}...{mint_address[-4:]}`\n"
+                    f"• Percentage Sold: {sell_percentage}%\n"
+                    f"• Operation Type: {operation.replace('_', ' ').title()}\n\n"
+                    f"🎉 **Check your wallet balances to see the updated amounts!**"
+                )
+                
         except Exception as format_error:
-            logger.error(f"Error formatting results: {str(format_error)}")
-            logger.info(f"API response structure: {results}")
+            logger.error(f"Error formatting sell results: {str(format_error)}")
+            logger.info(f"Full API response: {results}")
             
-            # Fallback to simple success message with API response details
+            # Simple fallback message
             result_message = (
-                f"✅ **Sell Operation Completed Successfully!**\n\n"
-                f"Your sell operation has been executed and confirmed on-chain.\n\n"
+                f"✅ **Sell Operation Completed**\n\n"
+                f"Your sell operation has been executed.\n\n"
                 f"**Operation Details:**\n"
                 f"• Token: `{mint_address[:8]}...{mint_address[-4:]}`\n"
                 f"• Percentage Sold: {sell_percentage}%\n"
-                f"• Operation Type: {operation.replace('_', ' ').title()}\n"
-                f"• Slippage: {slippage_bps/100:.2f}%\n\n"
+                f"• Operation Type: {operation.replace('_', ' ').title()}\n\n"
+                f"🎉 **Check your wallet balances to confirm the transaction!**"
             )
-            
-            # Try to extract useful information from the API response
-            if isinstance(results, dict):
-                # Look for common response fields
-                data = results.get("data", results)
-                
-                if "bundleId" in data:
-                    bundle_id = data["bundleId"]
-                    result_message += f"• Bundle ID: `{bundle_id[:8]}...{bundle_id[-8:]}`\n"
-                    
-                if "transactionSignatures" in data and data["transactionSignatures"]:
-                    sigs = data["transactionSignatures"]
-                    if isinstance(sigs, list) and sigs:
-                        sig = sigs[0]
-                        result_message += f"• Transaction: `{sig[:8]}...{sig[-8:]}`\n"
-                        
-                if "status" in data:
-                    status = data["status"]
-                    result_message += f"• Status: {status.title()}\n"
-                    
-                result_message += f"\n🎉 **Check your wallet balances to see the updated SOL amounts!**"
             
         await query.edit_message_text(
             result_message,
