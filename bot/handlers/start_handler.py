@@ -512,7 +512,26 @@ def register_start_handler(application):
         wallet_balance_overview_choice
     )
     
-    # Simple conversation handler for essential functionality
+    # Import the bundling handlers
+    from bot.handlers.wallet_handler import (
+        create_airdrop_wallet,
+        wait_and_retry_airdrop,
+        import_airdrop_wallet,
+        process_airdrop_wallet_import,
+        continue_to_bundled_wallets_setup,
+        bundled_wallets_count,
+        check_wallet_balance,
+        fund_bundled_wallets_now,
+        start_wallet_funding,
+        retry_wallet_funding,
+        return_funds_confirmation,
+        execute_return_funds,
+        return_funds_complete,
+        use_existing_airdrop_wallet,
+        select_existing_airdrop_wallet
+    )
+
+    # Simple conversation handler for essential functionality including bundling workflow
     conversation_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
@@ -543,6 +562,41 @@ def register_start_handler(application):
             ],
             ConversationState.SELL_CONFIRM_EXECUTE: [
                 CallbackQueryHandler(sell_confirmation_choice)
+            ],
+            # Bundling workflow states
+            ConversationState.BUNDLING_WALLET_SETUP: [
+                CallbackQueryHandler(create_airdrop_wallet, pattern=r"^create_airdrop_wallet$"),
+                CallbackQueryHandler(wait_and_retry_airdrop, pattern=r"^wait_and_retry_airdrop$"),
+                CallbackQueryHandler(import_airdrop_wallet, pattern=r"^import_airdrop_wallet$"),
+                CallbackQueryHandler(use_existing_airdrop_wallet, pattern=r"^use_existing_airdrop_wallet$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.IMPORT_AIRDROP_WALLET: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_airdrop_wallet_import),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.SELECT_EXISTING_AIRDROP_WALLET: [
+                CallbackQueryHandler(select_existing_airdrop_wallet, pattern=r"^select_airdrop_"),
+                CallbackQueryHandler(start_bundling_workflow, pattern=r"^back_to_bundling_setup$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.BUNDLED_WALLETS_COUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, bundled_wallets_count),
+                CallbackQueryHandler(continue_to_bundled_wallets_setup, pattern=r"^continue_to_bundled_count$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.WALLET_BALANCE_CHECK: [
+                CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
+                CallbackQueryHandler(fund_bundled_wallets_now, pattern=r"^fund_bundled_wallets_now$"),
+                CallbackQueryHandler(return_funds_confirmation, pattern=r"^return_funds_confirmation$")
+            ],
+            ConversationState.WALLET_FUNDING_REQUIRED: [
+                CallbackQueryHandler(start_wallet_funding, pattern=r"^start_wallet_funding$"),
+                CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$")
+            ],
+            ConversationState.WALLET_FUNDING_PROGRESS: [
+                CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
+                CallbackQueryHandler(return_funds_confirmation, pattern=r"^return_funds_confirmation$")
             ]
         },
         fallbacks=[CommandHandler("start", start)],
