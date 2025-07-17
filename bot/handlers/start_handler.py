@@ -576,7 +576,9 @@ def register_start_handler(application):
                 CallbackQueryHandler(token_selection)
             ],
             ConversationState.TOKEN_MANAGEMENT_OPTIONS: [
-                CallbackQueryHandler(token_operation_choice)
+                CallbackQueryHandler(token_operation_choice),
+                CallbackQueryHandler(token_creation_start, pattern=r"^start_token_creation$"),
+                CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
             ],
             ConversationState.TOKEN_TRADING_OPERATION: [
                 CallbackQueryHandler(back_to_token_options, pattern=r"^back_to_token_options$")

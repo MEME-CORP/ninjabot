@@ -552,32 +552,52 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             }
         )
         
-        # Show success results
+        # REDIRECT TO BUNDLER MANAGEMENT: Set up session data for the newly created token
+        airdrop_wallet_address = session_manager.get_session_value(user.id, "airdrop_wallet_address")
+        
+        # Prepare token data for bundler management
+        token_data = {
+            "mint_address": mint_address,
+            "token_name": token_params["name"],
+            "token_symbol": token_params["ticker"],
+            "created_at": time.time(),
+            "bundle_id": bundle_id,
+            "airdrop_wallet_address": airdrop_wallet_address
+        }
+        
+        # Set the selected token for bundler management
+        session_manager.update_session_value(user.id, "selected_token", token_data)
+        logger.info(f"Set selected token for bundler management: {token_data['token_name']} ({mint_address}) for user {user.id}")
+        
+        # Create success message with redirect to bundler management
         keyboard = InlineKeyboardMarkup([
-            [build_button("🎉 Start New Bundle", "back_to_activities")],
-            [build_button("📊 View Transaction Details", "view_final_details")]
+            [build_button("🟢 Buy with Dev Wallet", f"token_operation_buy_dev")],
+            [build_button("🟢 Buy with Bundled Wallets", f"token_operation_buy_bundled")],
+            [build_button("🟢 Buy with All Wallets", f"token_operation_buy_all")],
+            [build_button("🔴 Sell with Dev Wallet", f"token_operation_sell_dev")],
+            [build_button("🔴 Sell with Bundled Wallets", f"token_operation_sell_bundled")],
+            [build_button("🔴 Sell with All Wallets", f"token_operation_sell_all")],
+            [build_button("🔄 Create Another Token", "start_token_creation")],
+            [build_button("« Back to Activities", "back_to_activities")]
         ])
         
         # Calculate total participating wallets
         total_participating_wallets = sum(wallet_group_counts.values())
         
-        # Prepare results data for display
-        results_with_token = {
-            "operation_type": "token_creation_with_buys",
-            "success": True,
-            "token_address": mint_address,
-            "total_operations": total_participating_wallets,
-            "successful_operations": total_participating_wallets,  # Assume all successful for now
-            "failed_operations": 0,
-            "execution_time": execution_time,
-            "buy_amounts": buy_amounts,
-            "wallet_group_counts": wallet_group_counts,
-            "storage_status": storage_status  # Add storage status to results
-        }
+        success_message = (
+            f"🎉 **Token Created Successfully!**\n\n"
+            f"**Token:** {token_params['name']} ({token_params['ticker']})\n"
+            f"**Mint Address:** `{mint_address}`\n"
+            f"**Bundle ID:** `{bundle_id}`\n"
+            f"**Execution Time:** {execution_time:.2f}s\n"
+            f"**Operations:** {total_participating_wallets} wallets\n\n"
+            f"✅ **Ready for Trading Operations**\n\n"
+            f"Your token is now live! You can perform additional buy/sell operations using the buttons below:"
+        )
         
         try:
             await query.edit_message_text(
-                format_bundle_operation_results(results_with_token),
+                success_message,
                 reply_markup=keyboard,
                 parse_mode=ParseMode.MARKDOWN
             )
@@ -587,12 +607,12 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             try:
                 # Create a simple text version without markdown
                 simple_message = (
-                    f"✅ Token Creation Successful!\n\n"
-                    f"Token Address: {mint_address}\n"
-                    f"Execution Time: {execution_time:.2f}s\n"
-                    f"Total Operations: {total_participating_wallets}\n"
-                    f"Storage: {storage_status}\n\n"
-                    f"Your token is now live on the blockchain!"
+                    f"Token Created Successfully!\n\n"
+                    f"Token: {token_params['name']} ({token_params['ticker']})\n"
+                    f"Mint Address: {mint_address}\n"
+                    f"Bundle ID: {bundle_id}\n"
+                    f"Execution Time: {execution_time:.2f}s\n\n"
+                    f"Your token is now live! Use the buttons below for trading operations."
                 )
                 await query.edit_message_text(
                     simple_message,
@@ -602,7 +622,8 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
                 logger.error(f"Both markdown and fallback message failed: {str(fallback_error)}")
                 raise telegram_error
         
-        return ConversationState.BUNDLE_OPERATION_COMPLETE
+        # CRITICAL: Return TOKEN_MANAGEMENT_OPTIONS state to enable trading operations
+        return ConversationState.TOKEN_MANAGEMENT_OPTIONS
         
     except Exception as e:
         logger.error(
