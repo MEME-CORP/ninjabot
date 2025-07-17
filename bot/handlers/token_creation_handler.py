@@ -344,60 +344,85 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
         if not wallets:
             raise Exception("No wallet credentials found in bundled wallet storage. Please ensure bundled wallets are properly created.")
         
-        # CRITICAL FIX: Only include wallets that have corresponding buy amounts configured
-        # This ensures we don't send unfunded wallets to the API
-        required_wallet_names = ["DevWallet"]  # Always include DevWallet
+        # NEW LOGIC: Implement proper wallet batching according to API requirements
+        # API can only handle 4 wallets max for token creation, remaining wallets use batch-buy
         
-        # Only add bundled wallets that will have buy amounts (based on buy_amounts config)
-        if "First Bundled Wallets" in buy_amounts and buy_amounts["First Bundled Wallets"] > 0:
-            # Only include one bundled wallet since we configure buy amounts per group, not per individual wallet
-            required_wallet_names.append("First Bundled Wallet 1")
+        if not wallets:
+            raise Exception("No wallet credentials found in bundled wallet storage. Please ensure bundled wallets are properly created.")
         
-        filtered_wallets = []
+        logger.info(f"Total wallets loaded: {len(wallets)}")
+        
+        # Separate wallets into creation batch (max 4) and additional batch (remaining)
+        # Always prioritize DevWallet for token creation
+        dev_wallet = None
+        other_wallets = []
+        
         for wallet in wallets:
-            if wallet["name"] in required_wallet_names:
-                filtered_wallets.append(wallet)
+            if wallet["name"] == "DevWallet":
+                dev_wallet = wallet
+            else:
+                other_wallets.append(wallet)
         
-        wallets = filtered_wallets
+        if not dev_wallet:
+            raise Exception("DevWallet not found in bundled wallet file")
         
-        # CRITICAL FIX: Create BuyAmounts object based on actual wallets being sent
+        # Select wallets for token creation (max 4 total, including DevWallet)
+        creation_wallets = [dev_wallet]
+        
+        # Add up to 3 additional wallets for token creation
+        max_additional_for_creation = min(3, len(other_wallets))
+        for i in range(max_additional_for_creation):
+            creation_wallets.append(other_wallets[i])
+        
+        # Remaining wallets will use batch buy after token creation
+        batch_buy_wallets = other_wallets[max_additional_for_creation:]
+        
+        logger.info(f"Token creation wallets ({len(creation_wallets)}): {[w['name'] for w in creation_wallets]}")
+        logger.info(f"Batch buy wallets ({len(batch_buy_wallets)}): {[w['name'] for w in batch_buy_wallets]}")
+        
+        # Create BuyAmounts object for token creation wallets only
         buy_amounts_kwargs = {
             "dev_wallet_buy_sol": dev_wallet_amount
         }
         
-        # Only add buy amounts for wallets that are actually included in the request
-        wallet_names = [wallet["name"] for wallet in wallets]
-        if "First Bundled Wallet 1" in wallet_names:
-            buy_amounts_kwargs["first_bundled_wallet_1_buy_sol"] = first_bundled_amount
+        # Add buy amounts for creation wallets (excluding DevWallet)
+        creation_wallet_names = [wallet["name"] for wallet in creation_wallets]
         
-        logger.info(f"BuyAmounts configuration: {buy_amounts_kwargs}")
+        # Map wallet names to buy amount fields in BuyAmounts class
+        wallet_to_field_map = {
+            "First Bundled Wallet 1": "first_bundled_wallet_1_buy_sol",
+            "First Bundled Wallet 2": "first_bundled_wallet_2_buy_sol", 
+            "First Bundled Wallet 3": "first_bundled_wallet_3_buy_sol",
+            "First Bundled Wallet 4": "first_bundled_wallet_4_buy_sol"
+        }
+        
+        for wallet_name in creation_wallet_names:
+            if wallet_name != "DevWallet" and wallet_name in wallet_to_field_map:
+                # Use the configured buy amount for bundled wallets
+                buy_amounts_kwargs[wallet_to_field_map[wallet_name]] = first_bundled_amount
+        
+        logger.info(f"Final BuyAmounts configuration for token creation: {buy_amounts_kwargs}")
         buy_amounts_obj = BuyAmounts(**buy_amounts_kwargs)
         
-        # Ensure we have at least DevWallet and validate wallet funding
-        wallet_names = [wallet["name"] for wallet in wallets]
-        if "DevWallet" not in wallet_names:
-            raise Exception("DevWallet not found in bundled wallet file")
+        # Validate we have the required setup for token creation
+        if len(creation_wallets) < 1:
+            raise Exception("At least DevWallet is required for token creation")
         
-        # Ensure we have at least one other wallet for token creation
-        if len(wallets) < 2:
-            raise Exception("At least one additional wallet (beyond DevWallet) is required for token creation")
+        creation_wallet_names = [wallet["name"] for wallet in creation_wallets]
+        logger.info(f"Creating token with {len(creation_wallets)} wallets: {creation_wallet_names}")
         
-        logger.info(f"Final wallets for token creation: {wallet_names}")
-        logger.info(f"Buy amounts configuration: {buy_amounts_kwargs}")
-        
-        # Log warning about wallet funding (this is the real issue from logs)
+        # Log warning about wallet funding
         logger.warning("⚠️  IMPORTANT: Ensure all wallets have sufficient SOL balance before token creation")
         logger.warning(f"Each wallet needs approximately 0.008+ SOL for fees, rent, and buy amounts")
         
-        logger.info(f"Final wallets selected for token creation: {wallet_names}")
-        logger.info(f"Creating token with {len(wallets)} wallets and buy amounts: {buy_amounts_kwargs}")
+        logger.info(f"Starting token creation with {len(creation_wallets)} wallets")
         start_time = time.time()
         
-        # Create token and execute buys with user-configured amounts and image
+        # Create token and execute buys with selected creation wallets
         token_result = pumpfun_client.create_token_and_buy(
             token_params=token_creation_params,
             buy_amounts=buy_amounts_obj,
-            wallets=wallets,  # NEW: Required wallets parameter
+            wallets=creation_wallets,  # Use only creation wallets (max 4)
             image_file_path=image_file_path if has_custom_image else None
         )
         
@@ -526,22 +551,28 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
         else:
             logger.error(f"❌ Cannot store token - mint_address is empty for user {user.id}")
         
-        # Execute additional buys for remaining child wallets if configured
-        additional_child_amount = buy_amounts.get("Additional Child Wallets")
-        if additional_child_amount and additional_child_amount > 0:
-            additional_count = wallet_group_counts.get("Additional Child Wallets", 0)
-            if additional_count > 0:
-                logger.info(f"Executing additional buys for {additional_count} remaining child wallets")
-                try:
-                    # Execute batch buy for remaining wallets
-                    additional_result = pumpfun_client.batch_buy_token(
-                        mint_address=mint_address,
-                        sol_amount_per_wallet=additional_child_amount,
-                        slippage_bps=2500
-                    )
-                    logger.info(f"Additional buys completed: {additional_result}")
-                except Exception as additional_error:
-                    logger.warning(f"Additional buys failed: {str(additional_error)}")
+        # Execute batch buy for remaining wallets if any
+        if batch_buy_wallets and len(batch_buy_wallets) > 0:
+            logger.info(f"Executing batch buy for {len(batch_buy_wallets)} remaining wallets")
+            try:
+                # Use the same buy amount as configured for bundled wallets
+                batch_buy_amount = first_bundled_amount
+                
+                batch_result = pumpfun_client.batch_buy_token(
+                    mint_address=mint_address,
+                    sol_amount_per_wallet=batch_buy_amount,
+                    wallets=batch_buy_wallets,
+                    slippage_bps=2500
+                )
+                logger.info(f"Batch buy completed successfully: {batch_result}")
+                
+                # Store batch buy results in session
+                session_manager.update_session_value(user.id, "batch_buy_results", batch_result)
+                
+            except Exception as batch_error:
+                logger.warning(f"Batch buy failed (token creation was successful): {str(batch_error)}")
+                # Don't fail the entire operation if batch buy fails
+                session_manager.update_session_value(user.id, "batch_buy_error", str(batch_error))
         
         logger.info(
             f"Final token creation completed for user {user.id}",
@@ -581,8 +612,19 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             [build_button("« Back to Activities", "back_to_activities")]
         ])
         
-        # Calculate total participating wallets
-        total_participating_wallets = sum(wallet_group_counts.values())
+        # Calculate total participating wallets and create success message
+        total_creation_wallets = len(creation_wallets)
+        total_batch_wallets = len(batch_buy_wallets)
+        total_participating_wallets = total_creation_wallets + total_batch_wallets
+        
+        # Build status message based on batch buy results
+        batch_status = ""
+        if batch_buy_wallets:
+            batch_buy_error = session_manager.get_session_value(user.id, "batch_buy_error")
+            if batch_buy_error:
+                batch_status = f"\n⚠️ **Batch Buy Status:** Failed ({len(batch_buy_wallets)} wallets) - {batch_buy_error}"
+            else:
+                batch_status = f"\n✅ **Batch Buy Status:** Success ({len(batch_buy_wallets)} wallets)"
         
         success_message = (
             f"🎉 **Token Created Successfully!**\n\n"
@@ -590,7 +632,8 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             f"**Mint Address:** `{mint_address}`\n"
             f"**Bundle ID:** `{bundle_id}`\n"
             f"**Execution Time:** {execution_time:.2f}s\n"
-            f"**Operations:** {total_participating_wallets} wallets\n\n"
+            f"**Token Creation:** {total_creation_wallets} wallets\n"
+            f"**Total Operations:** {total_participating_wallets} wallets{batch_status}\n\n"
             f"✅ **Ready for Trading Operations**\n\n"
             f"Your token is now live! You can perform additional buy/sell operations using the buttons below:"
         )

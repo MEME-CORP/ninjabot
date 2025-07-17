@@ -1539,9 +1539,16 @@ class PumpFunClient:
             # Execute batch buys for remaining wallets
             for wallet_name, sol_amount in additional_purchases:
                 try:
+                    # Find the specific wallet for this purchase
+                    target_wallet = next((w for w in wallets if w["name"] == wallet_name), None)
+                    if not target_wallet:
+                        logger.error(f"Wallet {wallet_name} not found in wallets list for batch buy")
+                        continue
+                    
                     batch_result = self.batch_buy_token(
                         mint_address=mint_address,
                         sol_amount_per_wallet=sol_amount,
+                        wallets=[target_wallet],  # Pass the specific wallet
                         slippage_bps=slippage_bps,
                         target_wallet_names=[wallet_name]
                     )
@@ -1844,13 +1851,15 @@ class PumpFunClient:
         raise last_exception or PumpFunNetworkError("Unknown error in multipart upload")
 
     def batch_buy_token(self, mint_address: str, sol_amount_per_wallet: float, 
-                       slippage_bps: int = 2500, target_wallet_names: Optional[List[str]] = None) -> Dict[str, Any]:
+                       wallets: List[Dict[str, str]], slippage_bps: int = 2500, 
+                       target_wallet_names: Optional[List[str]] = None) -> Dict[str, Any]:
         """
-        Batch buy token from multiple wallets.
+        Batch buy token from multiple wallets using stateless API.
         
         Args:
             mint_address: Token mint address
             sol_amount_per_wallet: SOL amount per wallet
+            wallets: List of wallet objects with name and privateKey
             slippage_bps: Slippage in basis points
             target_wallet_names: Optional list of target wallet names
             
@@ -1861,16 +1870,32 @@ class PumpFunClient:
             raise PumpFunValidationError("Mint address cannot be empty")
         if sol_amount_per_wallet <= 0:
             raise PumpFunValidationError("SOL amount per wallet must be greater than 0")
+        if not wallets or len(wallets) == 0:
+            raise PumpFunValidationError("Wallets list cannot be empty")
             
+        # Validate wallet credentials
+        for i, wallet in enumerate(wallets):
+            if not isinstance(wallet, dict):
+                raise PumpFunValidationError(f"Wallet {i} must be a dictionary")
+            if "name" not in wallet or not wallet["name"]:
+                raise PumpFunValidationError(f"Wallet {i} must have a 'name' field")
+            if "privateKey" not in wallet or not wallet["privateKey"]:
+                raise PumpFunValidationError(f"Wallet {i} must have a 'privateKey' field")
+                
         endpoint = "/api/pump/batch-buy"
         data = {
             "mintAddress": mint_address,
             "solAmountPerWallet": sol_amount_per_wallet,
-            "slippageBps": slippage_bps
+            "slippageBps": slippage_bps,
+            "wallets": wallets
         }
         
         if target_wallet_names:
             data["targetWalletNames"] = target_wallet_names
+        
+        logger.info(f"Batch buying token {mint_address} with {len(wallets)} wallets, amount {sol_amount_per_wallet} SOL per wallet")
+        if target_wallet_names:
+            logger.info(f"Target wallets: {target_wallet_names}")
             
         return self._make_request_with_retry("POST", endpoint, json=data)
 

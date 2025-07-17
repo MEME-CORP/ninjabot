@@ -572,6 +572,10 @@ async def bundled_wallets_count(update: Update, context: CallbackContext) -> int
         session_manager.update_session_value(user.id, "bundled_wallets", bundled_wallets_result.get("wallets", []))
         session_manager.update_session_value(user.id, "bundled_private_keys", bundled_wallets_result.get("private_keys", []))
         
+        # CRITICAL FIX: Store the original JSON format for funding operations
+        session_manager.update_session_value(user.id, "bundled_wallets_original_json", bundled_wallets_result)
+        logger.info(f"Stored bundled wallets in session for funding consistency")
+        
         # Save bundled wallets to persistent storage
         try:
             airdrop_wallet_address = session_manager.get_session_value(user.id, "airdrop_wallet_address")
@@ -661,11 +665,13 @@ async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
     dev_wallet_buy_amount = buy_amounts.get("DevWallet", 0.01)
     first_bundled_buy_amount = buy_amounts.get("First Bundled Wallets", 0.01)
     
-    # CRITICAL FIX: Use same increased funding amounts as funding function for consistency
-    # DevWallet: 0.055 base + buy_amount + 0.002 buffer = more margin for gas fees
-    dev_wallet_required = 0.055 + dev_wallet_buy_amount + 0.002
-    # Bundled wallets: 0.025 base + buy_amount + 0.002 buffer = ensures >10,000 lamports usable
-    bundled_wallet_required = 0.025 + first_bundled_buy_amount + 0.002
+    # CRITICAL FIX: Use exact API requirements from bundler_api.md
+    # DevWallet (tipper): 0.055 SOL minimum + create amount + buy amount
+    # Other wallets: 0.025 SOL minimum + buy amount
+    create_amount_sol = 0.001  # Standard create amount from API docs
+    dev_wallet_required = 0.055 + create_amount_sol + dev_wallet_buy_amount
+    # Bundled wallets: 0.025 base + buy_amount (no create amount needed)
+    bundled_wallet_required = 0.025 + first_bundled_buy_amount
     
     # CRITICAL DEBUGGING: Log addresses being checked for balance consistency tracking
     airdrop_wallet_address = session_manager.get_session_value(user.id, "airdrop_wallet_address")
@@ -1026,6 +1032,17 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
         bundled_wallets_data = session_manager.get_session_value(user.id, "bundled_wallets_data")
         bundled_wallets_original_json = session_manager.get_session_value(user.id, "bundled_wallets_original_json")
         
+        # CRITICAL FIX: Add storage fallback (same as balance check function)
+        if not bundled_wallets_data and not bundled_wallets_original_json:
+            logger.info("No bundled wallet data in session, loading from storage as fallback")
+            # Load from storage and format as original JSON structure
+            storage_wallets = bundled_wallet_storage.load_bundled_wallets(airdrop_wallet, user.id)
+            if storage_wallets:
+                bundled_wallets_original_json = {"data": storage_wallets}
+                logger.info(f"Loaded {len(storage_wallets)} wallets from storage for funding")
+            else:
+                logger.error(f"No bundled wallets found in storage for airdrop wallet {airdrop_wallet}")
+        
         # DEBUG: Add comprehensive logging for systematic debugging
         logger.info(f"DEBUG: Checking bundled_wallets_data for user {user.id}")
         logger.info(f"DEBUG: bundled_wallets_data type: {type(bundled_wallets_data)}")
@@ -1279,12 +1296,13 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
         dev_wallet_buy_amount = buy_amounts.get("DevWallet", 0.01)
         first_bundled_buy_amount = buy_amounts.get("First Bundled Wallets", 0.01)
         
-        # CRITICAL FIX: Increase funding amounts to ensure sufficient balance
-        # Based on cause_debugging.yaml - increase from 0.003 to 0.005 SOL per wallet minimum
-        # DevWallet: 0.055 base + buy_amount + 0.002 buffer = more margin for gas fees
-        dev_wallet_required = 0.055 + dev_wallet_buy_amount + 0.002
-        # Bundled wallets: 0.025 base + buy_amount + 0.002 buffer = ensures >10,000 lamports usable
-        bundled_wallet_required = 0.025 + first_bundled_buy_amount + 0.002
+        # CRITICAL FIX: Use exact API requirements from bundler_api.md
+        # DevWallet (tipper): 0.055 SOL minimum + create amount + buy amount
+        # Other wallets: 0.025 SOL minimum + buy amount
+        create_amount_sol = 0.001  # Standard create amount from API docs
+        dev_wallet_required = 0.055 + create_amount_sol + dev_wallet_buy_amount
+        # Bundled wallets: 0.025 base + buy_amount (no create amount needed)
+        bundled_wallet_required = 0.025 + first_bundled_buy_amount
         
         # CRITICAL DEBUGGING: Log wallet addresses being used for funding to ensure consistency
         logger.info(f"FUNDING DEBUG: Using airdrop wallet address: {airdrop_wallet}")
@@ -1426,114 +1444,91 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
             
             return ConversationState.TOKEN_CREATION_START
         
-        # Prepare funding parameters for wallets that actually need funding
-        funding_wallets = [item["wallet"] for item in wallets_needing_funding]
-        funding_wallet_names = [item["name"] for item in wallets_needing_funding]
-        
-        # Use the maximum funding amount needed (to ensure all wallets get enough)
-        # Round to 9 decimal places to ensure consistent lamport conversion
-        max_funding_amount = round(max(item["funding_amount"] for item in wallets_needing_funding), 9)
+        # Prepare funding parameters - separate DevWallet from other wallets
+        dev_wallets_needing_funding = [item for item in wallets_needing_funding if item["name"] == "DevWallet"]
+        other_wallets_needing_funding = [item for item in wallets_needing_funding if item["name"] != "DevWallet"]
         
         logger.info(f"=== FUNDING EXECUTION ===")
-        logger.info(f"Wallets needing funding: {len(wallets_needing_funding)}")
-        logger.info(f"Wallet names: {funding_wallet_names}")
+        logger.info(f"DevWallets needing funding: {len(dev_wallets_needing_funding)}")
+        logger.info(f"Other wallets needing funding: {len(other_wallets_needing_funding)}")
         logger.info(f"Total funding needed: {total_funding_needed:.6f} SOL")
-        logger.info(f"Max individual amount: {max_funding_amount:.6f} SOL")
-        logger.info(f"Using amount per wallet: {max_funding_amount:.6f} SOL (API limitation: same amount for all)")
         
         # Execute funding operation with correct API format according to bundler_api.md
         logger.info(f"Executing wallet funding for user {user.id}")
         
-        # CRITICAL FIX: Use correct method signature from working code
-        try:
-            logger.info(f"Calling fund_bundled_wallets with:")
-            logger.info(f"  - amount_per_wallet: {max_funding_amount:.6f}")
-            logger.info(f"  - bundled_wallets count: {len(funding_wallets)}")
-            logger.info(f"  - mother_private_key: [REDACTED]")
-            logger.info(f"  - target_wallet_names: {funding_wallet_names}")
+        # CRITICAL FIX: Use separate funding calls for DevWallet vs other wallets
+        funding_results = {"data": []}
+        
+        # Fund DevWallet first (if needed)
+        if dev_wallets_needing_funding:
+            dev_wallet_amount = dev_wallet_required
+            dev_wallets = [item["wallet"] for item in dev_wallets_needing_funding]
+            dev_wallet_names = [item["name"] for item in dev_wallets_needing_funding]
             
-            funding_results = pumpfun_client.fund_bundled_wallets(
-                amount_per_wallet=max_funding_amount,
-                mother_private_key=mother_wallet_key,
-                bundled_wallets=funding_wallets,
-                target_wallet_names=funding_wallet_names
-            )
-            logger.info(f"Successfully funded wallets using correct method signature")
-            logger.info(f"Funding results: {funding_results}")
+            logger.info(f"Funding DevWallet with {dev_wallet_amount:.6f} SOL")
             
-            # Transform API response to expected format for message formatting
-            api_data = funding_results.get('data', [])
-            successful_transfers = sum(1 for item in api_data if item.get('status') == 'success')
-            failed_transfers = len(api_data) - successful_transfers
-            total_sol_spent = sum(item.get('amountSent', 0) for item in api_data if item.get('status') == 'success')
-            
-            formatted_results = {
-                'total_wallets': len(api_data),
-                'successful_transfers': successful_transfers,
-                'failed_transfers': failed_transfers,
-                'total_sol_spent': total_sol_spent,
-                'transaction_details': api_data
-            }
-        except TypeError as param_error:
-            if "unexpected keyword argument" in str(param_error):
-                logger.warning(f"Method signature still has issues, trying alternative call patterns: {param_error}")
+            try:
+                dev_funding_results = pumpfun_client.fund_bundled_wallets(
+                    amount_per_wallet=dev_wallet_amount,
+                    mother_private_key=mother_wallet_key,
+                    bundled_wallets=dev_wallets,
+                    target_wallet_names=dev_wallet_names
+                )
+                logger.info(f"DevWallet funding results: {dev_funding_results}")
                 
-                # Try alternative parameter names for backward compatibility
-                try:
-                    # Alternative 1: Positional arguments in correct order
-                    funding_results = pumpfun_client.fund_bundled_wallets(
-                        max_funding_amount, mother_wallet_key, funding_wallets, funding_wallet_names
-                    )
-                    logger.info("Successfully used positional arguments")
+                # Merge results
+                if dev_funding_results.get('data'):
+                    funding_results["data"].extend(dev_funding_results["data"])
                     
-                    # Transform API response to expected format for message formatting
-                    api_data = funding_results.get('data', [])
-                    successful_transfers = sum(1 for item in api_data if item.get('status') == 'success')
-                    failed_transfers = len(api_data) - successful_transfers
-                    total_sol_spent = sum(item.get('amountSent', 0) for item in api_data if item.get('status') == 'success')
+            except Exception as dev_funding_error:
+                logger.error(f"DevWallet funding failed: {dev_funding_error}")
+                raise dev_funding_error
+        
+        # Fund other wallets (if needed)
+        if other_wallets_needing_funding:
+            other_wallet_amount = bundled_wallet_required
+            other_wallets = [item["wallet"] for item in other_wallets_needing_funding]
+            other_wallet_names = [item["name"] for item in other_wallets_needing_funding]
+            
+            logger.info(f"Funding {len(other_wallets)} other wallets with {other_wallet_amount:.6f} SOL each")
+            
+            try:
+                other_funding_results = pumpfun_client.fund_bundled_wallets(
+                    amount_per_wallet=other_wallet_amount,
+                    mother_private_key=mother_wallet_key,
+                    bundled_wallets=other_wallets,
+                    target_wallet_names=other_wallet_names
+                )
+                logger.info(f"Other wallets funding results: {other_funding_results}")
+                
+                # Merge results
+                if other_funding_results.get('data'):
+                    funding_results["data"].extend(other_funding_results["data"])
                     
-                    formatted_results = {
-                        'total_wallets': len(api_data),
-                        'successful_transfers': successful_transfers,
-                        'failed_transfers': failed_transfers,
-                        'total_sol_spent': total_sol_spent,
-                        'transaction_details': api_data
-                    }
-                except TypeError:
-                    try:
-                        # Alternative 2: Mixed approach with explicit parameters
-                        funding_results = pumpfun_client.fund_bundled_wallets(
-                            max_funding_amount, 
-                            mother_private_key=mother_wallet_key,
-                            bundled_wallets=funding_wallets,
-                            target_wallet_names=funding_wallet_names
-                        )
-                        logger.info("Successfully used mixed parameter approach")
-                        
-                        # Transform API response to expected format for message formatting
-                        api_data = funding_results.get('data', [])
-                        successful_transfers = sum(1 for item in api_data if item.get('status') == 'success')
-                        failed_transfers = len(api_data) - successful_transfers
-                        total_sol_spent = sum(item.get('amountSent', 0) for item in api_data if item.get('status') == 'success')
-                        
-                        formatted_results = {
-                            'total_wallets': len(api_data),
-                            'successful_transfers': successful_transfers,
-                            'failed_transfers': failed_transfers,
-                            'total_sol_spent': total_sol_spent,
-                            'transaction_details': api_data
-                        }
-                    except Exception as mixed_error:
-                        logger.error(f"All funding call formats failed. Original: {param_error}, Positional: Failed, Mixed: {mixed_error}")
-                        raise param_error
-            else:
-                raise param_error
+            except Exception as other_funding_error:
+                logger.error(f"Other wallets funding failed: {other_funding_error}")
+                raise other_funding_error
+        
+        # Transform API response to expected format for message formatting
+        api_data = funding_results.get('data', [])
+        successful_transfers = sum(1 for item in api_data if item.get('status') == 'success')
+        failed_transfers = len(api_data) - successful_transfers
+        total_sol_spent = sum(item.get('amountSent', 0) for item in api_data if item.get('status') == 'success')
+        
+        formatted_results = {
+            'total_wallets': len(api_data),
+            'successful_transfers': successful_transfers,
+            'failed_transfers': failed_transfers,
+            'total_sol_spent': total_sol_spent,
+            'transaction_details': api_data
+        }
         
         # Store results in session with funding summary
         funding_summary = {
             "wallets_funded": len(wallets_needing_funding),
             "total_amount": total_funding_needed,
-            "max_individual_amount": max_funding_amount,
+            "dev_wallet_amount": dev_wallet_required if dev_wallets_needing_funding else 0,
+            "other_wallet_amount": bundled_wallet_required if other_wallets_needing_funding else 0,
             "wallet_details": wallets_needing_funding
         }
         session_manager.update_session_value(user.id, "funding_results", formatted_results)
