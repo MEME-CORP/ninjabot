@@ -36,6 +36,7 @@ import time
 import logging
 import requests
 import os
+import re
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, asdict
 import random
@@ -1580,167 +1581,129 @@ class PumpFunClient:
                            buy_amounts: BuyAmounts, wallets: List[Dict[str, str]], slippage_bps: int = 2500,
                            image_file_path: Optional[str] = None, create_amount_sol: float = 0.001) -> Dict[str, Any]:
         """
-        Create a token and perform initial buys with proper multipart/form-data support.
-        Enhanced with wallet loading error recovery.
+        Create token and execute initial buys using the new enhanced API.
+        Now supports dynamic wallet processing based on wallet names and buy amounts.
         
         Args:
             token_params: Token creation parameters
-            buy_amounts: Buy amounts for different wallets
+            buy_amounts: Buy amounts (now used to build dynamic buyAmountsSOL)
             wallets: List of wallet dictionaries with 'name' and 'privateKey' fields
             slippage_bps: Slippage in basis points
-            image_file_path: Local path to image file (if any)
-            create_amount_sol: SOL amount for token creation (default: 0.001)
+            image_file_path: Optional path to image file
+            create_amount_sol: SOL amount for token creation
             
         Returns:
             Dictionary with token creation and buy results
         """
+        if not token_params:
+            raise PumpFunValidationError("Token parameters cannot be empty")
+        if not wallets:
+            raise PumpFunValidationError("Wallets cannot be empty")
+            
         # Validate token parameters
         self._validate_token_params(token_params)
         
-        # Validate wallets parameter
-        if not wallets:
-            raise PumpFunValidationError("Wallets list cannot be empty")
+        # Validate wallet credentials and find DevWallet
+        dev_wallet_found = False
+        for i, wallet in enumerate(wallets):
+            if not isinstance(wallet, dict):
+                raise PumpFunValidationError(f"Wallet {i} must be a dictionary")
+            if "name" not in wallet or not wallet["name"]:
+                raise PumpFunValidationError(f"Wallet {i} must have a 'name' field")
+            if "privateKey" not in wallet or not wallet["privateKey"]:
+                raise PumpFunValidationError(f"Wallet {i} must have a 'privateKey' field")
+            if wallet["name"] == "DevWallet":
+                dev_wallet_found = True
+                
+        if not dev_wallet_found:
+            raise PumpFunValidationError("DevWallet is required but not found in wallets list")
         
-        for wallet in wallets:
-            if 'name' not in wallet or ('privateKey' not in wallet and 'privateKeyBs58' not in wallet):
-                raise PumpFunValidationError("Each wallet must have 'name' and 'privateKey' or 'privateKeyBs58' fields")
-            
-            # Ensure both field names exist due to server validation/processing inconsistency
-            private_key_value = wallet.get('privateKey') or wallet.get('privateKeyBs58')
-            if private_key_value:
-                wallet['privateKey'] = private_key_value        # For processing layer
-                wallet['privateKeyBs58'] = private_key_value    # For validation layer
+        # Build dynamic buyAmountsSOL object based on wallet names and buy amounts
+        # This replaces the old hardcoded approach with flexible wallet matching
+        buy_amounts_dict = self._build_dynamic_buy_amounts(wallets, buy_amounts)
         
-        endpoint = "/api/pump/create-and-buy"
+        logger.info(f"Built dynamic buyAmountsSOL for {len(buy_amounts_dict)} wallets: {list(buy_amounts_dict.keys())}")
         
-        # Prepare buy amounts dictionary - create-and-buy endpoint only supports DevWallet + First Bundled Wallet
-        # Additional wallets (2-4) should be handled via batch-buy endpoint separately
-        buy_amounts_dict = {
-            "devWalletBuySOL": buy_amounts.dev_wallet_buy_sol,
-            "firstBundledWallet1BuySOL": buy_amounts.first_bundled_wallet_1_buy_sol
-        }
-        
-        # Log buy amounts breakdown for debugging
-        logger.info(f"Token creation buy amounts - DevWallet: {buy_amounts.dev_wallet_buy_sol} SOL, "
-                   f"First Bundled Wallet: {buy_amounts.first_bundled_wallet_1_buy_sol} SOL")
-        additional_total = (buy_amounts.first_bundled_wallet_2_buy_sol + 
-                           buy_amounts.first_bundled_wallet_3_buy_sol + 
-                           buy_amounts.first_bundled_wallet_4_buy_sol)
-        if additional_total > 0:
-            logger.info(f"Additional wallets will purchase {additional_total} SOL total after token creation")
-        
-        # Try token creation with enhanced error recovery
-        token_result = None
-        
-        # Check if we have an image file to upload
-        if image_file_path and os.path.exists(image_file_path):
-            # Try multipart/form-data first for image upload
-            logger.info(f"Creating token with image upload: {image_file_path}")
-            try:
-                token_result = self._create_token_with_image(token_params, buy_amounts_dict, wallets, slippage_bps, image_file_path, create_amount_sol)
-            except PumpFunApiError as e:
-                # Enhanced error handling for server-side wallet loading issues
-                error_msg = str(e).lower()
-                if "path" in error_msg and "undefined" in error_msg:
-                    logger.error(f"Server-side wallet loading error detected: {str(e)}")
-                    logger.info("Attempting to recover by ensuring wallet setup before token creation")
-                    
-                    # Try fallback to JSON without image
-                    logger.info("Attempting fallback to JSON without image due to server-side error")
-                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, wallets, slippage_bps, create_amount_sol)
-                elif "buyAmountsSOL" in str(e):
-                    logger.warning(f"Multipart upload failed with buyAmountsSOL error: {str(e)}")
-                    logger.info("Attempting fallback to JSON without image due to multipart parsing issue")
-                    # Fallback to JSON without image
-                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, wallets, slippage_bps, create_amount_sol)
-                else:
-                    # Re-raise other API errors
-                    raise e
-            except PumpFunValidationError as e:
-                if "buyAmountsSOL" in str(e):
-                    logger.warning(f"Multipart upload failed with buyAmountsSOL error: {str(e)}")
-                    logger.info("Attempting fallback to JSON without image due to multipart parsing issue")
-                    # Fallback to JSON without image
-                    token_result = self._create_token_without_image(token_params, buy_amounts_dict, wallets, slippage_bps, create_amount_sol)
-                else:
-                    # Re-raise non-buyAmountsSOL validation errors
-                    raise e
+        # Use image or non-image flow
+        if image_file_path:
+            logger.info(f"Creating token with image: {image_file_path}")
+            return self._create_token_with_image(
+                token_params, buy_amounts_dict, wallets, slippage_bps, image_file_path, create_amount_sol
+            )
         else:
-            # Use JSON for token creation without image
-            logger.info("Creating token without image using JSON request")
-            try:
-                token_result = self._create_token_without_image(token_params, buy_amounts_dict, wallets, slippage_bps, create_amount_sol)
-            except PumpFunApiError as e:
-                # Enhanced error handling for server-side wallet loading issues
-                error_msg = str(e).lower()
-                if "path" in error_msg and "undefined" in error_msg:
-                    logger.error(f"Server-side wallet loading error detected: {str(e)}")
-                    
-                    # Re-raise the original error with additional context
-                    raise PumpFunApiError(
-                        f"Server-side wallet configuration error: {str(e)}. "
-                        "Please check that the API server has proper wallet file paths configured."
-                    )
-                else:
-                    # Re-raise other API errors
-                    raise e
+            logger.info("Creating token without image")
+            return self._create_token_without_image(
+                token_params, buy_amounts_dict, wallets, slippage_bps, create_amount_sol
+            )
+
+    def _build_dynamic_buy_amounts(self, wallets: List[Dict[str, str]], buy_amounts: BuyAmounts) -> Dict[str, float]:
+        """
+        Build dynamic buyAmountsSOL object based on wallet names using the new API's flexible matching.
         
-        # Handle additional wallet purchases (wallets 2-4) if they have non-zero amounts and exist
-        additional_purchases = []
-        wallet_names = [w["name"] for w in wallets]
-        
-        if buy_amounts.first_bundled_wallet_2_buy_sol > 0 and "First Bundled Wallet 2" in wallet_names:
-            additional_purchases.append(("First Bundled Wallet 2", buy_amounts.first_bundled_wallet_2_buy_sol))
-        if buy_amounts.first_bundled_wallet_3_buy_sol > 0 and "First Bundled Wallet 3" in wallet_names:
-            additional_purchases.append(("First Bundled Wallet 3", buy_amounts.first_bundled_wallet_3_buy_sol))
-        if buy_amounts.first_bundled_wallet_4_buy_sol > 0 and "First Bundled Wallet 4" in wallet_names:
-            additional_purchases.append(("First Bundled Wallet 4", buy_amounts.first_bundled_wallet_4_buy_sol))
-        
-        if additional_purchases and token_result.get("mintAddress"):
-            logger.info(f"Executing additional purchases for {len(additional_purchases)} wallets")
-            mint_address = token_result["mintAddress"]
+        Args:
+            wallets: List of wallet dictionaries
+            buy_amounts: BuyAmounts object with configured amounts
             
-            # Execute batch buys for remaining wallets
-            for wallet_name, sol_amount in additional_purchases:
-                try:
-                    # Find the specific wallet for this purchase
-                    target_wallet = next((w for w in wallets if w["name"] == wallet_name), None)
-                    if not target_wallet:
-                        logger.error(f"Wallet {wallet_name} not found in wallets list for batch buy")
-                        continue
-                    
-                    batch_result = self.batch_buy_token(
-                        mint_address=mint_address,
-                        sol_amount_per_wallet=sol_amount,
-                        wallets=[target_wallet],  # Pass the specific wallet
-                        slippage_bps=slippage_bps,
-                        target_wallet_names=[wallet_name]
-                    )
-                    logger.info(f"Additional purchase completed for {wallet_name}: {sol_amount} SOL")
-                    
-                    # Merge batch results into main token result
-                    if "additionalPurchases" not in token_result:
-                        token_result["additionalPurchases"] = []
-                    token_result["additionalPurchases"].append({
-                        "wallet": wallet_name,
-                        "amount": sol_amount,
-                        "result": batch_result
-                    })
-                    
-                except Exception as e:
-                    logger.error(f"Failed additional purchase for {wallet_name}: {str(e)}")
-                    if "additionalPurchaseErrors" not in token_result:
-                        token_result["additionalPurchaseErrors"] = []
-                    token_result["additionalPurchaseErrors"].append({
-                        "wallet": wallet_name,
-                        "amount": sol_amount,
-                        "error": str(e)
-                    })
+        Returns:
+            Dictionary mapping buyAmountsSOL keys to amounts
+        """
+        buy_amounts_dict = {}
         
-        # Normalize response fields for backward compatibility
-        token_result = self._normalize_response_fields(token_result)
+        # Extract amounts from BuyAmounts object
+        dev_amount = buy_amounts.dev_wallet_buy_sol
+        bundled_amount_1 = buy_amounts.first_bundled_wallet_1_buy_sol  
+        bundled_amount_2 = buy_amounts.first_bundled_wallet_2_buy_sol
+        bundled_amount_3 = buy_amounts.first_bundled_wallet_3_buy_sol
+        bundled_amount_4 = buy_amounts.first_bundled_wallet_4_buy_sol
         
-        return token_result
+        # Process each wallet and create buyAmountsSOL entries
+        for wallet in wallets:
+            wallet_name = wallet.get("name", "")
+            
+            # Map wallet names to buyAmountsSOL keys using the API's flexible matching
+            if wallet_name == "DevWallet":
+                if dev_amount > 0:
+                    buy_amounts_dict["devWalletBuySOL"] = dev_amount
+                    
+            elif wallet_name == "First Bundled Wallet 1":
+                if bundled_amount_1 > 0:
+                    buy_amounts_dict["firstBundledWallet1BuySOL"] = bundled_amount_1
+                    
+            elif wallet_name == "First Bundled Wallet 2":
+                if bundled_amount_2 > 0:
+                    buy_amounts_dict["firstBundledWallet2BuySOL"] = bundled_amount_2
+                    
+            elif wallet_name == "First Bundled Wallet 3":
+                if bundled_amount_3 > 0:
+                    buy_amounts_dict["firstBundledWallet3BuySOL"] = bundled_amount_3
+                    
+            elif wallet_name == "First Bundled Wallet 4":
+                if bundled_amount_4 > 0:
+                    buy_amounts_dict["firstBundledWallet4BuySOL"] = bundled_amount_4
+                    
+            elif wallet_name.startswith("ChildWallet"):
+                # For ChildWallet1, ChildWallet2, etc. - use same amount as bundled wallets
+                # Convert to buyAmountsSOL key format: "ChildWallet1" -> "childWallet1BuySOL"
+                key_name = wallet_name[0].lower() + wallet_name[1:] + "BuySOL"
+                # Use bundled_amount_1 as default for child wallets
+                if bundled_amount_1 > 0:
+                    buy_amounts_dict[key_name] = bundled_amount_1
+                    
+            else:
+                # Handle any other custom wallet names
+                # Convert to camelCase and add BuySOL suffix
+                # "My Custom Wallet" -> "myCustomWalletBuySOL"
+                clean_name = re.sub(r'[^a-zA-Z0-9\s]', '', wallet_name)  # Remove special chars
+                words = clean_name.split()
+                if words:
+                    camel_case = words[0].lower() + ''.join(word.capitalize() for word in words[1:])
+                    key_name = camel_case + "BuySOL"
+                    # Use bundled_amount_1 as default for custom wallets
+                    if bundled_amount_1 > 0:
+                        buy_amounts_dict[key_name] = bundled_amount_1
+        
+        logger.info(f"Dynamic buyAmountsSOL mapping: {buy_amounts_dict}")
+        return buy_amounts_dict
 
     def _create_token_with_image(self, token_params: TokenCreationParams, 
                                 buy_amounts_dict: Dict[str, float], wallets: List[Dict[str, str]], slippage_bps: int,
@@ -1762,17 +1725,8 @@ class PumpFunClient:
         url = f"{self.base_url}/api/pump/create-and-buy"
         
         # Prepare form data according to API documentation
-        # Format buyAmountsSOL exactly like the cURL example: no spaces, compact format
-        # Ensure numbers are formatted as proper decimals
-        dev_amount = float(buy_amounts_dict["devWalletBuySOL"])
-        first_bundled_amount = float(buy_amounts_dict["firstBundledWallet1BuySOL"])
-        
-        # Use json.dumps for proper JSON formatting to avoid f-string issues
-        buy_amounts_obj = {
-            "devWalletBuySOL": dev_amount,
-            "firstBundledWallet1BuySOL": first_bundled_amount
-        }
-        buy_amounts_json = json.dumps(buy_amounts_obj, separators=(',', ':'))
+        # Use the dynamic buy_amounts_dict directly as it's already formatted correctly
+        buy_amounts_json = json.dumps(buy_amounts_dict, separators=(',', ':'))
         
         # Validate the JSON before sending
         self._validate_buy_amounts_json(buy_amounts_json)
