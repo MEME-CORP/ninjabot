@@ -27,6 +27,7 @@ from bot.utils.message_utils import (
     format_pumpfun_error_message
 )
 from bot.utils.token_storage import token_storage
+from bot.utils.rate_limit_utils import RateLimitFeedback
 
 
 def is_base58_private_key(key: str) -> bool:
@@ -419,12 +420,30 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
         start_time = time.time()
         
         # Create token and execute buys with selected creation wallets
-        token_result = pumpfun_client.create_token_and_buy(
-            token_params=token_creation_params,
-            buy_amounts=buy_amounts_obj,
-            wallets=creation_wallets,  # Use only creation wallets (max 4)
-            image_file_path=image_file_path if has_custom_image else None
-        )
+        try:
+            token_result = pumpfun_client.create_token_and_buy(
+                token_params=token_creation_params,
+                buy_amounts=buy_amounts_obj,
+                wallets=creation_wallets,  # Use only creation wallets (max 4)
+                image_file_path=image_file_path if has_custom_image else None
+            )
+        except Exception as e:
+            # Check if this is a rate limiting error and provide user feedback
+            if RateLimitFeedback.is_rate_limit_error(str(e)):
+                logger.warning(f"Rate limiting detected during token creation: {str(e)}")
+                await RateLimitFeedback.handle_rate_limit_error(
+                    bot=context.bot,
+                    chat_id=update.effective_chat.id,
+                    message_id=context.user_data.get('current_message_id'),
+                    operation_name="Token Creation",
+                    error_message=str(e),
+                    estimated_wait_time=120  # 2 minutes estimated wait
+                )
+                # Re-raise to let the PumpFun client handle the retry logic
+                raise e
+            else:
+                # Not a rate limiting error, handle normally
+                raise e
         
         # Debug: Log the exact API response structure
         logger.info(f"Token creation API response keys: {list(token_result.keys()) if isinstance(token_result, dict) else 'Not a dict'}")

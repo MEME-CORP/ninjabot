@@ -52,9 +52,20 @@ INITIAL_BACKOFF = 2.0  # Increased from 1.0 for cold start scenarios
 COLD_START_MAX_RETRIES = 8  # Special retry count for cold starts
 COLD_START_INITIAL_BACKOFF = 5.0  # Longer backoff for cold starts
 
+# Rate Limiting Configuration
+RATE_LIMIT_INITIAL_BACKOFF = 10.0  # Start with 10 seconds for rate limits
+RATE_LIMIT_MAX_BACKOFF = 300.0     # Max 5 minutes between retries
+RATE_LIMIT_MAX_RETRIES = 6         # Max attempts for rate-limited operations
+JITO_BUNDLE_COOLDOWN = 30.0        # Minimum time between bundle operations
+
 
 class PumpFunApiError(Exception):
     """Base exception for PumpFun API errors"""
+    pass
+
+
+class PumpFunRateLimitError(PumpFunApiError):
+    """Rate limiting errors from Jito bundles or API throttling"""
     pass
 
 
@@ -118,6 +129,15 @@ class PumpFunClient:
             'Content-Type': 'application/json',
             'User-Agent': 'NinjaBot-PumpFun-Client/1.0'
         })
+        
+        # Rate limiting tracking
+        self._last_bundle_operation_time = 0
+        self._operation_timestamps = {
+            'token_creation': 0,
+            'batch_buy': 0,
+            'batch_sell': 0,
+            'balance_check': 0
+        }
 
     def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         """
@@ -270,9 +290,76 @@ class PumpFunClient:
                 return True
         return False
 
+    def _is_rate_limit_error(self, error_message: str) -> bool:
+        """
+        Detect if an error is due to rate limiting.
+        
+        Args:
+            error_message: Error message to analyze
+            
+        Returns:
+            True if this is a rate limiting error
+        """
+        rate_limit_indicators = [
+            "Failed to send Jito bundle",
+            "rate limit",
+            "too many requests", 
+            "429",
+            "throttle",
+            "jito.wtf/api/v1/bundles",
+            "bundle submission failed"
+        ]
+        
+        error_lower = error_message.lower()
+        for indicator in rate_limit_indicators:
+            if indicator.lower() in error_lower:
+                logger.warning(f"Rate limit detected in error: {indicator} found in '{error_message}'")
+                return True
+        return False
+
+    def _calculate_rate_limit_backoff(self, attempt: int) -> float:
+        """
+        Calculate exponential backoff with jitter for rate limiting.
+        
+        Args:
+            attempt: Current attempt number (0-based)
+            
+        Returns:
+            Backoff time in seconds
+        """
+        # Exponential backoff: 10s, 20s, 40s, 80s, 160s, 300s (max)
+        base_delay = min(RATE_LIMIT_INITIAL_BACKOFF * (2 ** attempt), RATE_LIMIT_MAX_BACKOFF)
+        
+        # Add jitter to prevent thundering herd (±10%)
+        jitter = random.uniform(0.9, 1.1)
+        delay = base_delay * jitter
+        
+        logger.info(f"Rate limit backoff calculated: attempt={attempt}, base={base_delay}s, with_jitter={delay:.1f}s")
+        return delay
+
+    def _enforce_bundle_operation_cooldown(self, operation_type: str):
+        """
+        Enforce minimum time between bundle operations to prevent rate limiting.
+        
+        Args:
+            operation_type: Type of operation ('token_creation', 'batch_buy', etc.)
+        """
+        current_time = time.time()
+        time_since_last = current_time - self._last_bundle_operation_time
+        
+        if time_since_last < JITO_BUNDLE_COOLDOWN:
+            sleep_time = JITO_BUNDLE_COOLDOWN - time_since_last
+            logger.info(f"Bundle operation cooldown: waiting {sleep_time:.1f}s since last bundle operation")
+            time.sleep(sleep_time)
+        
+        # Update operation timestamps
+        self._operation_timestamps[operation_type] = current_time
+        self._last_bundle_operation_time = current_time
+
     def _make_request_for_critical_operations(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         """
         Make request with maximum retry effort for critical operations like wallet creation.
+        Now includes rate limiting detection and handling.
         
         Args:
             method: HTTP method
@@ -282,13 +369,90 @@ class PumpFunClient:
         Returns:
             API response as dictionary
         """
-        return self._make_request_with_retry(
+        # Check if this is a bundle operation that needs cooldown
+        bundle_endpoints = ['/api/pump/create-and-buy', '/api/pump/batch-buy', '/api/pump/batch-sell']
+        if any(bundle_endpoint in endpoint for bundle_endpoint in bundle_endpoints):
+            operation_type = 'token_creation' if 'create-and-buy' in endpoint else 'batch_buy' if 'batch-buy' in endpoint else 'batch_sell'
+            self._enforce_bundle_operation_cooldown(operation_type)
+        
+        # Use enhanced retry with rate limiting support
+        return self._make_request_with_rate_limit_retry(
             method, 
             endpoint, 
             max_retries=COLD_START_MAX_RETRIES,
             initial_backoff=COLD_START_INITIAL_BACKOFF,
             **kwargs
         )
+
+    def _make_request_with_rate_limit_retry(self, method: str, endpoint: str, max_retries: int = MAX_RETRIES, 
+                                          initial_backoff: float = INITIAL_BACKOFF, **kwargs) -> Dict[str, Any]:
+        """
+        Make HTTP request with retry logic that handles both network errors and rate limiting.
+        
+        Args:
+            method: HTTP method
+            endpoint: API endpoint
+            max_retries: Maximum number of retry attempts
+            initial_backoff: Initial backoff time in seconds
+            **kwargs: Additional request parameters
+            
+        Returns:
+            API response as dictionary
+        """
+        last_exception = None
+        is_cold_start = self._detect_cold_start_scenario()
+        rate_limit_retries = 0
+        
+        # Use enhanced retry parameters for cold start scenarios
+        if is_cold_start:
+            max_retries = max(max_retries, COLD_START_MAX_RETRIES)
+            initial_backoff = max(initial_backoff, COLD_START_INITIAL_BACKOFF)
+            logger.info(f"Cold start detected, using enhanced retry: max_retries={max_retries}, initial_backoff={initial_backoff}")
+        
+        for attempt in range(max_retries + 1):
+            try:
+                return self._make_request(method, endpoint, **kwargs)
+            except PumpFunApiError as e:
+                error_message = str(e)
+                
+                # Check if this is a rate limiting error
+                if self._is_rate_limit_error(error_message):
+                    if rate_limit_retries < RATE_LIMIT_MAX_RETRIES:
+                        rate_limit_retries += 1
+                        backoff_time = self._calculate_rate_limit_backoff(rate_limit_retries - 1)
+                        
+                        logger.warning(f"Rate limit detected on attempt {attempt + 1}, waiting {backoff_time:.1f}s before retry {rate_limit_retries}/{RATE_LIMIT_MAX_RETRIES}")
+                        time.sleep(backoff_time)
+                        continue
+                    else:
+                        logger.error(f"Rate limit retries exhausted ({RATE_LIMIT_MAX_RETRIES}), giving up")
+                        raise PumpFunRateLimitError(f"Rate limit exceeded after {RATE_LIMIT_MAX_RETRIES} attempts: {error_message}")
+                else:
+                    # Not a rate limiting error, re-raise immediately
+                    raise e
+                    
+            except PumpFunNetworkError as e:
+                last_exception = e
+                if attempt < max_retries:
+                    # Progressive backoff with jitter for cold starts
+                    base_backoff = initial_backoff * (2 ** attempt)
+                    # Add jitter to prevent thundering herd
+                    jitter = random.uniform(0.5, 1.5) if is_cold_start else 1.0
+                    backoff_time = base_backoff * jitter
+                    
+                    if is_cold_start and attempt == 0:
+                        logger.warning(f"Cold start timeout detected, initiating wake-up sequence. Retrying in {backoff_time:.1f}s")
+                    else:
+                        logger.warning(f"Network error on attempt {attempt + 1}/{max_retries + 1}, retrying in {backoff_time:.1f}s: {str(e)}")
+                    
+                    time.sleep(backoff_time)
+                else:
+                    logger.error(f"All {max_retries + 1} retry attempts failed: {str(e)}")
+            except (PumpFunValidationError) as e:
+                # Don't retry validation errors
+                raise e
+                
+        raise last_exception
 
     # Wallet Management Methods
 
@@ -1753,41 +1917,26 @@ class PumpFunClient:
                                          files: Dict[str, Any], max_retries: int = MAX_RETRIES) -> Dict[str, Any]:
         """
         Make multipart request with retry logic for image uploads.
-        
-        Args:
-            method: HTTP method
-            url: Full URL
-            data: Form data
-            files: Files to upload
-           
-            max_retries: Maximum retry attempts
-            
-        Returns:
-            API response dictionary
+        Enhanced with basic rate limiting support.
         """
+        # Enforce cooldown for bundle operations before starting
+        if '/api/pump/' in url:
+            self._enforce_bundle_operation_cooldown('token_creation')
+        
         last_exception = None
         is_cold_start = self._detect_cold_start_scenario()
         
-        # Use enhanced retry parameters for cold start scenarios
         if is_cold_start:
             max_retries = max(max_retries, COLD_START_MAX_RETRIES)
             logger.info(f"Cold start detected for multipart upload, using enhanced retry: max_retries={max_retries}")
         
         for attempt in range(max_retries + 1):
             try:
-                # Create a new session for multipart requests to avoid header conflicts
                 with requests.Session() as session:
-                    # Don't set Content-Type header - requests will set it automatically for multipart
-                    session.headers.update({
-                        'User-Agent': 'NinjaBot-PumpFun-Client/1.0'
-                    })
-                    
+                    session.headers.update({'User-Agent': 'NinjaBot-PumpFun-Client/1.0'})
                     response = session.request(method, url, data=data, files=files, timeout=self.timeout)
-                    
-                    # Log request details
                     logger.info(f"Multipart request {method} {url} - Status: {response.status_code}")
                     
-                    # Handle response
                     if response.status_code == 200:
                         try:
                             return response.json()
@@ -1797,31 +1946,24 @@ class PumpFunClient:
                         try:
                             error_data = response.json() if response.content else {}
                             detailed_error = error_data.get('error', error_data.get('message', 'Invalid request'))
-                            
-                            # Enhanced error logging for buyAmountsSOL issues
                             logger.error(f"Multipart upload validation error: {detailed_error}")
-                            logger.error(f"Full error response: {error_data}")
-                            logger.error(f"Response headers: {dict(response.headers)}")
-                            logger.error(f"Response status: {response.status_code}")
-                            
-                            # If it's a buyAmountsSOL error, log more debugging info
-                            if 'buyAmountsSOL' in str(detailed_error):
-                                logger.error("buyAmountsSOL validation failed - debugging info:")
-                                logger.error(f"Sent buyAmountsSOL format: {data.get('buyAmountsSOL', 'NOT_FOUND')}")
-                                logger.error(f"Expected format from API docs: {{'devWalletBuySOL':0.01,'firstBundledWallet1BuySOL':0.01}}")
-                                
-                                # Log all form data keys to help debug
-                                logger.error(f"All form data keys sent: {list(data.keys())}")
-                                logger.error(f"All form data values types: {[(k, type(v).__name__) for k, v in data.items()]}")
-                            
                             raise PumpFunValidationError(f"Validation error: {detailed_error}")
                         except json.JSONDecodeError:
                             logger.error(f"Multipart upload 400 non-JSON response: {response.text}")
-                            logger.error(f"Response headers: {dict(response.headers)}")
                             raise PumpFunValidationError(f"Validation error: {response.text}")
                     elif response.status_code == 500:
                         error_data = response.json() if response.content else {}
-                        raise PumpFunApiError(f"Server error: {error_data.get('error', 'Internal server error')}")
+                        error_message = error_data.get('error', 'Internal server error')
+                        
+                        # Check if this is a rate limiting error and apply backoff
+                        if self._is_rate_limit_error(error_message):
+                            backoff_time = self._calculate_rate_limit_backoff(attempt)
+                            logger.warning(f"Rate limit detected in multipart upload, waiting {backoff_time:.1f}s before retry")
+                            time.sleep(backoff_time)
+                            if attempt < max_retries:
+                                continue
+                        
+                        raise PumpFunApiError(f"Server error: {error_message}")
                     else:
                         raise PumpFunApiError(f"HTTP {response.status_code}: {response.text}")
                         
@@ -1832,22 +1974,19 @@ class PumpFunClient:
             except requests.exceptions.RequestException as e:
                 last_exception = PumpFunNetworkError(f"Request error: {str(e)}")
             except (PumpFunValidationError, PumpFunApiError) as e:
-                # Don't retry validation or API errors
                 raise e
             
-            # Retry logic
+            # Retry logic for network errors
             if last_exception and attempt < max_retries:
                 backoff_time = INITIAL_BACKOFF * (2 ** attempt)
                 if is_cold_start:
                     backoff_time *= random.uniform(0.5, 1.5)
-                
                 logger.warning(f"Multipart upload error on attempt {attempt + 1}/{max_retries + 1}, retrying in {backoff_time:.1f}s: {str(last_exception)}")
                 time.sleep(backoff_time)
             elif last_exception:
                 logger.error(f"All {max_retries + 1} multipart upload attempts failed: {str(last_exception)}")
                 raise last_exception
         
-        # Should not reach here
         raise last_exception or PumpFunNetworkError("Unknown error in multipart upload")
 
     def batch_buy_token(self, mint_address: str, sol_amount_per_wallet: float, 
