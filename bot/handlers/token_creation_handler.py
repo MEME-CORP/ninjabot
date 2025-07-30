@@ -262,7 +262,9 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
         )
         
         # Convert wallet group amounts to individual wallet amounts
-        dev_wallet_amount = buy_amounts.get("DevWallet", 0.01)
+        # IMPORTANT: DevWallet amount should be 0 since it buys automatically via create_amount_sol parameter
+        # But we still need to pass 0 to satisfy API validation requirements
+        dev_wallet_amount = 0.0  # DevWallet buys during token creation, not through buyAmountsSOL
         first_bundled_amount = buy_amounts.get("First Bundled Wallets", 0.01)
         
         # CRITICAL FIX: Use the same address source for balance check and token creation
@@ -355,7 +357,9 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
         
         # NEW API: All wallets can participate in token creation/buying in a single call
         # Build buy amounts for all wallets that should participate
-        dev_wallet_amount = buy_amounts.get("DevWallet", 0.01)
+        # IMPORTANT: DevWallet amount should be 0 since it buys automatically via create_amount_sol parameter
+        # But we still need to pass 0 to satisfy API validation requirements
+        dev_wallet_amount = 0.0  # DevWallet buys during token creation, not through buyAmountsSOL
         first_bundled_amount = buy_amounts.get("First Bundled Wallets", 0.01)
         
         # Create BuyAmounts object for ALL wallets
@@ -367,7 +371,9 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             "first_bundled_wallet_4_buy_sol": first_bundled_amount
         }
         
-        logger.info(f"BuyAmounts configuration for all wallets: {buy_amounts_kwargs}")
+        logger.info(f"BuyAmounts configuration - DevWallet: {dev_wallet_amount} SOL (buys via create_amount_sol instead)")
+        logger.info(f"BuyAmounts configuration - Bundled wallets: {first_bundled_amount} SOL each")
+        logger.info(f"Full BuyAmounts configuration: {buy_amounts_kwargs}")
         buy_amounts_obj = BuyAmounts(**buy_amounts_kwargs)
         
         # Validate we have DevWallet for token creation

@@ -1662,9 +1662,10 @@ class PumpFunClient:
             
             # Map wallet names to buyAmountsSOL keys using the API's flexible matching
             if wallet_name == "DevWallet":
-                # SKIP: DevWallet automatically buys during token creation via createAmountSOL
-                # Adding it to buyAmountsSOL would cause a duplicate buy transaction
-                logger.info(f"Skipping DevWallet from buy amounts (buys automatically during token creation)")
+                # IMPORTANT: Include devWalletBuySOL=0 to satisfy API validation but prevent double buying
+                # DevWallet buys automatically during token creation via createAmountSOL parameter
+                buy_amounts_dict["devWalletBuySOL"] = 0.0
+                logger.info(f"Setting DevWallet buy amount to 0 (buys automatically during token creation via createAmountSOL)")
                 continue
                     
             elif wallet_name == "First Bundled Wallet 1":
