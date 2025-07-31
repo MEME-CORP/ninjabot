@@ -141,7 +141,7 @@ async def token_parameter_input(update: Update, context: CallbackContext) -> int
 
 async def process_token_image_upload(update: Update, context: CallbackContext) -> int:
     """
-    Process uploaded image from Telegram for token creation.
+    Process uploaded image from Telegram for token creation with Pump.fun optimization.
     
     Args:
         update: The update object
@@ -160,28 +160,70 @@ async def process_token_image_upload(update: Update, context: CallbackContext) -
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         
-        # Download and save locally
+        logger.info(f"User {user.id} uploading image: {photo.file_size} bytes")
+        
+        # Send processing message
+        processing_msg = await update.message.reply_text(
+            "🔄 **Processing Image...**\n\n"
+            "Converting your image for optimal Pump.fun compatibility...",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Process with enhanced pipeline
         image_processor = TelegramImageProcessor()
-        local_path = await image_processor.download_telegram_photo(file, user.id)
+        success, message, final_path, processing_info = await image_processor.download_and_process(file, user.id)
         
-        # Store image path in session
-        session_manager.update_session_value(user.id, "token_image_local_path", local_path)
+        if not success:
+            # Handle processing failure
+            keyboard = InlineKeyboardMarkup([
+                [build_button("🔄 Try Another Image", "retry_image_upload")],
+                [build_button("⏭️ Skip Image", "skip_image")],
+                [build_button("« Back to Activities", "back_to_activities")]
+            ])
+            
+            await processing_msg.edit_text(
+                f"❌ **Image Processing Failed**\n\n{message}\n\n"
+                "Please try uploading a different image or skip this step.",
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            return ConversationState.TOKEN_IMAGE_UPLOAD
+        
+        # Store successful processing results
+        session_manager.update_session_value(user.id, "token_image_local_path", final_path)
         session_manager.update_session_value(user.id, "has_custom_image", True)
+        session_manager.update_session_value(user.id, "image_processing_info", processing_info)
         
-        logger.info(f"User {user.id} uploaded token image: {local_path}")
+        # Clean up old files but keep the latest
+        image_processor.cleanup_temp_files(user.id, keep_latest=True)
         
-        # Show success and proceed to preview
+        # Get file info for display
+        file_info = image_processor.get_file_info(final_path)
+        processing_time = processing_info.get("processing_time", 0)
+        
+        # Create success message with details
+        success_details = []
+        if file_info:
+            success_details.append(f"📐 Size: {file_info['width']}x{file_info['height']} pixels")
+            success_details.append(f"💾 File size: {file_info['size_mb']} MB")
+        
+        if processing_time > 0:
+            success_details.append(f"⏱️ Processed in {processing_time:.1f}s")
+        
+        success_text = "✅ **Image Optimized for Pump.fun!**\n\n" + "\n".join(success_details)
+        
         keyboard = InlineKeyboardMarkup([
             [build_button("Continue to Preview", "proceed_to_preview")]
         ])
         
-        await update.message.reply_text(
-            "✅ **Image Uploaded Successfully!**\n\n"
-            "Your token image has been saved and will be used during token creation.\n\n"
-            "Proceeding to token preview...",
+        await processing_msg.edit_text(
+            success_text + "\n\nReady to proceed with token creation!",
             reply_markup=keyboard,
             parse_mode=ParseMode.MARKDOWN
         )
+        
+        logger.info(f"Successfully processed image for user {user.id}: {final_path}")
         
         return ConversationState.TOKEN_IMAGE_UPLOAD
         
@@ -189,19 +231,58 @@ async def process_token_image_upload(update: Update, context: CallbackContext) -
         logger.error(f"Error processing image upload for user {user.id}: {e}")
         
         keyboard = InlineKeyboardMarkup([
+            [build_button("🔄 Try Again", "retry_image_upload")],
             [build_button("⏭️ Skip Image", "skip_image")],
             [build_button("« Back to Activities", "back_to_activities")]
         ])
         
         await update.message.reply_text(
-            "❌ **Image Upload Failed**\n\n"
-            f"Failed to process your image: {str(e)}\n\n"
-            "Please try uploading again or skip this step.",
+            "❌ **Unexpected Error**\n\n"
+            f"An error occurred while processing your image: {str(e)}\n\n"
+            "Please try again or skip this step.",
             reply_markup=keyboard,
             parse_mode=ParseMode.MARKDOWN
         )
         
         return ConversationState.TOKEN_IMAGE_UPLOAD
+
+
+async def retry_image_upload(update: Update, context: CallbackContext) -> int:
+    """
+    Allow user to retry image upload after failure.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer("Ready for new image")
+    
+    keyboard = InlineKeyboardMarkup([
+        [build_button("⏭️ Skip Image", "skip_image")],
+        [build_button("« Back to Activities", "back_to_activities")]
+    ])
+    
+    message = (
+        "🖼️ **Upload New Image**\n\n"
+        "Please send a new photo for your token:\n"
+        "• Supported formats: JPG, PNG\n"
+        "• Will be optimized to 500x500 for Pump.fun\n"
+        "• Maximum size: 20MB\n\n"
+        "Send your image now or skip this step."
+    )
+    
+    await query.edit_message_text(
+        message,
+        reply_markup=keyboard,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    return ConversationState.TOKEN_IMAGE_UPLOAD
 
 
 async def skip_image_upload(update: Update, context: CallbackContext) -> int:
@@ -261,11 +342,25 @@ async def proceed_to_preview(update: Update, context: CallbackContext) -> int:
     # Get token params and show preview
     token_params = session_manager.get_session_value(user.id, "token_params") or {}
     has_image = session_manager.get_session_value(user.id, "has_custom_image", False)
+    image_path = session_manager.get_session_value(user.id, "token_image_local_path")
     
-    # Add image status to preview
+    # Add enhanced image status to preview
     preview_text = format_token_creation_preview(token_params)
-    if has_image:
-        preview_text += "\n🖼️ **Image:** Custom image uploaded ✅"
+    
+    if has_image and image_path:
+        # Get detailed image information
+        try:
+            from bot.utils.image_utils import TelegramImageProcessor
+            image_processor = TelegramImageProcessor()
+            file_info = image_processor.get_file_info(image_path)
+            
+            if file_info:
+                pump_ready = "✅ Pump.fun ready" if file_info.get("pump_fun_ready", False) else "🔧 Optimized"
+                preview_text += f"\n🖼️ **Image:** {pump_ready} ({file_info['width']}x{file_info['height']}, {file_info['size_mb']}MB)"
+            else:
+                preview_text += "\n🖼️ **Image:** Custom image uploaded ✅"
+        except Exception:
+            preview_text += "\n🖼️ **Image:** Custom image uploaded ✅"
     else:
         preview_text += "\n🖼️ **Image:** No image (default will be used)"
     
