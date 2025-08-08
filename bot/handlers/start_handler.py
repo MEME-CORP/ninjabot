@@ -534,6 +534,10 @@ async def num_child_wallets(update: Update, context: CallbackContext) -> int:
         if not child_addresses:
             child_addresses = [c for c in children if isinstance(c, str)]
 
+        # Store in session for subsequent steps
+        session_manager.update_session_value(user.id, "child_wallets", child_addresses)
+        session_manager.update_session_value(user.id, "num_child_wallets", len(child_addresses))
+
         await message.reply_text(
             format_child_wallets_message(len(child_addresses), child_addresses[:10]),
             parse_mode=ParseMode.MARKDOWN
@@ -543,6 +547,221 @@ async def num_child_wallets(update: Update, context: CallbackContext) -> int:
         logger.error(f"Deriving child wallets failed: {e}")
         await message.reply_text(format_error_message(str(e)), parse_mode=ParseMode.MARKDOWN)
         return ConversationState.NUM_CHILD_WALLETS
+async def volume_amount(update: Update, context: CallbackContext) -> int:
+    """Handle the volume amount input for volume generation."""
+    user = update.effective_user
+    text = update.message.text.strip()
+    is_valid, value_or_error = validate_volume_input(text)
+    # Log validation
+    log_validation_result("volume_amount", text, is_valid, None if is_valid else value_or_error, user.id)
+    if not is_valid:
+        await update.message.reply_text(format_error_message(value_or_error), parse_mode=ParseMode.MARKDOWN)
+        return ConversationState.VOLUME_AMOUNT
+
+    # Persist chosen volume
+    total_volume = value_or_error
+    session_manager.update_session_value(user.id, "total_volume", total_volume)
+
+    # Confirm and prompt for token address (CA)
+    await update.message.reply_text(
+        format_volume_confirmation_message(total_volume),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await update.message.reply_text(
+        "Please paste the token Contract Address (CA) to continue.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+    return ConversationState.TOKEN_ADDRESS
+
+
+async def token_address(update: Update, context: CallbackContext) -> int:
+    """Handle token address input for volume generation."""
+    user = update.effective_user
+    text = update.message.text.strip()
+    is_valid, value_or_error = validate_token_address(text)
+    log_validation_result("token_address", text, is_valid, None if is_valid else value_or_error, user.id)
+    if not is_valid:
+        await update.message.reply_text(format_error_message(value_or_error), parse_mode=ParseMode.MARKDOWN)
+        return ConversationState.TOKEN_ADDRESS
+
+    token_addr = value_or_error
+    session_manager.update_session_value(user.id, "token_address", token_addr)
+
+    # Defensive: ensure prerequisites exist before preview
+    mother_wallet = (
+        session_manager.get_session_value(user.id, "mother_wallet_address")
+        or session_manager.get_session_value(user.id, "mother_wallet")
+    )
+    child_wallets = session_manager.get_session_value(user.id, "child_wallets") or []
+    total_volume = session_manager.get_session_value(user.id, "total_volume")
+    if not mother_wallet or not child_wallets or not total_volume:
+        await update.message.reply_text(
+            format_error_message("Missing setup data (wallets/volume). Please restart with /start."),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ConversationState.ACTIVITY_SELECTION
+
+    # Generate preview and start balance monitoring prompt
+    await generate_preview(update, context)
+    return ConversationState.PREVIEW_SCHEDULE
+
+
+async def generate_preview(update: Update, context: CallbackContext) -> None:
+    """Generate and show schedule preview for volume generation."""
+    user = update.effective_user
+    mother_wallet = (
+        session_manager.get_session_value(user.id, "mother_wallet_address")
+        or session_manager.get_session_value(user.id, "mother_wallet")
+    )
+    child_wallets = session_manager.get_session_value(user.id, "child_wallets") or []
+    token_addr = session_manager.get_session_value(user.id, "token_address")
+    total_volume = session_manager.get_session_value(user.id, "total_volume")
+    num_child = session_manager.get_session_value(user.id, "num_child_wallets") or len(child_wallets)
+
+    # Show loading message
+    message = await context.bot.send_message(chat_id=user.id, text="Generating transfer schedule...")
+
+    try:
+        schedule = api_client.generate_schedule(
+            mother_wallet=mother_wallet,
+            child_wallets=child_wallets,
+            token_address=token_addr,
+            total_volume=total_volume,
+        )
+        # Persist in session
+        session_manager.update_session_value(user.id, "schedule", schedule)
+        session_manager.update_session_value(user.id, "run_id", schedule.get("run_id"))
+
+        preview_text = format_schedule_preview(
+            schedule=schedule.get("transfers", []),
+            total_volume=total_volume,
+            token_address=token_addr,
+            num_child_wallets=num_child,
+            mother_wallet_address=mother_wallet or ""
+        )
+        await message.edit_text(preview_text, parse_mode=ParseMode.MARKDOWN)
+
+        # Add balance check prompt
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Please fund the wallet now. I'll check the balance every few seconds.",
+            reply_markup=InlineKeyboardMarkup([[build_button("Check Balance Now", "check_balance")]])
+        )
+
+        # Start polling in background
+        await start_balance_polling(user.id, context)
+    except Exception as e:
+        logger.error(f"Error generating schedule preview: {e}")
+        await message.edit_text(
+            format_error_message(f"Could not generate schedule: {str(e)}"),
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+
+async def start_balance_polling(user_id: int, context: CallbackContext) -> None:
+    """Start polling for mother wallet balance until target reached."""
+    mother_wallet = (
+        session_manager.get_session_value(user_id, "mother_wallet_address")
+        or session_manager.get_session_value(user_id, "mother_wallet")
+    )
+    # Always poll SOL balance for funding readiness; token CA is not used for polling
+    token_addr = None
+    total_volume = session_manager.get_session_value(user_id, "total_volume")
+
+    if not all([mother_wallet, total_volume]):
+        logger.error("Missing session data for balance polling", extra={"user_id": user_id})
+        return
+
+    async def on_target_reached():
+        balance_info = api_client.check_balance(mother_wallet, token_addr)
+        current_balance = 0
+        token_symbol = "tokens"
+        if isinstance(balance_info, dict) and 'balances' in balance_info:
+            for tb in balance_info['balances']:
+                if tb.get('symbol') == 'SOL' or tb.get('token') == "So11111111111111111111111111111111111111112":
+                    current_balance = tb.get('amount', 0)
+                    token_symbol = tb.get('symbol', 'SOL')
+                    break
+
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=format_sufficient_balance_message(balance=current_balance, token_symbol=token_symbol),
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    await balance_poller.start_polling(
+        wallet_address=mother_wallet,
+    token_address=token_addr,  # None => SOL balance
+        target_balance=total_volume,
+        on_target_reached=on_target_reached
+    )
+
+    logger.info(
+        "Started balance polling",
+        extra={"user_id": user_id, "wallet": mother_wallet, "target": total_volume}
+    )
+
+
+async def check_balance(update: Update, context: CallbackContext) -> int:
+    """Manually check mother wallet balance against target."""
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+
+    mother_wallet = (
+        session_manager.get_session_value(user.id, "mother_wallet_address")
+        or session_manager.get_session_value(user.id, "mother_wallet")
+    )
+    token_addr = session_manager.get_session_value(user.id, "token_address")
+    total_volume = session_manager.get_session_value(user.id, "total_volume")
+
+    if not all([mother_wallet, token_addr, total_volume]):
+        await query.edit_message_text(
+            format_error_message("Session data missing. Please restart with /start."),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ConversationState.ACTIVITY_SELECTION
+
+    try:
+        try:
+            await query.edit_message_text(
+                f"Checking balance for wallet: `{mother_wallet[:8]}...{mother_wallet[-8:]}`...",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception:
+            pass
+
+        balance_info = api_client.check_balance(mother_wallet, token_addr)
+        current_balance = 0
+        token_symbol = "tokens"
+        if isinstance(balance_info, dict) and 'balances' in balance_info:
+            for tb in balance_info['balances']:
+                if tb.get('symbol') == 'SOL' or tb.get('token') == "So11111111111111111111111111111111111111112":
+                    current_balance = tb.get('amount', 0)
+                    token_symbol = tb.get('symbol', 'SOL')
+                    break
+
+        if current_balance >= total_volume:
+            await query.edit_message_text(
+                format_sufficient_balance_message(balance=current_balance, token_symbol=token_symbol),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await query.edit_message_text(
+                format_insufficient_balance_message(current_balance=current_balance, required_balance=total_volume, token_symbol=token_symbol),
+                reply_markup=InlineKeyboardMarkup([[build_button("Check Again", "check_balance")]]),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        return ConversationState.AWAIT_FUNDING
+    except Exception as e:
+        logger.error(f"Error checking balance: {e}")
+        await query.edit_message_text(
+            format_error_message(f"Could not check balance: {str(e)}"),
+            reply_markup=InlineKeyboardMarkup([[build_button("Try Again", "check_balance")]]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ConversationState.AWAIT_FUNDING
 
 
 async def start_bundling_workflow(update: Update, context: CallbackContext) -> int:
@@ -556,6 +775,14 @@ async def start_bundling_workflow(update: Update, context: CallbackContext) -> i
     Returns:
         The next state
     """
+
+
+async def regenerate_preview(update: Update, context: CallbackContext) -> int:
+    """Regenerate the schedule preview upon user request."""
+    query = update.callback_query
+    await query.answer()
+    await generate_preview(update, context)
+    return ConversationState.PREVIEW_SCHEDULE
     user = update.callback_query.from_user
     query = update.callback_query
     
@@ -769,6 +996,19 @@ def register_start_handler(application):
             ],
             ConversationState.NUM_CHILD_WALLETS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, num_child_wallets),
+            ],
+            ConversationState.VOLUME_AMOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, volume_amount),
+            ],
+            ConversationState.TOKEN_ADDRESS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, token_address),
+            ],
+            ConversationState.PREVIEW_SCHEDULE: [
+                CallbackQueryHandler(check_balance, pattern=r"^check_balance$"),
+                CallbackQueryHandler(regenerate_preview, pattern=r"^regenerate_preview$")
+            ],
+            ConversationState.AWAIT_FUNDING: [
+                CallbackQueryHandler(check_balance, pattern=r"^check_balance$")
             ],
             ConversationState.BUNDLER_MANAGEMENT: [
                 CallbackQueryHandler(bundler_management_choice)
