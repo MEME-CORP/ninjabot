@@ -528,3 +528,137 @@ class BundledWalletStorage:
 # Global instances for use in handlers
 airdrop_wallet_storage = AirdropWalletStorage()
 bundled_wallet_storage = BundledWalletStorage()
+
+# =============================================================================
+# Volume Wallet Storage (Mother/Child) to mirror airdrop/bundled structure
+# =============================================================================
+
+class VolumeWalletStorage:
+    """Stores mother and child wallets for the volume generation workflow.
+
+    Uses data/mother_wallets and data/child_wallets with timestamped, user-scoped filenames
+    to mirror the style of airdrop/bundled storage.
+    """
+
+    def __init__(self, base_data_path: str = "data"):
+        self.base_data_path = base_data_path
+        self.mother_wallets_path = os.path.join(base_data_path, "mother_wallets")
+        self.child_wallets_path = os.path.join(base_data_path, "child_wallets")
+        self._ensure_directories()
+
+    def _ensure_directories(self) -> None:
+        try:
+            os.makedirs(self.mother_wallets_path, exist_ok=True)
+            os.makedirs(self.child_wallets_path, exist_ok=True)
+            logger.info(
+                f"Ensured volume wallet directories: {self.mother_wallets_path}, {self.child_wallets_path}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to create volume wallet directories: {str(e)}")
+            raise
+
+    @staticmethod
+    def _short(addr: str) -> str:
+        return (addr or "unknown")[:8]
+
+    def save_mother_wallet(self, user_id: int, wallet_data: Dict[str, Any]) -> str:
+        """Save a mother wallet under data/mother_wallets.
+
+        Filename pattern: mother_<userId>_<timestamp>_<addr8>.json
+        """
+        address = wallet_data.get("address") or wallet_data.get("publicKey") or "unknown"
+        ts = int(time.time())
+        filename = f"mother_{user_id}_{ts}_{self._short(address)}.json"
+        path = os.path.join(self.mother_wallets_path, filename)
+
+        storage = {
+            "wallet_type": "mother",
+            "workflow": "volume_generation",
+            "user_id": user_id,
+            "timestamp": ts,
+            "created_at": datetime.now().isoformat(),
+            **wallet_data,
+        }
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(storage, f, indent=2, ensure_ascii=False)
+
+        logger.info(
+            "Saved mother wallet for volume flow",
+            extra={"user_id": user_id, "address": address, "file_path": path},
+        )
+        return path
+
+    def list_user_mother_wallets(self, user_id: int) -> List[Dict[str, Any]]:
+        if not os.path.exists(self.mother_wallets_path):
+            return []
+        files = [
+            f for f in os.listdir(self.mother_wallets_path)
+            if f.startswith(f"mother_{user_id}_") and f.endswith(".json")
+        ]
+        wallets: List[Dict[str, Any]] = []
+        for fn in files:
+            fp = os.path.join(self.mother_wallets_path, fn)
+            try:
+                with open(fp, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                wallets.append(data)
+            except Exception as e:
+                logger.warning(f"Failed to load mother wallet file {fn}: {str(e)}")
+        wallets.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        return wallets
+
+    def save_child_wallets(self, user_id: int, mother_wallet_address: str, wallets: List[Dict[str, Any]]) -> str:
+        """Save child wallets set under data/child_wallets.
+
+        Filename pattern: children_<userId>_<timestamp>_<mother8>.json
+        """
+        ts = int(time.time())
+        filename = f"children_{user_id}_{ts}_{self._short(mother_wallet_address)}.json"
+        path = os.path.join(self.child_wallets_path, filename)
+
+        storage = {
+            "wallet_type": "children",
+            "workflow": "volume_generation",
+            "user_id": user_id,
+            "timestamp": ts,
+            "created_at": datetime.now().isoformat(),
+            "mother_address": mother_wallet_address,
+            "wallets": wallets,
+        }
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(storage, f, indent=2, ensure_ascii=False)
+
+        logger.info(
+            "Saved child wallets for volume flow",
+            extra={
+                "user_id": user_id,
+                "mother_wallet": mother_wallet_address,
+                "wallet_count": len(wallets),
+                "file_path": path,
+            },
+        )
+        return path
+
+    def list_user_child_wallet_sets(self, user_id: int) -> List[Dict[str, Any]]:
+        if not os.path.exists(self.child_wallets_path):
+            return []
+        files = [
+            f for f in os.listdir(self.child_wallets_path)
+            if f.startswith(f"children_{user_id}_") and f.endswith(".json")
+        ]
+        sets: List[Dict[str, Any]] = []
+        for fn in files:
+            fp = os.path.join(self.child_wallets_path, fn)
+            try:
+                with open(fp, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                sets.append(data)
+            except Exception as e:
+                logger.warning(f"Failed to load child wallet file {fn}: {str(e)}")
+        sets.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        return sets
+
+
+volume_wallet_storage = VolumeWalletStorage()

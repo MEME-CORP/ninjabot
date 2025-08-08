@@ -51,7 +51,7 @@ from bot.api.api_client import api_client, ApiClientError
 from bot.events.event_system import event_system, TransactionConfirmedEvent, TransactionFailedEvent
 from bot.utils.balance_poller import balance_poller
 from bot.state.session_manager import session_manager
-from bot.utils.wallet_storage import airdrop_wallet_storage
+from bot.utils.wallet_storage import airdrop_wallet_storage, volume_wallet_storage
 
 
 # Helper function for the background job
@@ -351,6 +351,200 @@ async def start_volume_generation_workflow(update: Update, context: CallbackCont
     return ConversationState.WALLET_CHOICE
 
 
+# =====================
+# Volume wallet handlers
+# =====================
+
+async def wallet_choice(update: Update, context: CallbackContext) -> int:
+    """Handle wallet choice callbacks in WALLET_CHOICE state."""
+    query = update.callback_query
+    user = query.from_user
+    await query.answer()
+
+    data = query.data
+    if data == "back_to_activities":
+        return await start(update, context)
+
+    if data == "create_wallet":
+        # Create mother wallet via API and save
+        try:
+            await query.edit_message_text("🔄 Creating mother wallet...", parse_mode=ParseMode.MARKDOWN)
+            wallet_info = api_client.create_wallet()
+            address = wallet_info.get("address") or wallet_info.get("motherWalletPublicKey")
+            if not address:
+                raise ApiClientError("Wallet address missing from API response")
+
+            # Persist to volume storage (mirror airdrop style)
+            try:
+                volume_wallet_storage.save_mother_wallet(user.id, {
+                    "address": address,
+                    "private_key": wallet_info.get("private_key") or wallet_info.get("motherWalletPrivateKeyBase58", ""),
+                })
+            except Exception as e:
+                logger.warning(f"Failed to persist mother wallet file: {e}")
+
+            # Show success
+            await query.edit_message_text(
+                format_wallet_created_message(address),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[build_button("→ Derive Child Wallets", "derive_children")], [build_button("« Back", "back_to_activities")]])
+            )
+
+            # Stash in session
+            session_manager.update_session_value(user.id, "mother_wallet_address", address)
+            session_manager.update_session_value(user.id, "mother_private_key", wallet_info.get("private_key") or wallet_info.get("motherWalletPrivateKeyBase58", ""))
+
+            return ConversationState.WALLET_CHOICE
+        except Exception as e:
+            logger.error(f"Mother wallet creation failed: {e}")
+            await query.edit_message_text(
+                format_error_message(str(e)),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[build_button("« Back", "back_to_activities")]])
+            )
+            return ConversationState.WALLET_CHOICE
+
+    if data == "import_wallet":
+        await query.edit_message_text(
+            "🔐 Send your mother wallet private key (Base58).",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[build_button("« Back", "back_to_activities")]])
+        )
+        return ConversationState.IMPORT_WALLET
+
+    if data == "use_saved_wallet":
+        saved = volume_wallet_storage.list_user_mother_wallets(user.id)
+        if not saved:
+            # fallback to API client's generic storage if any
+            saved = api_client.list_saved_wallets('mother')
+        if not saved:
+            await query.edit_message_text(
+                "📭 No saved mother wallets found.",
+                reply_markup=InlineKeyboardMarkup([[build_button("« Back", "back_to_activities")]])
+            )
+            return ConversationState.WALLET_CHOICE
+
+        # Build a simple selection menu
+        buttons = []
+        for w in saved[:10]:
+            addr = w.get("address") or w.get("publicKey") or "unknown"
+            label = f"{addr[:6]}...{addr[-6:]}"
+            buttons.append([build_button(label, f"select_saved_{addr}")])
+        buttons.append([build_button("« Back", "back_to_activities")])
+        await query.edit_message_text("Select a saved mother wallet:", reply_markup=InlineKeyboardMarkup(buttons))
+        return ConversationState.SAVED_WALLET_CHOICE
+
+    if data == "derive_children":
+        # Ask for number of child wallets
+        await query.edit_message_text(
+            "How many child wallets do you want to derive? (min 10)",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ConversationState.NUM_CHILD_WALLETS
+
+    # Unknown callback in this state
+    return ConversationState.WALLET_CHOICE
+
+
+async def import_wallet_text(update: Update, context: CallbackContext) -> int:
+    """Handle text input for importing a mother wallet by private key."""
+    message = update.effective_message
+    user = update.effective_user
+    private_key = message.text.strip()
+    try:
+        await message.reply_text("🔄 Importing wallet...", parse_mode=ParseMode.MARKDOWN)
+        wallet_info = api_client.import_wallet(private_key)
+        address = wallet_info.get("address") or wallet_info.get("motherWalletPublicKey")
+        if not address:
+            raise ApiClientError("Failed to import wallet: address missing")
+
+        # Persist
+        try:
+            volume_wallet_storage.save_mother_wallet(user.id, {
+                "address": address,
+                "private_key": private_key,
+                "imported": True,
+            })
+        except Exception as e:
+            logger.warning(f"Failed to persist imported mother wallet: {e}")
+
+        # Session
+        session_manager.update_session_value(user.id, "mother_wallet_address", address)
+        session_manager.update_session_value(user.id, "mother_private_key", private_key)
+
+        await message.reply_text(
+            format_wallet_imported_message(address),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[build_button("→ Derive Child Wallets", "derive_children")], [build_button("« Back", "back_to_activities")]])
+        )
+        return ConversationState.WALLET_CHOICE
+    except Exception as e:
+        logger.error(f"Wallet import failed: {e}")
+        await message.reply_text(format_error_message(str(e)), parse_mode=ParseMode.MARKDOWN)
+        return ConversationState.IMPORT_WALLET
+
+
+async def saved_wallet_choice(update: Update, context: CallbackContext) -> int:
+    query = update.callback_query
+    user = query.from_user
+    await query.answer()
+    data = query.data
+    if data.startswith("select_saved_"):
+        addr = data.replace("select_saved_", "")
+        session_manager.update_session_value(user.id, "mother_wallet_address", addr)
+        await query.edit_message_text(
+            f"Selected mother wallet: `{addr}`",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[build_button("→ Derive Child Wallets", "derive_children")], [build_button("« Back", "back_to_activities")]])
+        )
+        return ConversationState.WALLET_CHOICE
+    return ConversationState.SAVED_WALLET_CHOICE
+
+
+async def num_child_wallets(update: Update, context: CallbackContext) -> int:
+    message = update.effective_message
+    user = update.effective_user
+    text = message.text.strip()
+    try:
+        # validate_child_wallets_input returns (is_valid, value_or_error)
+        is_valid, value_or_error = validate_child_wallets_input(text)
+        # Log with correct parameter order: (type, input_value, is_valid, error_message, user_id)
+        log_validation_result("num_child_wallets", text, is_valid, None if is_valid else value_or_error, user.id)
+        if not is_valid:
+            await message.reply_text(value_or_error or "Invalid number. Enter a number ≥ 10.")
+            return ConversationState.NUM_CHILD_WALLETS
+
+        mother = session_manager.get_session_value(user.id, "mother_wallet_address")
+        if not mother:
+            await message.reply_text("Mother wallet missing. Please create/import first.")
+            return ConversationState.WALLET_CHOICE
+
+        await message.reply_text("🔄 Deriving child wallets...", parse_mode=ParseMode.MARKDOWN)
+        # value_or_error is guaranteed to be the parsed int when is_valid is True
+        children = api_client.derive_child_wallets(value_or_error, mother)
+
+        # Persist
+        try:
+            volume_wallet_storage.save_child_wallets(user.id, mother, children)
+        except Exception as e:
+            logger.warning(f"Failed to persist child wallets: {e}")
+
+        # Prepare summary
+        child_addresses = [c.get('address') for c in children if isinstance(c, dict)]
+        if not child_addresses:
+            child_addresses = [c for c in children if isinstance(c, str)]
+
+        await message.reply_text(
+            format_child_wallets_message(len(child_addresses), child_addresses[:10]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ConversationState.VOLUME_AMOUNT
+    except Exception as e:
+        logger.error(f"Deriving child wallets failed: {e}")
+        await message.reply_text(format_error_message(str(e)), parse_mode=ParseMode.MARKDOWN)
+        return ConversationState.NUM_CHILD_WALLETS
+
+
 async def start_bundling_workflow(update: Update, context: CallbackContext) -> int:
     """
     Start the bundling workflow with airdrop wallet setup.
@@ -562,6 +756,19 @@ def register_start_handler(application):
             ConversationState.ACTIVITY_SELECTION: [
                 CallbackQueryHandler(activity_choice, pattern=r"^activity_"),
                 CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
+            ],
+            ConversationState.WALLET_CHOICE: [
+                CallbackQueryHandler(wallet_choice),
+            ],
+            ConversationState.IMPORT_WALLET: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, import_wallet_text),
+                CallbackQueryHandler(wallet_choice, pattern=r"^back_to_activities$"),
+            ],
+            ConversationState.SAVED_WALLET_CHOICE: [
+                CallbackQueryHandler(saved_wallet_choice),
+            ],
+            ConversationState.NUM_CHILD_WALLETS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, num_child_wallets),
             ],
             ConversationState.BUNDLER_MANAGEMENT: [
                 CallbackQueryHandler(bundler_management_choice)
