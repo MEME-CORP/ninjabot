@@ -492,6 +492,58 @@ async def saved_wallet_choice(update: Update, context: CallbackContext) -> int:
     if data.startswith("select_saved_"):
         addr = data.replace("select_saved_", "")
         session_manager.update_session_value(user.id, "mother_wallet_address", addr)
+
+        # Attempt to locate existing child wallet set for this mother wallet
+        existing_sets = volume_wallet_storage.list_user_child_wallet_sets(user.id)
+        matching_set = None
+        for s in existing_sets:
+            if s.get("mother_address") == addr and s.get("wallets"):
+                matching_set = s
+                break  # sets are sorted newest-first
+
+        if matching_set:
+            child_wallets = [w.get("address") for w in matching_set.get("wallets", []) if w.get("address")]
+            if child_wallets:
+                # Populate session so we can skip derivation
+                session_manager.update_session_value(user.id, "child_wallets", child_wallets)
+                session_manager.update_session_value(user.id, "num_child_wallets", len(child_wallets))
+
+                summary_text = (
+                    f"✅ Selected mother wallet: `{addr}`\n\n"
+                    f"🔁 Reusing {len(child_wallets)} existing child wallets.\n\n"
+                    f"You can proceed by entering the total volume you want to generate (in SOL).\n"
+                    f"If you prefer to derive a fresh set, tap the button below." 
+                )
+
+                try:
+                    await query.edit_message_text(
+                        summary_text,
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=InlineKeyboardMarkup([
+                            [build_button("↺ Derive New Child Wallets", "derive_children")],
+                            [build_button("« Back", "back_to_activities")]
+                        ])
+                    )
+                except Exception:
+                    await context.bot.send_message(
+                        chat_id=user.id,
+                        text=summary_text,
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=InlineKeyboardMarkup([
+                            [build_button("↺ Derive New Child Wallets", "derive_children")],
+                            [build_button("« Back", "back_to_activities")]
+                        ])
+                    )
+
+                # Prompt for volume amount
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text="Enter the total volume you want to generate (in SOL, e.g. 0.5 or 1.2):",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return ConversationState.VOLUME_AMOUNT
+
+        # Fallback: no existing child wallets, keep original derive prompt
         await query.edit_message_text(
             f"Selected mother wallet: `{addr}`",
             parse_mode=ParseMode.MARKDOWN,
@@ -683,10 +735,15 @@ async def start_balance_polling(user_id: int, context: CallbackContext) -> None:
                     current_balance = tb.get('amount', 0)
                     token_symbol = tb.get('symbol', 'SOL')
                     break
-
+        # Always present unified post-balance action buttons so user can continue
+        action_keyboard = InlineKeyboardMarkup([
+            [build_button("🚀 Begin Transfers", "begin_transfers")],
+            [build_button("💸 Return All Funds", "trigger_return_all_funds")]
+        ])
         await context.bot.send_message(
             chat_id=user_id,
             text=format_sufficient_balance_message(balance=current_balance, token_symbol=token_symbol),
+            reply_markup=action_keyboard,
             parse_mode=ParseMode.MARKDOWN
         )
 
@@ -743,10 +800,25 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
                     break
 
         if current_balance >= total_volume:
-            await query.edit_message_text(
-                format_sufficient_balance_message(balance=current_balance, token_symbol=token_symbol),
-                parse_mode=ParseMode.MARKDOWN
-            )
+            # Provide consistent action buttons when balance is sufficient
+            action_keyboard = InlineKeyboardMarkup([
+                [build_button("🚀 Begin Transfers", "begin_transfers")],
+                [build_button("💸 Return All Funds", "trigger_return_all_funds")]
+            ])
+            try:
+                await query.edit_message_text(
+                    format_sufficient_balance_message(balance=current_balance, token_symbol=token_symbol),
+                    reply_markup=action_keyboard,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception:
+                # Fallback send if edit fails (e.g., message too old)
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=format_sufficient_balance_message(balance=current_balance, token_symbol=token_symbol),
+                    reply_markup=action_keyboard,
+                    parse_mode=ParseMode.MARKDOWN
+                )
         else:
             await query.edit_message_text(
                 format_insufficient_balance_message(current_balance=current_balance, required_balance=total_volume, token_symbol=token_symbol),
@@ -762,6 +834,39 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
             parse_mode=ParseMode.MARKDOWN
         )
         return ConversationState.AWAIT_FUNDING
+
+
+async def begin_transfers(update: Update, context: CallbackContext) -> int:
+    """Entry point after sufficient balance. Placeholder to proceed to child funding/execution.
+
+    Currently just acknowledges and would be extended to invoke funding logic.
+    """
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+
+    # Fetch session data
+    mother_wallet = (
+        session_manager.get_session_value(user.id, "mother_wallet_address")
+        or session_manager.get_session_value(user.id, "mother_wallet")
+    )
+    child_wallets = session_manager.get_session_value(user.id, "child_wallets") or []
+    total_volume = session_manager.get_session_value(user.id, "total_volume")
+
+    if not all([mother_wallet, child_wallets, total_volume]):
+        await query.edit_message_text(
+            format_error_message("Missing session data for transfers. Please /start again."),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ConversationState.ACTIVITY_SELECTION
+
+    # For now simply confirm and (future) trigger execution path
+    await query.edit_message_text(
+        "🚀 Starting transfer & volume execution flow... (handler stub)",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    # TODO: integrate actual funding + execution logic here.
+    return ConversationState.AWAIT_FUNDING
 
 
 async def start_bundling_workflow(update: Update, context: CallbackContext) -> int:
@@ -1008,7 +1113,8 @@ def register_start_handler(application):
                 CallbackQueryHandler(regenerate_preview, pattern=r"^regenerate_preview$")
             ],
             ConversationState.AWAIT_FUNDING: [
-                CallbackQueryHandler(check_balance, pattern=r"^check_balance$")
+                CallbackQueryHandler(check_balance, pattern=r"^check_balance$"),
+                CallbackQueryHandler(begin_transfers, pattern=r"^begin_transfers$")
             ],
             ConversationState.BUNDLER_MANAGEMENT: [
                 CallbackQueryHandler(bundler_management_choice)
