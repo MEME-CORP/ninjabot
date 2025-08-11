@@ -1735,7 +1735,24 @@ class PumpFunClient:
         self._validate_buy_amounts_json(buy_amounts_json)
         
         # Prepare wallets JSON string
-        wallets_json = json.dumps(wallets, separators=(',', ':'))
+        # API spec (bundler_api.md) requires wallets JSON array with ONLY name & privateKey.
+        # Previous implementation forwarded extra fields (e.g. address, privateKeyBs58) which
+        # may cause backend instruction assembly divergence in multipart path.
+        sanitized_wallets = []
+        for w in wallets:
+            try:
+                name = w.get('name')
+                pk = w.get('privateKey') or w.get('privateKeyBs58')
+                if not name or not pk:
+                    raise ValueError('missing name/privateKey')
+                sanitized_wallets.append({'name': name, 'privateKey': pk})
+            except Exception as e:
+                logger.warning(f"Skipping wallet during multipart sanitization: {w} error={e}")
+        if not sanitized_wallets:
+            raise PumpFunValidationError("No valid wallets after sanitization for multipart upload")
+        wallets_json = json.dumps(sanitized_wallets, separators=(',', ':'))
+        if len(sanitized_wallets) != len(wallets):
+            logger.info(f"Sanitized wallets for multipart: kept {len(sanitized_wallets)}/{len(wallets)} (removed supplemental fields)")
         
         # Validate wallets JSON
         self._validate_wallets_json(wallets_json)

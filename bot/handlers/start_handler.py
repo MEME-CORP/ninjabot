@@ -383,16 +383,55 @@ async def wallet_choice(update: Update, context: CallbackContext) -> int:
             except Exception as e:
                 logger.warning(f"Failed to persist mother wallet file: {e}")
 
-            # Show success
+            # Stash in session first
+            session_manager.update_session_value(user.id, "mother_wallet_address", address)
+            session_manager.update_session_value(user.id, "mother_private_key", wallet_info.get("private_key") or wallet_info.get("motherWalletPrivateKeyBase58", ""))
+
+            # Check for existing child wallets for this mother wallet
+            existing_sets = volume_wallet_storage.list_user_child_wallet_sets(user.id)
+            matching_set = None
+            for s in existing_sets:
+                if s.get("mother_address") == address and s.get("wallets"):
+                    matching_set = s
+                    break  # sets are sorted newest-first
+
+            if matching_set:
+                child_wallets = [w.get("address") for w in matching_set.get("wallets", []) if w.get("address")]
+                if child_wallets:
+                    # Populate session so we can skip derivation
+                    session_manager.update_session_value(user.id, "child_wallets", child_wallets)
+                    session_manager.update_session_value(user.id, "num_child_wallets", len(child_wallets))
+
+                    summary_text = (
+                        f"✅ Created mother wallet: `{address}`\n\n"
+                        f"🔁 Found {len(child_wallets)} existing child wallets for this address.\n\n"
+                        f"You can proceed by entering the total volume you want to generate (in SOL).\n"
+                        f"If you prefer to derive a fresh set, tap the button below." 
+                    )
+
+                    await query.edit_message_text(
+                        summary_text,
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=InlineKeyboardMarkup([
+                            [build_button("↺ Derive New Child Wallets", "derive_children")],
+                            [build_button("« Back", "back_to_activities")]
+                        ])
+                    )
+
+                    # Prompt for volume amount
+                    await context.bot.send_message(
+                        chat_id=user.id,
+                        text="Enter the total volume you want to generate (in SOL, e.g. 0.5 or 1.2):",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    return ConversationState.VOLUME_AMOUNT
+
+            # No existing child wallets found, show derive option
             await query.edit_message_text(
                 format_wallet_created_message(address),
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup([[build_button("→ Derive Child Wallets", "derive_children")], [build_button("« Back", "back_to_activities")]])
             )
-
-            # Stash in session
-            session_manager.update_session_value(user.id, "mother_wallet_address", address)
-            session_manager.update_session_value(user.id, "mother_private_key", wallet_info.get("private_key") or wallet_info.get("motherWalletPrivateKeyBase58", ""))
 
             return ConversationState.WALLET_CHOICE
         except Exception as e:
@@ -472,6 +511,45 @@ async def import_wallet_text(update: Update, context: CallbackContext) -> int:
         session_manager.update_session_value(user.id, "mother_wallet_address", address)
         session_manager.update_session_value(user.id, "mother_private_key", private_key)
 
+        # Check for existing child wallets for this imported wallet
+        existing_sets = volume_wallet_storage.list_user_child_wallet_sets(user.id)
+        matching_set = None
+        for s in existing_sets:
+            if s.get("mother_address") == address and s.get("wallets"):
+                matching_set = s
+                break  # sets are sorted newest-first
+
+        if matching_set:
+            child_wallets = [w.get("address") for w in matching_set.get("wallets", []) if w.get("address")]
+            if child_wallets:
+                # Populate session so we can skip derivation
+                session_manager.update_session_value(user.id, "child_wallets", child_wallets)
+                session_manager.update_session_value(user.id, "num_child_wallets", len(child_wallets))
+
+                summary_text = (
+                    f"✅ Imported mother wallet: `{address}`\n\n"
+                    f"🔁 Found {len(child_wallets)} existing child wallets for this address.\n\n"
+                    f"You can proceed by entering the total volume you want to generate (in SOL).\n"
+                    f"If you prefer to derive a fresh set, tap the button below." 
+                )
+
+                await message.reply_text(
+                    summary_text,
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=InlineKeyboardMarkup([
+                        [build_button("↺ Derive New Child Wallets", "derive_children")],
+                        [build_button("« Back", "back_to_activities")]
+                    ])
+                )
+
+                # Prompt for volume amount
+                await message.reply_text(
+                    "Enter the total volume you want to generate (in SOL, e.g. 0.5 or 1.2):",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return ConversationState.VOLUME_AMOUNT
+
+        # No existing child wallets found, show derive option
         await message.reply_text(
             format_wallet_imported_message(address),
             parse_mode=ParseMode.MARKDOWN,
@@ -860,13 +938,148 @@ async def begin_transfers(update: Update, context: CallbackContext) -> int:
         )
         return ConversationState.ACTIVITY_SELECTION
 
-    # For now simply confirm and (future) trigger execution path
+    # Immediately proceed to funding child wallets (minimal integration)
     await query.edit_message_text(
-        "🚀 Starting transfer & volume execution flow... (handler stub)",
+        "💰 Preparing to fund child wallets...",
         parse_mode=ParseMode.MARKDOWN
     )
-    # TODO: integrate actual funding + execution logic here.
-    return ConversationState.AWAIT_FUNDING
+
+    return await fund_child_wallets_handler(update, context)
+
+
+async def fund_child_wallets_handler(update: Update, context: CallbackContext) -> int:
+    """Fund child wallets with required SOL for subsequent SPL volume generation.
+
+    Defensive: handles session key variants (mother_wallet_address vs mother_wallet) and
+    normalizes funding_result schema differences.
+    """
+    query = update.callback_query
+    user = query.from_user
+    # Only answer if coming from a callback (may be invoked directly by begin_transfers)
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    # Retrieve session data with fallbacks
+    mother_wallet = (
+        session_manager.get_session_value(user.id, "mother_wallet_address")
+        or session_manager.get_session_value(user.id, "mother_wallet")
+    )
+    mother_private_key = session_manager.get_session_value(user.id, "mother_private_key")
+    child_wallets = session_manager.get_session_value(user.id, "child_wallets") or []
+    total_volume = session_manager.get_session_value(user.id, "total_volume")
+
+    if not all([mother_wallet, mother_private_key, child_wallets, total_volume]):
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=format_error_message("Missing session data for funding. Please /start again."),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ConversationState.AWAIT_FUNDING
+
+    # Attempt readiness check to get recommended min per wallet; fall back safely
+    try:
+        readiness = api_client.check_spl_swap_readiness(child_wallets=child_wallets, min_swap_amount_sol=total_volume / (len(child_wallets) * 10))
+        min_required_per_wallet = readiness.get("min_required_per_wallet") or 0.012
+        session_manager.update_session_value(user.id, "spl_readiness_check", readiness)
+    except Exception as e:
+        logger.warning(f"Readiness check failed prior to funding: {e}")
+        # Use api_client funding minimum (api enforces >= 0.012 internally)
+        min_required_per_wallet = 0.012
+
+    await context.bot.send_message(
+        chat_id=user.id,
+        text=(
+            "� **Funding Child Wallets**\n\n"
+            f"Transferring ~{min_required_per_wallet:.6f} SOL to each of {len(child_wallets)} child wallets..."
+        ),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+    try:
+        funding_result = api_client.fund_child_wallets(
+            mother_wallet=mother_wallet,
+            child_wallets=child_wallets,
+            token_address="So11111111111111111111111111111111111111112",  # SOL mint
+            amount_per_wallet=min_required_per_wallet,
+            mother_private_key=mother_private_key,
+            verify_transfers=True
+        )
+
+        # Normalize result fields
+        successful_transfers = funding_result.get("successful_transfers")
+        failed_transfers = funding_result.get("failed_transfers")
+
+        # If absent, infer from other hints
+        if successful_transfers is None:
+            if isinstance(funding_result.get("api_response"), dict):
+                api_resp = funding_result["api_response"]
+                successful_transfers = (
+                    api_resp.get("successful_transfers")
+                    or api_resp.get("funded_wallets")
+                    or len(api_resp.get("transactions", []))
+                )
+            else:
+                successful_transfers = funding_result.get("funded_wallets") or 0
+        if failed_transfers is None:
+            failed_transfers = funding_result.get("failed_wallets") or 0
+
+        total_transfers = successful_transfers + failed_transfers
+
+        logger.info(
+            "Child wallet funding completed",
+            extra={
+                "user_id": user.id,
+                "mother_wallet": mother_wallet,
+                "successful_transfers": successful_transfers,
+                "failed_transfers": failed_transfers,
+                "keys": list(funding_result.keys())
+            }
+        )
+
+        summary_lines = [
+            "💰 **Child Wallet Funding Complete**\n",
+            f"✅ Successful: {successful_transfers}/{total_transfers}",
+            f"❌ Failed: {failed_transfers}/{total_transfers}",
+            f"💵 Amount per wallet: {min_required_per_wallet:.6f} SOL\n"
+        ]
+
+        if failed_transfers == 0:
+            summary_lines.append("🎉 All wallets funded successfully! Ready for SPL volume generation.")
+            keyboard = [
+                [build_button("🚀 Start SPL Volume Generation", "start_execution")],
+                [build_button("🔄 Check Readiness Again", "check_balance")],
+            ]
+        else:
+            summary_lines.append("⚠️ Some wallets failed to fund. You can retry or proceed with funded wallets.")
+            keyboard = [
+                [build_button("🔄 Retry Funding", "fund_child_wallets")],
+                [build_button("🚀 Start with Ready Wallets", "start_execution")],
+                [build_button("🔄 Recheck Balance", "check_balance")]
+            ]
+
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="\n".join(summary_lines),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+        # Track if additional funding needed
+        session_manager.update_session_value(user.id, "child_wallets_need_funding", failed_transfers > 0)
+        # Persist chosen amount per wallet for reference
+        session_manager.update_session_value(user.id, "funding_amount_per_wallet", min_required_per_wallet)
+
+        return ConversationState.AWAIT_FUNDING
+    except ApiClientError as e:
+        logger.error(f"Funding API error: {e}")
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=format_error_message(f"Funding failed: {str(e)}"),
+            reply_markup=InlineKeyboardMarkup([[build_button("Try Again", "fund_child_wallets")]])
+        )
+        return ConversationState.AWAIT_FUNDING
 
 
 async def start_bundling_workflow(update: Update, context: CallbackContext) -> int:
@@ -880,25 +1093,18 @@ async def start_bundling_workflow(update: Update, context: CallbackContext) -> i
     Returns:
         The next state
     """
-
-
-async def regenerate_preview(update: Update, context: CallbackContext) -> int:
-    """Regenerate the schedule preview upon user request."""
-    query = update.callback_query
-    await query.answer()
-    await generate_preview(update, context)
-    return ConversationState.PREVIEW_SCHEDULE
     user = update.callback_query.from_user
     query = update.callback_query
-    
-    # Initialize PumpFun client
+    await query.answer()
+
+    # Initialize PumpFun client (was previously unreachable due to misplaced code)
     try:
         from bot.api.pumpfun_client import PumpFunClient
         pumpfun_client = PumpFunClient()
-        
+
         # Store client in session for later use
         session_manager.update_session_value(user.id, "pumpfun_client", pumpfun_client)
-        
+
         # Check PumpFun API health
         health_status = pumpfun_client.health_check()
         if not health_status.get("api_reachable", False):
@@ -906,8 +1112,7 @@ async def regenerate_preview(update: Update, context: CallbackContext) -> int:
                 f"PumpFun API not reachable for user {user.id}",
                 extra={"user_id": user.id, "health_status": health_status}
             )
-            
-            # Show error and return to activity selection
+
             keyboard = [[build_button("« Back to Activities", "back_to_activities")]]
             await query.edit_message_text(
                 "❌ **PumpFun API Unavailable**\n\n"
@@ -916,16 +1121,15 @@ async def regenerate_preview(update: Update, context: CallbackContext) -> int:
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode=ParseMode.MARKDOWN
             )
-            
+
             return ConversationState.ACTIVITY_SELECTION
-        
+
     except Exception as e:
         logger.error(
             f"Failed to initialize PumpFun client for user {user.id}: {str(e)}",
             extra={"user_id": user.id}
         )
-        
-        # Show error and return to activity selection
+
         keyboard = [[build_button("« Back to Activities", "back_to_activities")]]
         await query.edit_message_text(
             "❌ **PumpFun Setup Error**\n\n"
@@ -934,30 +1138,30 @@ async def regenerate_preview(update: Update, context: CallbackContext) -> int:
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
-        
+
         return ConversationState.ACTIVITY_SELECTION
-    
+
     # Check if user has existing airdrop wallets
     existing_wallets = airdrop_wallet_storage.list_user_airdrop_wallets(user.id)
-    
+
     # Build keyboard for airdrop wallet setup
     keyboard = [
         [build_button("Create Airdrop Wallet", "create_airdrop_wallet")],
         [build_button("Import Airdrop Wallet", "import_airdrop_wallet")]
     ]
-    
+
     # Add option to use existing wallet if available
     if existing_wallets:
         keyboard.insert(1, [build_button("Use Existing Airdrop Wallet", "use_existing_airdrop_wallet")])
-    
+
     keyboard.append([build_button("« Back to Activities", "back_to_activities")])
 
     message_text = "🏪 **Airdrop Wallet Setup**\n\n"
     message_text += "First, let's set up your airdrop (mother) wallet that will fund your bundled wallets.\n\n"
-    
+
     if existing_wallets:
         message_text += f"💡 Found {len(existing_wallets)} existing airdrop wallet(s) for your account.\n\n"
-    
+
     message_text += "Choose how you want to set up your airdrop wallet:"
 
     await query.edit_message_text(
@@ -967,6 +1171,13 @@ async def regenerate_preview(update: Update, context: CallbackContext) -> int:
     )
 
     return ConversationState.BUNDLING_WALLET_SETUP
+
+async def regenerate_preview(update: Update, context: CallbackContext) -> int:
+    """Regenerate the schedule preview upon user request."""
+    query = update.callback_query
+    await query.answer()
+    await generate_preview(update, context)
+    return ConversationState.PREVIEW_SCHEDULE
 
 
 async def start_bundler_management_workflow(update: Update, context: CallbackContext) -> int:
