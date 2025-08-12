@@ -687,8 +687,9 @@ async def num_child_wallets(update: Update, context: CallbackContext) -> int:
         if not child_addresses:
             child_addresses = [c for c in children if isinstance(c, str)]
 
-        # Store in session for subsequent steps
+        # Store in session for subsequent steps - STORE FULL WALLET DATA
         session_manager.update_session_value(user.id, "child_wallets", child_addresses)
+        session_manager.update_session_value(user.id, "child_wallets_full", children)  # Store full wallet data with private keys
         session_manager.update_session_value(user.id, "num_child_wallets", len(child_addresses))
 
         await message.reply_text(
@@ -838,7 +839,8 @@ async def start_balance_polling(user_id: int, context: CallbackContext) -> None:
                     break
         # Always present unified post-balance action buttons so user can continue
         action_keyboard = InlineKeyboardMarkup([
-            [build_button("🚀 Begin Transfers", "begin_transfers")],
+            [build_button("� Check Child Wallets", "check_child_balances")],
+            [build_button("�🚀 Begin Transfers", "begin_transfers")],
             [build_button("💸 Return All Funds", "trigger_return_all_funds")]
         ])
         await context.bot.send_message(
@@ -890,7 +892,25 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
         except Exception:
             pass
 
-        balance_info = api_client.check_balance(mother_wallet, token_addr)
+        # Check if balance poller is already running to avoid double requests
+        poller_task_id = f"{mother_wallet}_{token_addr or 'So11111111111111111111111111111111111111112'}"
+        if poller_task_id in balance_poller._polling_tasks and poller_task_id in balance_poller._last_balances:
+            # Use cached balance from poller to avoid duplicate API call
+            logger.info(f"Using cached balance from poller for {mother_wallet[:8]}...")
+            current_balance = balance_poller._last_balances[poller_task_id]
+            token_symbol = "SOL"
+        else:
+            # Only make API call if poller is not active
+            logger.info(f"Making direct balance check for {mother_wallet[:8]}...")
+            balance_info = api_client.check_balance(mother_wallet, token_addr)
+            current_balance = 0
+            token_symbol = "tokens"
+            if isinstance(balance_info, dict) and 'balances' in balance_info:
+                for tb in balance_info['balances']:
+                    if tb.get('symbol') == 'SOL' or tb.get('token') == "So11111111111111111111111111111111111111112":
+                        current_balance = tb.get('amount', 0)
+                        token_symbol = tb.get('symbol', 'SOL')
+                        break
         current_balance = 0
         token_symbol = "tokens"
         if isinstance(balance_info, dict) and 'balances' in balance_info:
@@ -903,7 +923,8 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
         if current_balance >= total_volume:
             # Provide consistent action buttons when balance is sufficient
             action_keyboard = InlineKeyboardMarkup([
-                [build_button("🚀 Begin Transfers", "begin_transfers")],
+                [build_button("� Check Child Wallets", "check_child_balances")],
+                [build_button("�🚀 Begin Transfers", "begin_transfers")],
                 [build_button("💸 Return All Funds", "trigger_return_all_funds")]
             ])
             try:
@@ -943,6 +964,217 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
         return ConversationState.AWAIT_FUNDING
 
 
+async def check_child_wallets_balances_handler(update: Update, context: CallbackContext) -> int:
+    """Check child wallet balances and determine funding needs."""
+    query = update.callback_query
+    user = query.from_user
+    await query.answer()
+
+    # Get session data
+    child_wallets = session_manager.get_session_value(user.id, "child_wallets") or []
+    total_volume = session_manager.get_session_value(user.id, "total_volume") or 0.01
+    
+    if not child_wallets:
+        await query.edit_message_text(
+            format_error_message("No child wallets found. Please start the setup process again."),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ConversationState.PREVIEW_SCHEDULE
+
+    # Calculate minimum balance threshold (base volume per wallet + gas reserve)
+    base_amount_per_wallet = total_volume / len(child_wallets)
+    gas_reserve = 0.0015
+    min_balance_threshold = base_amount_per_wallet + gas_reserve
+
+    await query.edit_message_text(
+        "⏳ **Checking Child Wallet Balances**\n\n"
+        f"Analyzing {len(child_wallets)} child wallets...\n"
+        f"Minimum required balance: {min_balance_threshold:.4f} SOL per wallet",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+    try:
+        # Check child wallet balances
+        balance_check = api_client.check_child_wallets_balances(
+            child_wallets=child_wallets,
+            min_balance_threshold=min_balance_threshold
+        )
+
+        if balance_check.get('status') != 'success':
+            error_msg = balance_check.get('message', 'Unknown error occurred during balance check')
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=format_error_message(f"Balance check failed: {error_msg}"),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return ConversationState.PREVIEW_SCHEDULE
+
+        # Store balance check results in session
+        session_manager.update_session_value(user.id, "child_balance_check", balance_check)
+        
+        # Generate response message and keyboard based on results
+        message_text, keyboard = _format_balance_check_results(balance_check)
+        
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=message_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+        return ConversationState.AWAIT_FUNDING
+
+    except Exception as e:
+        logger.error(f"Child wallet balance check failed for user {user.id}: {e}")
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=format_error_message(f"Failed to check child wallet balances: {str(e)}"),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ConversationState.PREVIEW_SCHEDULE
+
+
+def _format_balance_check_results(balance_check: Dict[str, Any]) -> tuple:
+    """Format balance check results into message text and keyboard."""
+    total_wallets = balance_check['total_wallets']
+    funded_wallets = balance_check['funded_wallets']
+    unfunded_wallets = balance_check['unfunded_wallets']
+    total_existing_balance = balance_check['total_existing_balance']
+    total_funding_needed = balance_check['total_funding_needed']
+    recommendation = balance_check['recommendation']
+    
+    # Build status message
+    status_lines = [
+        "💰 **Child Wallet Balance Check Complete**\n",
+        f"📊 **Summary:**",
+        f"• Total wallets: {total_wallets}",
+        f"• Already funded: {funded_wallets}",
+        f"• Need funding: {unfunded_wallets}",
+        f"• Existing balance: {total_existing_balance:.4f} SOL",
+    ]
+    
+    if total_funding_needed > 0:
+        status_lines.append(f"• Funding needed: {total_funding_needed:.4f} SOL")
+    
+    status_lines.extend([
+        "",
+        f"💡 **Recommendation:** {recommendation['message']}"
+    ])
+    
+    # Build detailed wallet list if partially funded
+    if balance_check['partially_funded']:
+        status_lines.extend([
+            "",
+            "📋 **Wallet Details:**"
+        ])
+        
+        for wallet_info in balance_check['wallet_details']:
+            address = wallet_info['address']
+            balance = wallet_info['balance_sol']
+            is_funded = wallet_info['is_funded']
+            status_emoji = "✅" if is_funded else "❌"
+            status_lines.append(f"{status_emoji} `{address[:8]}...` - {balance:.4f} SOL")
+
+    message_text = "\n".join(status_lines)
+    
+    # Build keyboard based on recommendation
+    keyboard = []
+    
+    if recommendation['action'] == 'skip_funding':
+        # All wallets funded - go straight to volume generation
+        keyboard = [
+            [build_button("🚀 Start Volume Generation", "start_execution")],
+            [build_button("🔄 Recheck Balances", "check_child_balances")],
+            [build_button("⚙️ View Details", "show_wallet_details")]
+        ]
+    elif recommendation['action'] == 'selective_funding':
+        # Some wallets funded - offer selective funding
+        keyboard = [
+            [build_button(recommendation['button_text'], "fund_unfunded_wallets")],
+            [build_button("💰 Fund All Wallets Anyway", "fund_all_wallets")],
+            [build_button("🚀 Start with Funded Wallets", "start_execution")],
+            [build_button("🔄 Recheck Balances", "check_child_balances")]
+        ]
+    else:
+        # No wallets funded - require full funding
+        keyboard = [
+            [build_button(recommendation['button_text'], "fund_child_wallets")],
+            [build_button("🔄 Recheck Balances", "check_child_balances")],
+            [build_button("⚙️ View Details", "show_wallet_details")]
+        ]
+    
+    # Add return button
+    keyboard.append([build_button("« Back", "regenerate_preview")])
+    
+    return message_text, keyboard
+
+
+async def show_wallet_details_handler(update: Update, context: CallbackContext) -> int:
+    """Show detailed information about child wallet balances."""
+    query = update.callback_query
+    user = query.from_user
+    await query.answer()
+
+    # Get balance check results from session
+    balance_check = session_manager.get_session_value(user.id, "child_balance_check")
+    
+    if not balance_check:
+        await query.edit_message_text(
+            format_error_message("Balance check data not found. Please check balances again."),
+            reply_markup=InlineKeyboardMarkup([[build_button("🔄 Check Balances", "check_child_balances")]]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ConversationState.AWAIT_FUNDING
+
+    # Build detailed wallet information
+    detail_lines = [
+        "📋 **Child Wallet Details**\n",
+        f"**Summary:**",
+        f"• Total wallets: {balance_check['total_wallets']}",
+        f"• Already funded: {balance_check['funded_wallets']}",
+        f"• Need funding: {balance_check['unfunded_wallets']}",
+        f"• Total balance: {balance_check['total_existing_balance']:.4f} SOL",
+        ""
+    ]
+
+    if balance_check['total_funding_needed'] > 0:
+        detail_lines.append(f"• Additional funding needed: {balance_check['total_funding_needed']:.4f} SOL")
+        detail_lines.append("")
+
+    detail_lines.append("**Individual Wallets:**")
+    
+    for wallet_info in balance_check['wallet_details']:
+        address = wallet_info['address']
+        balance = wallet_info['balance_sol']
+        is_funded = wallet_info['is_funded']
+        min_required = wallet_info['min_balance_threshold']
+        
+        status_emoji = "✅" if is_funded else "❌"
+        status_text = "Funded" if is_funded else "Needs funding"
+        
+        detail_lines.append(
+            f"{status_emoji} `{address[:8]}...{address[-8:]}`\n"
+            f"   Balance: {balance:.4f} SOL | Required: {min_required:.4f} SOL\n"
+            f"   Status: {status_text}"
+        )
+
+    message_text = "\n".join(detail_lines)
+    
+    # Build keyboard
+    keyboard = [
+        [build_button("🔄 Recheck Balances", "check_child_balances")],
+        [build_button("« Back", "check_child_balances")]
+    ]
+    
+    await query.edit_message_text(
+        message_text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    return ConversationState.AWAIT_FUNDING
+
+
 async def begin_transfers(update: Update, context: CallbackContext) -> int:
     """Entry point after sufficient balance. Placeholder to proceed to child funding/execution.
 
@@ -951,6 +1183,9 @@ async def begin_transfers(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
     await query.answer()
     user = query.from_user
+
+    # Log the current conversation state for debugging
+    logger.info(f"begin_transfers called for user {user.id}")
 
     # Fetch session data
     mother_wallet = (
@@ -1183,10 +1418,14 @@ async def fund_child_wallets_handler(update: Update, context: CallbackContext) -
                 f"base_per_wallet={base_amount_per_wallet}, gas_reserve={gas_reserve}, "
                 f"final_per_wallet={min_required_per_wallet}")
     
+    # Debug: Log the actual child wallets format
+    logger.info(f"Child wallets format: {type(child_wallets)}, sample: {child_wallets[:2] if len(child_wallets) >= 2 else child_wallets}")
+    
     # Attempt readiness check with the calculated amount
     try:
         readiness = api_client.check_spl_swap_readiness(child_wallets=child_wallets, min_swap_amount_sol=base_amount_per_wallet)
         session_manager.update_session_value(user.id, "spl_readiness_check", readiness)
+        logger.info(f"SPL readiness check result: {readiness}")
     except Exception as e:
         logger.warning(f"Readiness check failed prior to funding: {e}")
 
@@ -1200,6 +1439,13 @@ async def fund_child_wallets_handler(update: Update, context: CallbackContext) -
     )
 
     try:
+        logger.info(f"Calling api_client.fund_child_wallets with:")
+        logger.info(f"  - mother_wallet: {mother_wallet}")
+        logger.info(f"  - child_wallets (count): {len(child_wallets)}")
+        logger.info(f"  - token_address: So11111111111111111111111111111111111111112")
+        logger.info(f"  - amount_per_wallet: {min_required_per_wallet}")
+        logger.info(f"  - verify_transfers: True")
+        
         funding_result = api_client.fund_child_wallets(
             mother_wallet=mother_wallet,
             child_wallets=child_wallets,
@@ -1208,6 +1454,8 @@ async def fund_child_wallets_handler(update: Update, context: CallbackContext) -
             mother_private_key=mother_private_key,
             verify_transfers=True
         )
+        
+        logger.info(f"Funding result received: {funding_result}")
 
         # Normalize result fields
         successful_transfers = funding_result.get("successful_transfers")
@@ -1384,6 +1632,227 @@ async def regenerate_preview(update: Update, context: CallbackContext) -> int:
 
 async def start_bundler_management_workflow(update: Update, context: CallbackContext) -> int:
     """
+    Start the bundler management workflow.
+    
+    Args:
+        update: The update object
+        context: The context object
+        
+    Returns:
+        The next state
+    """
+    user = update.callback_query.from_user
+    query = update.callback_query
+    await query.answer()
+
+    # Build the bundler management keyboard
+    keyboard = [
+        [build_button("📊 Token List & Trading", f"{CallbackPrefix.TOKEN_TRADING}")],
+        [build_button("💼 Airdrop Wallet Selection", f"{CallbackPrefix.AIRDROP_WALLET_SELECTION}")],
+        [build_button("💰 Wallet Balance Overview", f"{CallbackPrefix.WALLET_BALANCE_OVERVIEW}")],
+        [build_button("« Back to Activities", "back_to_activities")]
+    ]
+
+    await query.edit_message_text(
+        format_bundler_management_selection_message(),
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    return ConversationState.BUNDLER_MANAGEMENT
+
+
+async def start_spl_volume_execution(update: Update, context: CallbackContext) -> int:
+    """Handle the start of SPL volume execution after child wallets are funded."""
+    query = update.callback_query
+    user = query.from_user
+    await query.answer()
+
+    # Get session data with comprehensive logging
+    mother_wallet = (
+        session_manager.get_session_value(user.id, "mother_wallet_address")
+        or session_manager.get_session_value(user.id, "mother_wallet")
+    )
+    child_wallets = session_manager.get_session_value(user.id, "child_wallets") or []
+    child_wallets_full = session_manager.get_session_value(user.id, "child_wallets_full") or []
+    token_address = session_manager.get_session_value(user.id, "token_address")
+    total_volume = session_manager.get_session_value(user.id, "total_volume")
+    schedule = session_manager.get_session_value(user.id, "schedule")
+    
+    # Enhanced logging for debugging
+    logger.info(f"SPL Volume Execution Debug - User {user.id}:")
+    logger.info(f"  - mother_wallet: {mother_wallet}")
+    logger.info(f"  - child_wallets count: {len(child_wallets) if child_wallets else 0}")
+    logger.info(f"  - child_wallets_full count: {len(child_wallets_full) if child_wallets_full else 0}")
+    logger.info(f"  - token_address: {token_address}")
+    logger.info(f"  - total_volume: {total_volume}")
+    logger.info(f"  - schedule: {bool(schedule)}")
+
+    # Try to recover missing data if child_wallets_full is empty but child_wallets exists
+    if child_wallets and not child_wallets_full:
+        logger.warning(f"Attempting to recover child_wallets_full data for user {user.id}")
+        try:
+            # Load child wallets from API client saved data
+            if mother_wallet:
+                recovered_child_wallets = api_client.load_child_wallets(mother_wallet)
+                if recovered_child_wallets:
+                    child_wallets_full = recovered_child_wallets
+                    session_manager.update_session_value(user.id, "child_wallets_full", child_wallets_full)
+                    logger.info(f"Recovered {len(child_wallets_full)} child wallets with private keys")
+        except Exception as e:
+            logger.error(f"Failed to recover child wallets: {str(e)}")
+
+    # Generate mock schedule if missing but we have other data
+    if not schedule and child_wallets and token_address and total_volume:
+        logger.warning(f"Generating mock schedule for user {user.id}")
+        try:
+            # Create a simple mock schedule using API client's generate_schedule
+            mock_schedule = api_client.generate_schedule(
+                mother_wallet=mother_wallet,
+                child_wallets=child_wallets,
+                token_address=token_address,
+                total_volume=total_volume
+            )
+            schedule = mock_schedule
+            session_manager.update_session_value(user.id, "schedule", schedule)
+            logger.info(f"Generated mock schedule with {len(schedule.get('transfers', []))} transfers")
+        except Exception as e:
+            logger.error(f"Failed to generate mock schedule: {str(e)}")
+
+    # Check critical requirements
+    if not all([mother_wallet, child_wallets, token_address, total_volume]):
+        missing_items = []
+        if not mother_wallet: missing_items.append("mother_wallet")
+        if not child_wallets: missing_items.append("child_wallets") 
+        if not token_address: missing_items.append("token_address")
+        if not total_volume: missing_items.append("total_volume")
+        
+        error_msg = f"Missing required data: {', '.join(missing_items)}. Please start over."
+        logger.error(f"SPL Volume execution failed for user {user.id}: {error_msg}")
+        
+        await query.edit_message_text(
+            format_error_message(error_msg),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ConversationState.AWAIT_FUNDING
+
+    # Extract trades from schedule and prepare child wallet private keys
+    trades = schedule.get("transfers", []) if schedule else []
+    if not trades:
+        # Generate simple mock trades if none available
+        logger.warning(f"No trades in schedule, generating simple mock trades for user {user.id}")
+        import random
+        num_trades = min(len(child_wallets) * 2, 10)  # Max 10 trades
+        trades = []
+        for i in range(num_trades):
+            sender_idx = i % len(child_wallets)
+            receiver_idx = (i + 1) % len(child_wallets)
+            trade_amount = total_volume / num_trades  # Distribute total volume
+            trades.append({
+                "from": child_wallets[sender_idx],
+                "to": child_wallets[receiver_idx],
+                "amount": trade_amount,
+                "wallet_index": sender_idx
+            })
+
+    # Handle child wallet private keys
+    child_private_keys = []
+    if child_wallets_full:
+        child_private_keys = [
+            wallet.get("private_key", wallet.get("privateKeyBase58", "")) 
+            for wallet in child_wallets_full
+        ]
+    
+    # If we don't have private keys, try alternative approach
+    if not child_private_keys or any(not key for key in child_private_keys):
+        logger.warning(f"Missing or incomplete private keys for user {user.id}, attempting recovery")
+        # Try to load from mother wallet private key and derive child keys
+        mother_private_key = session_manager.get_session_value(user.id, "mother_wallet_private_key")
+        if mother_private_key and child_wallets:
+            try:
+                # Re-derive child wallets with private keys
+                logger.info(f"Re-deriving child wallets for user {user.id}")
+                full_child_wallets = api_client.derive_child_wallets(
+                    n=len(child_wallets),
+                    mother_wallet=mother_wallet
+                )
+                if full_child_wallets and len(full_child_wallets) >= len(child_wallets):
+                    child_wallets_full = full_child_wallets
+                    child_private_keys = [
+                        wallet.get("private_key", wallet.get("privateKeyBase58", "")) 
+                        for wallet in child_wallets_full
+                    ]
+                    # Update session with recovered data
+                    session_manager.update_session_value(user.id, "child_wallets_full", child_wallets_full)
+                    logger.info(f"Successfully re-derived {len(child_private_keys)} child wallet private keys")
+            except Exception as e:
+                logger.error(f"Failed to re-derive child wallets: {str(e)}")
+    
+    # Final validation for private keys
+    if not child_private_keys or any(not key for key in child_private_keys):
+        error_msg = "Missing child wallet private keys. Please regenerate child wallets."
+        logger.error(f"SPL Volume execution failed for user {user.id}: {error_msg}")
+        
+        await query.edit_message_text(
+            format_error_message(error_msg),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ConversationState.AWAIT_FUNDING
+
+    # Start the volume generation process
+    await query.edit_message_text(
+        "🚀 **Starting SPL Volume Generation**\n\n"
+        f"Token: `{token_address}`\n"
+        f"Total Volume: {total_volume} SOL\n"
+        f"Child Wallets: {len(child_wallets)}\n"
+        f"Trades Planned: {len(trades)}\n\n"
+        "⏳ Initializing volume generation...",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+    # Generate a run ID for this execution
+    import uuid
+    run_id = f"spl_volume_{user.id}_{int(time.time())}"
+    session_manager.update_session_value(user.id, "current_run_id", run_id)
+
+    # Comprehensive logging before job start
+    logger.info(f"Starting volume generation job for user {user.id}")
+    logger.info(f"Job data validation:")
+    logger.info(f"  - run_id: {run_id}")
+    logger.info(f"  - mother_wallet: {mother_wallet}")
+    logger.info(f"  - child_wallets: {len(child_wallets)}")
+    logger.info(f"  - child_private_keys: {len(child_private_keys)}")
+    logger.info(f"  - token_address: {token_address}")
+    logger.info(f"  - total_volume: {total_volume}")
+    logger.info(f"  - trades: {len(trades)}")
+
+    # Start the volume generation job in the background
+    from bot.handlers.start_handler import volume_generation_job
+    context.job_queue.run_once(
+        volume_generation_job,
+        when=1,  # Start in 1 second
+        data={
+            'user_id': user.id,
+            'run_id': run_id,
+            'mother_wallet': mother_wallet,
+            'child_wallets': child_wallets,
+            'child_private_keys': child_private_keys,  
+            'token_address': token_address,
+            'total_volume': total_volume,
+            'trades': trades,  
+            'schedule': schedule
+        },
+        name=f"volume_job_{user.id}"
+    )
+
+    logger.info(f"✅ Successfully started volume generation job for user {user.id} with run_id {run_id}")
+    
+    # Return to a waiting state while the job runs
+    return ConversationState.AWAIT_FUNDING
+
+
+async def start_bundler_management_workflow(update: Update, context: CallbackContext) -> int:
+    """
     Start the bundler management workflow for token management.
     
     Args:
@@ -1523,13 +1992,22 @@ def register_start_handler(application):
             ],
             ConversationState.PREVIEW_SCHEDULE: [
                 CallbackQueryHandler(check_balance, pattern=r"^check_balance$"),
-                CallbackQueryHandler(regenerate_preview, pattern=r"^regenerate_preview$")
+                CallbackQueryHandler(check_child_wallets_balances_handler, pattern=r"^check_child_balances$"),
+                CallbackQueryHandler(regenerate_preview, pattern=r"^regenerate_preview$"),
+                CallbackQueryHandler(begin_transfers, pattern=r"^begin_transfers$"),
+                CallbackQueryHandler(trigger_return_all_funds, pattern=r"^trigger_return_all_funds$")
             ],
             ConversationState.AWAIT_FUNDING: [
                 CallbackQueryHandler(check_balance, pattern=r"^check_balance$"),
+                CallbackQueryHandler(check_child_wallets_balances_handler, pattern=r"^check_child_balances$"),
+                CallbackQueryHandler(show_wallet_details_handler, pattern=r"^show_wallet_details$"),
                 CallbackQueryHandler(return_child_funds_handler, pattern=r"^return_child_funds$"),
                 CallbackQueryHandler(trigger_return_all_funds, pattern=r"^trigger_return_all_funds$"),
-                CallbackQueryHandler(begin_transfers, pattern=r"^begin_transfers$")
+                CallbackQueryHandler(begin_transfers, pattern=r"^begin_transfers$"),
+                CallbackQueryHandler(fund_child_wallets_handler, pattern=r"^fund_child_wallets$"),
+                CallbackQueryHandler(fund_child_wallets_handler, pattern=r"^fund_unfunded_wallets$"),
+                CallbackQueryHandler(fund_child_wallets_handler, pattern=r"^fund_all_wallets$"),
+                CallbackQueryHandler(start_spl_volume_execution, pattern=r"^start_execution$")
             ],
             ConversationState.BUNDLER_MANAGEMENT: [
                 CallbackQueryHandler(bundler_management_choice)

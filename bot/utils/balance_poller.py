@@ -18,6 +18,7 @@ class BalancePoller:
         """Initialize the balance poller."""
         self._polling_tasks: Dict[str, asyncio.Task] = {}
         self._last_balances: Dict[str, float] = {}
+        self._last_check_times: Dict[str, float] = {}  # Track last check times to prevent spam
     
     async def start_polling(
         self,
@@ -94,8 +95,24 @@ class BalancePoller:
         
         if task_id in self._last_balances:
             del self._last_balances[task_id]
+        if task_id in self._last_check_times:
+            del self._last_check_times[task_id]
             
         logger.info(f"Stopped balance polling for {task_id}")
+    
+    def get_cached_balance(self, wallet_address: str, token_address: str = None) -> Optional[float]:
+        """
+        Get the cached balance if available, to avoid duplicate API calls.
+        
+        Args:
+            wallet_address: Wallet address 
+            token_address: Token contract address
+            
+        Returns:
+            Cached balance or None if not available
+        """
+        task_id = f"{wallet_address}_{token_address or 'So11111111111111111111111111111111111111112'}"
+        return self._last_balances.get(task_id)
     
     async def stop_all(self):
         """Stop all polling tasks."""
@@ -129,6 +146,17 @@ class BalancePoller:
         
         while True:
             try:
+                import time
+                current_time = time.time()
+                
+                # Rate limit: Don't check more than once every 2 seconds per wallet
+                last_check = self._last_check_times.get(task_id, 0)
+                if current_time - last_check < 2.0:
+                    await asyncio.sleep(0.5)
+                    continue
+                
+                self._last_check_times[task_id] = current_time
+                
                 # Get current balance
                 balance_info = api_client.check_balance(wallet_address, token_address)
                 

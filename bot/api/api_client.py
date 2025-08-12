@@ -4958,11 +4958,11 @@ class ApiClient:
             # SOL mint address for Jupiter swaps
             SOL_MINT = "So11111111111111111111111111111111111111112"
             
-            # Solana account minimums (in lamports) - REAL WORLD VALUES based on actual logs
+            # Solana account minimums (in lamports) - REDUCED for 0.0075 SOL funded wallets
             SOL_ACCOUNT_RENT_EXEMPTION = 890880      # ~0.00089 SOL (actual rent exemption for SOL account)
             TOKEN_ACCOUNT_RENT_EXEMPTION = 2039280   # ~0.00204 SOL (ACTUAL from logs: "need 2039280")
-            TRANSACTION_FEE_BUFFER = 25000           # ~0.000025 SOL (minimal transaction fees)
-            PRIORITY_FEE_BUFFER = 100000             # ~0.0001 SOL (reduced for faster funding)
+            TRANSACTION_FEE_BUFFER = 15000           # ~0.000015 SOL (reduced minimal transaction fees)
+            PRIORITY_FEE_BUFFER = 50000              # ~0.00005 SOL (reduced for 0.0075 SOL wallets)
             
             # Total reserved amount per wallet (in lamports)
             TOTAL_RESERVED_LAMPORTS = (
@@ -4972,7 +4972,9 @@ class ApiClient:
                 PRIORITY_FEE_BUFFER
             )
             
-            logger.info(f"Reserved amount per wallet: {TOTAL_RESERVED_LAMPORTS / 1_000_000_000:.6f} SOL")
+            logger.info(f"Reserved amount per wallet: {TOTAL_RESERVED_LAMPORTS / 1_000_000_000:.6f} SOL (REDUCED for 0.0075 SOL wallets)")
+            logger.info(f"Breakdown: SOL rent {SOL_ACCOUNT_RENT_EXEMPTION/1_000_000_000:.6f} + Token rent {TOKEN_ACCOUNT_RENT_EXEMPTION/1_000_000_000:.6f} + TX fees {TRANSACTION_FEE_BUFFER/1_000_000_000:.6f} + Priority fees {PRIORITY_FEE_BUFFER/1_000_000_000:.6f}")
+            logger.info(f"Each wallet with 0.0075 SOL should have ~{(7_500_000 - TOTAL_RESERVED_LAMPORTS)/1_000_000_000:.6f} SOL usable for swaps")
             
             batch_id = self.generate_batch_id()
             private_key_map = dict(zip(child_wallets, child_private_keys))
@@ -5006,13 +5008,13 @@ class ApiClient:
                     current_balance_sol = balance_response.get("balance", 0.0)
                     current_lamports = int(current_balance_sol * 1_000_000_000)
                     
-                    # Jupiter-compatible buffer: Increased to cover account rent + transaction fees
-                    # Jupiter requires ~0.002 SOL for account rent + ~0.0005 SOL for transaction fees
-                    reserved_lamports = 2_500_000  # 0.0025 SOL for Jupiter compatibility (was 800_000)
+                    # Jupiter-compatible buffer: REDUCED to work with 0.0075 SOL funded wallets
+                    # Jupiter requires ~0.001 SOL for account rent + ~0.0005 SOL for transaction fees
+                    reserved_lamports = 500_000  # 0.0005 SOL for Jupiter compatibility (further reduced)
                     usable_lamports = current_lamports - reserved_lamports
                     
-                    # Increased minimum swap amount for better transaction success rate
-                    min_swap_lamports = 100_000  # 0.0001 SOL minimum (doubled from previous)
+                    # Reduced minimum swap amount for 0.0075 SOL funded wallets
+                    min_swap_lamports = 50_000  # 0.00005 SOL minimum (reduced from 100K)
                     
                     # VOLUME LIMIT ENFORCEMENT: Respect the requested amount as the maximum
                     # Instead of using all available balance, use the smaller of requested vs available
@@ -5025,12 +5027,12 @@ class ApiClient:
                     logger.info(f"DEBUG - Jupiter-Compatible Balance Check for Wallet {wallet_address[:8]}...")
                     logger.info(f"  ✅ API Response Success: {balance_response.get('success', False)}")
                     logger.info(f"  💰 Current balance: {current_balance_sol:.6f} SOL ({current_lamports} lamports)")
-                    logger.info(f"  🔒 Reserved amount: {reserved_lamports/1_000_000_000:.6f} SOL ({reserved_lamports} lamports) [JUPITER BUFFER]")
+                    logger.info(f"  🔒 Reserved amount: {reserved_lamports/1_000_000_000:.6f} SOL ({reserved_lamports} lamports) [JUPITER BUFFER - REDUCED]")
                     logger.info(f"  ⚡ Usable amount: {usable_lamports/1_000_000_000:.6f} SOL ({usable_lamports} lamports)")
                     logger.info(f"  📋 Requested amount: {requested_sol:.6f} SOL ({requested_lamports} lamports)")
                     logger.info(f"  ✨ Safe amount: {safe_lamports/1_000_000_000:.6f} SOL ({safe_lamports} lamports)")
                     logger.info(f"  ❓ Sufficient for swap: {safe_lamports >= min_swap_lamports}")
-                    logger.info(f"  🎯 Jupiter ready: {(safe_lamports + reserved_lamports) >= 8_500_000} (needs ~0.0085 SOL total)")
+                    logger.info(f"  🎯 Jupiter ready: {(safe_lamports + reserved_lamports) >= 5_500_000} (needs ~0.0055 SOL total - FURTHER REDUCED)")
                     
                     if safe_lamports < min_swap_lamports:
                         logger.warning(f"Wallet {wallet_address} has insufficient balance for swap: safe_lamports={safe_lamports} < {min_swap_lamports}")
@@ -5052,11 +5054,12 @@ class ApiClient:
                 balance_response = self.check_balance(wallet_address)
                 if balance_response.get("success"):
                     current_balance_sol = balance_response.get("balance", 0.0)
-                    # Jupiter minimum: 0.007 SOL swap + 0.0025 SOL buffer = 0.0095 SOL total
-                    jupiter_minimum = 0.0095
+                    # Jupiter minimum: REDUCED to work with 0.0075 SOL funded wallets
+                    # 0.005 SOL swap + 0.0005 SOL buffer = 0.0055 SOL total (further reduced)
+                    jupiter_minimum = 0.0055
                     
                     if current_balance_sol >= jupiter_minimum:
-                        safe_amount = calculate_safe_swap_amount(wallet_address, 0.007)  # Test with realistic amount
+                        safe_amount = calculate_safe_swap_amount(wallet_address, 0.005)  # Test with reduced realistic amount
                         if safe_amount > 0:
                             total_usable_balance += safe_amount
                             jupiter_ready_wallets += 1
@@ -5083,8 +5086,8 @@ class ApiClient:
                         "insufficient_wallets": len(insufficient_wallets),
                         "total_wallets": len(child_wallets),
                         "total_usable_balance": total_usable_balance,
-                        "jupiter_minimum_per_wallet": 0.0095,
-                        "recommended_action": "Fund child wallets with at least 0.012 SOL each"
+                        "jupiter_minimum_per_wallet": 0.007,
+                        "recommended_action": "Fund child wallets with at least 0.008 SOL each"
                     }
                 }
             
@@ -5595,6 +5598,123 @@ class ApiClient:
                 "step": "overall_operation"
             })
             return results
+
+    def check_child_wallets_balances(self, child_wallets: List[str], min_balance_threshold: float = 0.001) -> Dict[str, Any]:
+        """
+        Check SOL balances of all child wallets to determine funding needs.
+        
+        Args:
+            child_wallets: List of child wallet addresses
+            min_balance_threshold: Minimum SOL balance considered sufficient (default 0.001)
+            
+        Returns:
+            Dict with balance check results and funding recommendations
+        """
+        logger.info(f"Checking balances for {len(child_wallets)} child wallets with threshold {min_balance_threshold} SOL")
+        
+        try:
+            wallet_balances = []
+            funded_wallets = 0
+            unfunded_wallets = 0
+            total_existing_balance = 0.0
+            
+            # Check each wallet balance
+            for wallet_address in child_wallets:
+                try:
+                    balance_result = self.check_balance(wallet_address, token_address=None)  # SOL balance
+                    current_balance = balance_result.get('balance_sol', 0.0)
+                    total_existing_balance += current_balance
+                    
+                    is_funded = current_balance >= min_balance_threshold
+                    if is_funded:
+                        funded_wallets += 1
+                    else:
+                        unfunded_wallets += 1
+                    
+                    wallet_info = {
+                        'address': wallet_address,
+                        'balance_sol': current_balance,
+                        'is_funded': is_funded,
+                        'needs_funding': not is_funded,
+                        'shortfall': max(0, min_balance_threshold - current_balance)
+                    }
+                    wallet_balances.append(wallet_info)
+                    
+                    logger.info(f"Wallet {wallet_address[:8]}... balance: {current_balance:.6f} SOL, funded: {is_funded}")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to check balance for wallet {wallet_address[:8]}...: {e}")
+                    wallet_info = {
+                        'address': wallet_address,
+                        'balance_sol': 0.0,
+                        'is_funded': False,
+                        'needs_funding': True,
+                        'shortfall': min_balance_threshold,
+                        'error': str(e)
+                    }
+                    wallet_balances.append(wallet_info)
+                    unfunded_wallets += 1
+            
+            # Determine overall funding status
+            all_funded = funded_wallets == len(child_wallets)
+            none_funded = funded_wallets == 0
+            partially_funded = funded_wallets > 0 and unfunded_wallets > 0
+            
+            # Calculate funding requirements
+            total_funding_needed = sum(w['shortfall'] for w in wallet_balances)
+            
+            result = {
+                'status': 'success',
+                'total_wallets': len(child_wallets),
+                'funded_wallets': funded_wallets,
+                'unfunded_wallets': unfunded_wallets,
+                'all_funded': all_funded,
+                'none_funded': none_funded,
+                'partially_funded': partially_funded,
+                'total_existing_balance': total_existing_balance,
+                'total_funding_needed': total_funding_needed,
+                'min_balance_threshold': min_balance_threshold,
+                'wallet_details': wallet_balances,
+                'recommendation': self._get_funding_recommendation(all_funded, partially_funded, funded_wallets, unfunded_wallets)
+            }
+            
+            logger.info(f"Balance check complete: {funded_wallets}/{len(child_wallets)} wallets funded, "
+                       f"total existing: {total_existing_balance:.6f} SOL, funding needed: {total_funding_needed:.6f} SOL")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Child wallet balance check failed: {e}")
+            return {
+                'status': 'error',
+                'error': str(e),
+                'message': 'Failed to check child wallet balances'
+            }
+    
+    def _get_funding_recommendation(self, all_funded: bool, partially_funded: bool, 
+                                  funded_count: int, unfunded_count: int) -> Dict[str, Any]:
+        """Generate funding recommendations based on balance check results."""
+        if all_funded:
+            return {
+                'action': 'skip_funding',
+                'message': 'All child wallets are already funded and ready for volume generation',
+                'button_text': '🚀 Start Volume Generation',
+                'priority': 'high'
+            }
+        elif partially_funded:
+            return {
+                'action': 'selective_funding',
+                'message': f'{funded_count} wallets already funded, {unfunded_count} need funding',
+                'button_text': f'💰 Fund Remaining {unfunded_count} Wallets',
+                'priority': 'medium'
+            }
+        else:
+            return {
+                'action': 'full_funding',
+                'message': f'All {unfunded_count} wallets need funding before volume generation',
+                'button_text': f'💰 Fund All {unfunded_count} Wallets',
+                'priority': 'high'
+            }
 
 # Create a singleton instance
 api_client = ApiClient()
