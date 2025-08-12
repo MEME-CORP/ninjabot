@@ -305,7 +305,7 @@ class ApiClient:
     # ---------------------------------------------------------------------
     # SPL SWAP READINESS (ADDED)
     # ---------------------------------------------------------------------
-    def check_spl_swap_readiness(self, child_wallets: List[str], min_swap_amount_sol: float = 0.0001) -> Dict[str, Any]:
+    def check_spl_swap_readiness(self, child_wallets: List[str], min_swap_amount_sol: float) -> Dict[str, Any]:
         """Compute readiness / minimum funding requirements for SPL swap volume.
 
         This mimics what a backend endpoint might return while keeping logic
@@ -315,7 +315,8 @@ class ApiClient:
         - Ensure each child wallet has enough usable SOL after reserving a
           conservative gas buffer.
         - Previously reserve was too high (0.003050). We reduce to ~0.0015 SOL.
-        - Allow user's intended volume amounts without excessive floors.
+        - Recommend at least 0.005 SOL total funding per wallet (floor) or
+          (min_swap_amount + gas_reserve) whichever is higher.
 
         Args:
             child_wallets: List of child wallet public keys.
@@ -326,19 +327,13 @@ class ApiClient:
         """
         try:
             wallet_count = len(child_wallets)
-            gas_reserve_per_wallet = 0.0015  # Conservative gas reserve for multiple transactions
-            
-            # Set absolute minimum for basic blockchain operations (rent + basic fees)
-            absolute_minimum = 0.0016  # Just above gas reserve for basic functionality
-            
+            gas_reserve_per_wallet = 0.0015  # Reduced per analysis
+            minimum_floor_per_wallet = 0.005  # Increased funding baseline
+
             # The usable swap amount must remain after gas reserve.
             # So funding >= min_swap_amount + gas_reserve.
             computed_required = min_swap_amount_sol + gas_reserve_per_wallet
-            min_required_per_wallet = max(absolute_minimum, computed_required)
-
-            logger.info(f"Readiness check: min_swap={min_swap_amount_sol}, gas_reserve={gas_reserve_per_wallet}, "
-                       f"absolute_minimum={absolute_minimum}, computed={computed_required}, "
-                       f"final={min_required_per_wallet}")
+            min_required_per_wallet = max(minimum_floor_per_wallet, computed_required)
 
             return {
                 "status": "ready",
@@ -350,16 +345,15 @@ class ApiClient:
             }
         except Exception as e:
             logger.warning(f"Failed readiness computation: {e}")
-            # Fallback to reasonable defaults based on intended swap amount
-            fallback_per_wallet = max(0.0016, min_swap_amount_sol + 0.0015)
+            # Fallback to safe defaults
             return {
                 "status": "error",
                 "error": str(e),
                 "child_wallets_count": len(child_wallets),
                 "gas_reserve_per_wallet": 0.0015,
                 "min_swap_amount_sol": min_swap_amount_sol,
-                "min_required_per_wallet": fallback_per_wallet,
-                "recommended_funding_total": fallback_per_wallet * len(child_wallets)
+                "min_required_per_wallet": 0.005,
+                "recommended_funding_total": 0.005 * len(child_wallets)
             }
     
     def check_api_health(self, mother_wallet_address: str = None) -> Dict[str, Any]:
@@ -1817,17 +1811,14 @@ class ApiClient:
     def fund_child_wallets(self, mother_wallet: str, child_wallets: List[str], token_address: str, amount_per_wallet: float, 
                       mother_private_key: str = None, priority_fee: int = 25000, batch_id: str = None,
                       idempotency_key: str = None, verify_transfers: bool = True) -> Dict[str, Any]:
-        """Fund child wallets with calculated amounts based on volume requirements"""
+        """Fund child wallets with increased minimum amounts"""
         
-        # Calculate minimum required amount: basic swap minimum (0.0001) + gas buffer (0.0015) 
-        absolute_minimum = 0.0016  # Absolute minimum for basic functionality
+        # Fix 3: Increase minimum funding amount for Jupiter compatibility
+        min_funding_amount = 0.012  # Increased to cover Jupiter swap + rent + fees (was 0.005)
         
-        # Only enforce absolute minimum, don't override user's volume-based calculations
-        if amount_per_wallet < absolute_minimum:
-            logger.warning(f"Requested funding amount {amount_per_wallet} is below absolute minimum {absolute_minimum}, adjusting...")
-            amount_per_wallet = absolute_minimum
-        else:
-            logger.info(f"Using calculated funding amount: {amount_per_wallet} SOL per wallet")
+        if amount_per_wallet < min_funding_amount:
+            logger.warning(f"Requested funding amount {amount_per_wallet} is below minimum {min_funding_amount}, adjusting...")
+            amount_per_wallet = min_funding_amount
             
         if self.use_mock:
             # Mock successful funding operation
@@ -2679,15 +2670,11 @@ class ApiClient:
                     
                     # Consider successful if child wallet balance decreased significantly
                     balance_decrease = initial_sender_balance - final_balance
-                    min_threshold = min(0.0005, initial_sender_balance * 0.1) if initial_sender_balance > 0 else 0.0001
-                    very_low_final_balance = final_balance < 0.002  # Less than typical gas reserve
-                    meaningful_decrease = balance_decrease > min_threshold
-                    
-                    if meaningful_decrease or (balance_decrease > 0 and very_low_final_balance):
+                    if balance_decrease > 0.0005:  # More than gas fee amount
                         verified = True
-                        logger.success(f"Fund return verified: child wallet balance decreased by {balance_decrease:.6f} SOL (threshold: {min_threshold:.6f}, final: {final_balance:.6f})")
+                        logger.success(f"Fund return verified: child wallet balance decreased by {balance_decrease:.6f} SOL")
                     else:
-                        logger.warning(f"Fund return verification failed: insufficient balance decrease ({balance_decrease:.6f} SOL, threshold: {min_threshold:.6f}, final: {final_balance:.6f})")
+                        logger.warning(f"Fund return verification failed: insufficient balance decrease ({balance_decrease:.6f} SOL)")
                         
                 except Exception as e:
                     logger.warning(f"Error during balance verification: {str(e)}")
@@ -3884,15 +3871,11 @@ class ApiClient:
                     
                     # Consider successful if child wallet balance decreased significantly
                     balance_decrease = initial_sender_balance - final_balance
-                    min_threshold = min(0.0005, initial_sender_balance * 0.1) if initial_sender_balance > 0 else 0.0001
-                    very_low_final_balance = final_balance < 0.002  # Less than typical gas reserve
-                    meaningful_decrease = balance_decrease > min_threshold
-                    
-                    if meaningful_decrease or (balance_decrease > 0 and very_low_final_balance):
+                    if balance_decrease > 0.0005:  # More than gas fee amount
                         verified = True
-                        logger.success(f"Fund return verified: child wallet balance decreased by {balance_decrease:.6f} SOL (threshold: {min_threshold:.6f}, final: {final_balance:.6f})")
+                        logger.success(f"Fund return verified: child wallet balance decreased by {balance_decrease:.6f} SOL")
                     else:
-                        logger.warning(f"Fund return verification failed: insufficient balance decrease ({balance_decrease:.6f} SOL, threshold: {min_threshold:.6f}, final: {final_balance:.6f})")
+                        logger.warning(f"Fund return verification failed: insufficient balance decrease ({balance_decrease:.6f} SOL)")
                         
                 except Exception as e:
                     logger.warning(f"Error during balance verification: {str(e)}")
@@ -5385,6 +5368,126 @@ class ApiClient:
                 "token_info": None
             }
     
+    def check_spl_swap_readiness(self, child_wallets: List[str], min_swap_amount_sol: float = 0.0001) -> Dict[str, Any]:
+        """
+        Check if child wallets have sufficient balance for SPL swaps.
+        
+        Args:
+            child_wallets: List of child wallet addresses
+            min_swap_amount_sol: Minimum SOL amount needed per swap
+            
+        Returns:
+            Dictionary with readiness status and recommendations
+        """
+        # Solana account minimums (in lamports) - REAL WORLD VALUES based on actual logs
+        SOL_ACCOUNT_RENT_EXEMPTION = 890880      # ~0.00089 SOL (actual rent exemption for SOL account)
+        TOKEN_ACCOUNT_RENT_EXEMPTION = 2039280   # ~0.00204 SOL (ACTUAL from logs: "need 2039280")
+        TRANSACTION_FEE_BUFFER = 25000           # ~0.000025 SOL (minimal transaction fees)
+        PRIORITY_FEE_BUFFER = 100000             # ~0.0001 SOL (reduced for faster funding)
+        
+        # Total reserved amount per wallet (in lamports)
+        TOTAL_RESERVED_LAMPORTS = (
+            SOL_ACCOUNT_RENT_EXEMPTION + 
+            TOKEN_ACCOUNT_RENT_EXEMPTION + 
+            TRANSACTION_FEE_BUFFER + 
+            PRIORITY_FEE_BUFFER
+        )
+        
+        min_required_lamports = TOTAL_RESERVED_LAMPORTS + int(min_swap_amount_sol * 1_000_000_000)
+        min_required_sol = min_required_lamports / 1_000_000_000
+        
+        results = {
+            "status": "checking",
+            "total_wallets": len(child_wallets),
+            "wallets_ready": 0,
+            "wallets_insufficient": 0,
+            "min_required_per_wallet": min_required_sol,
+            "reserved_amount_per_wallet": TOTAL_RESERVED_LAMPORTS / 1_000_000_000,
+            "wallet_details": [],
+            "recommendations": []
+        }
+        
+        insufficient_wallets = []
+        total_additional_needed = 0
+        
+        for wallet_address in child_wallets:
+            try:
+                # Get current SOL balance
+                balance_info = self.check_balance(wallet_address)
+                
+                # Extract SOL balance from the formatted response
+                current_sol = 0
+                if balance_info and 'balances' in balance_info:
+                    for balance in balance_info['balances']:
+                        if balance.get('symbol') == 'SOL' or balance.get('token') == "So11111111111111111111111111111111111111112":
+                            current_sol = balance.get('amount', 0)
+                            break
+                else:
+                    # Fallback: try direct extraction for backward compatibility
+                    if balance_info:
+                        current_sol = balance_info.get("balanceSol", 0)
+                current_lamports = int(current_sol * 1_000_000_000)
+                
+                # Calculate usable amount for swaps
+                usable_lamports = current_lamports - TOTAL_RESERVED_LAMPORTS
+                usable_sol = max(0, usable_lamports / 1_000_000_000)
+                
+                is_ready = current_lamports >= min_required_lamports
+                
+                wallet_detail = {
+                    "address": wallet_address,
+                    "current_balance_sol": current_sol,
+                    "usable_for_swaps_sol": usable_sol,
+                    "is_ready": is_ready,
+                    "shortfall_sol": max(0, min_required_sol - current_sol)
+                }
+                
+                results["wallet_details"].append(wallet_detail)
+                
+                if is_ready:
+                    results["wallets_ready"] += 1
+                else:
+                    results["wallets_insufficient"] += 1
+                    insufficient_wallets.append(wallet_address)
+                    total_additional_needed += wallet_detail["shortfall_sol"]
+                    
+            except Exception as e:
+                logger.error(f"Error checking balance for wallet {wallet_address}: {str(e)}")
+                results["wallets_insufficient"] += 1
+                insufficient_wallets.append(wallet_address)
+        
+        # Determine overall status
+        if results["wallets_ready"] == results["total_wallets"]:
+            results["status"] = "ready"
+        elif results["wallets_ready"] > 0:
+            results["status"] = "partially_ready"
+        else:
+            results["status"] = "not_ready"
+        
+        # Generate recommendations
+        if results["wallets_insufficient"] > 0:
+            results["recommendations"].append(
+                f"⚠️ {results['wallets_insufficient']} out of {results['total_wallets']} "
+                f"child wallets need more SOL for SPL swaps."
+            )
+            results["recommendations"].append(
+                f"💰 Each wallet needs at least {min_required_sol:.6f} SOL "
+                f"({TOTAL_RESERVED_LAMPORTS / 1_000_000_000:.6f} SOL for rent/fees + "
+                f"{min_swap_amount_sol:.6f} SOL for swaps)."
+            )
+            results["recommendations"].append(
+                f"📈 Total additional funding needed: {total_additional_needed:.6f} SOL"
+            )
+            results["recommendations"].append(
+                "🔧 Solution: Fund child wallets with more SOL before starting SPL volume generation."
+            )
+        else:
+            results["recommendations"].append(
+                "✅ All child wallets have sufficient balance for SPL swaps!"
+            )
+        
+        return results
+
     def get_spl_token_balance(self, wallet_address: str, mint_address: str) -> Dict[str, Any]:
         """
         Get SPL token balance for a specific wallet and token mint.
@@ -5598,4 +5701,3 @@ class ApiClient:
 
 # Create a singleton instance
 api_client = ApiClient()
-

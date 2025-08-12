@@ -569,7 +569,30 @@ async def saved_wallet_choice(update: Update, context: CallbackContext) -> int:
     data = query.data
     if data.startswith("select_saved_"):
         addr = data.replace("select_saved_", "")
+        
+        # Load the complete wallet data from saved wallets to get private key
+        saved_wallets = api_client.list_saved_wallets('mother')
+        selected_wallet = None
+        for wallet in saved_wallets:
+            if wallet.get('address') == addr:
+                selected_wallet = wallet
+                break
+        
+        if not selected_wallet:
+            await query.edit_message_text(
+                format_error_message("Selected wallet not found in saved data."),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return ConversationState.WALLET_CHOICE
+        
+        # Store both address and private key in session
         session_manager.update_session_value(user.id, "mother_wallet_address", addr)
+        private_key = selected_wallet.get('private_key', '')
+        if private_key:
+            session_manager.update_session_value(user.id, "mother_private_key", private_key)
+            logger.info(f"Loaded mother wallet with private key for user {user.id}: {addr[:8]}...")
+        else:
+            logger.warning(f"No private key found for selected wallet {addr[:8]}... for user {user.id}")
 
         # Attempt to locate existing child wallet set for this mother wallet
         existing_sets = volume_wallet_storage.list_user_child_wallet_sets(user.id)
@@ -898,9 +921,15 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
                     parse_mode=ParseMode.MARKDOWN
                 )
         else:
+            # Build keyboard with both check again and return funds options
+            balance_keyboard = [
+                [build_button("Check Again", "check_balance")],
+                [build_button("💰 Return Funds from Child Wallets", "return_child_funds")]
+            ]
+            
             await query.edit_message_text(
                 format_insufficient_balance_message(current_balance=current_balance, required_balance=total_volume, token_symbol=token_symbol),
-                reply_markup=InlineKeyboardMarkup([[build_button("Check Again", "check_balance")]]),
+                reply_markup=InlineKeyboardMarkup(balance_keyboard),
                 parse_mode=ParseMode.MARKDOWN
             )
         return ConversationState.AWAIT_FUNDING
@@ -930,10 +959,33 @@ async def begin_transfers(update: Update, context: CallbackContext) -> int:
     )
     child_wallets = session_manager.get_session_value(user.id, "child_wallets") or []
     total_volume = session_manager.get_session_value(user.id, "total_volume")
+    mother_private_key = session_manager.get_session_value(user.id, "mother_private_key")
+
+    # Instrumentation (Systematic Isolation / Boundary Verification)
+    logger.info(
+        "Begin transfers invoked",
+        extra={
+            "user_id": user.id,
+            "mother_wallet_present": bool(mother_wallet),
+            "child_wallets_count": len(child_wallets),
+            "total_volume": total_volume,
+            "mother_private_key_present": bool(mother_private_key),
+        }
+    )
 
     if not all([mother_wallet, child_wallets, total_volume]):
         await query.edit_message_text(
             format_error_message("Missing session data for transfers. Please /start again."),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ConversationState.ACTIVITY_SELECTION
+
+    if not mother_private_key:
+        # Provide explicit guidance instead of silently failing later
+        await query.edit_message_text(
+            format_error_message(
+                "Mother wallet private key not found in session. Import or create the mother wallet again to proceed."
+            ),
             parse_mode=ParseMode.MARKDOWN
         )
         return ConversationState.ACTIVITY_SELECTION
@@ -945,6 +997,147 @@ async def begin_transfers(update: Update, context: CallbackContext) -> int:
     )
 
     return await fund_child_wallets_handler(update, context)
+
+
+async def return_child_funds_handler(update: Update, context: CallbackContext) -> int:
+    """
+    Handle return funds request from child wallets back to mother wallet.
+    """
+    query = update.callback_query
+    user = query.from_user
+    await query.answer()
+    
+    try:
+        # Get session data
+        logger.info(f"Return funds handler called for user {user.id}")
+        mother_wallet = session_manager.get_session_value(user.id, "mother_wallet_address") or \
+                       session_manager.get_session_value(user.id, "mother_wallet")
+        
+        logger.info(f"Mother wallet found: {mother_wallet}")
+        
+        if not mother_wallet:
+            logger.warning(f"No mother wallet found for user {user.id}")
+            await query.edit_message_text(
+                format_error_message("No mother wallet found. Please start over."),
+                reply_markup=InlineKeyboardMarkup([[build_button("« Start Over", "back_to_activities")]]),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return ConversationState.ACTIVITY_SELECTION
+        
+        # Load child wallets with private keys
+        logger.info(f"Loading child wallets for mother wallet {mother_wallet}")
+        child_wallets_full = api_client.load_child_wallets(mother_wallet)
+        logger.info(f"Found {len(child_wallets_full) if child_wallets_full else 0} child wallets")
+        
+        if not child_wallets_full:
+            logger.warning(f"No child wallets found for mother wallet {mother_wallet}")
+            await query.edit_message_text(
+                format_error_message("No child wallets found. Create child wallets first."),
+                reply_markup=InlineKeyboardMarkup([[build_button("🔍 Check Balance", "check_balance")]]),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return ConversationState.AWAIT_FUNDING
+        
+        # Show confirmation message with return funds progress
+        await query.edit_message_text(
+            f"🔄 **Returning Funds from Child Wallets**\n\n"
+            f"Processing {len(child_wallets_full)} child wallets...\n"
+            f"Returning all available funds to mother wallet.\n\n"
+            f"This may take a few minutes. Please wait...",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # Execute return funds operation
+        results = []
+        successful = 0
+        failed = 0
+        
+        for child_wallet_data in child_wallets_full:
+            try:
+                child_wallet = child_wallet_data.get('address')
+                child_private_key = child_wallet_data.get('private_key')
+                
+                if not child_wallet or not child_private_key:
+                    failed += 1
+                    results.append({
+                        "wallet": child_wallet or "Unknown",
+                        "status": "failed",
+                        "error": "Missing wallet data or private key"
+                    })
+                    continue
+                
+                # Use the existing transfer function to return funds (amount=0 means return all)
+                logger.info(f"Attempting to return funds from child wallet {child_wallet} to mother wallet {mother_wallet}")
+                result = await api_client.transfer_child_to_mother(
+                    child_wallet=child_wallet,
+                    child_private_key=child_private_key,
+                    mother_wallet=mother_wallet,
+                    amount=0,  # Return all available funds
+                    verify_transfer=True
+                )
+                logger.info(f"Return funds result for {child_wallet}: {result}")
+                
+                if result.get("status") == "success":
+                    successful += 1
+                    results.append({
+                        "wallet": child_wallet,
+                        "status": "success",
+                        "amount": result.get("amount_transferred", 0)
+                    })
+                else:
+                    failed += 1
+                    results.append({
+                        "wallet": child_wallet,
+                        "status": "failed",
+                        "error": result.get("error", "Unknown error")
+                    })
+                    
+            except Exception as e:
+                logger.error(f"Error returning funds from {child_wallet_data.get('address', 'Unknown')}: {e}")
+                failed += 1
+                results.append({
+                    "wallet": child_wallet_data.get('address', 'Unknown'),
+                    "status": "failed",
+                    "error": str(e)
+                })
+        
+        # Show results and return to balance check
+        result_message = format_return_funds_summary(results, mother_wallet)
+        result_message += f"\n\n✅ Successfully returned funds from {successful} wallets"
+        if failed > 0:
+            result_message += f"\n❌ Failed to return funds from {failed} wallets"
+        
+        result_message += f"\n\nYou can now check your balance again."
+        
+        await query.edit_message_text(
+            result_message,
+            reply_markup=InlineKeyboardMarkup([[build_button("🔍 Check Balance Again", "check_balance")]]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationState.AWAIT_FUNDING
+    except Exception as e:
+        logger.error(f"Error in return_child_funds_handler: {e}")
+        await query.edit_message_text(
+            format_error_message(f"Error returning funds: {str(e)}"),
+            reply_markup=InlineKeyboardMarkup([
+                [build_button("🔍 Check Balance", "check_balance")],
+                [build_button("« Back", "back_to_activities")]
+            ]),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ConversationState.AWAIT_FUNDING
+
+async def trigger_return_all_funds(update: Update, context: CallbackContext) -> int:
+    """Callback alias for returning all child wallet funds to mother wallet.
+
+    This exists because keyboards use callback_data 'trigger_return_all_funds'.
+    Previously no handler was registered, so button clicks were no-ops. This
+    function simply delegates to return_child_funds_handler to preserve a
+    single implementation point.
+    """
+    logger.info("trigger_return_all_funds callback invoked – delegating to return_child_funds_handler")
+    return await return_child_funds_handler(update, context)
 
 
 async def fund_child_wallets_handler(update: Update, context: CallbackContext) -> int:
@@ -978,15 +1171,24 @@ async def fund_child_wallets_handler(update: Update, context: CallbackContext) -
         )
         return ConversationState.AWAIT_FUNDING
 
-    # Attempt readiness check to get recommended min per wallet; fall back safely
+    # Calculate funding amount per wallet based on total volume
+    # Total volume should be distributed among child wallets for volume generation
+    base_amount_per_wallet = total_volume / len(child_wallets)
+    
+    # Add small buffer for gas fees (0.0015 SOL should be sufficient for multiple transactions)
+    gas_reserve = 0.0015
+    min_required_per_wallet = base_amount_per_wallet + gas_reserve
+    
+    logger.info(f"Funding calculation: total_volume={total_volume}, child_wallets={len(child_wallets)}, "
+                f"base_per_wallet={base_amount_per_wallet}, gas_reserve={gas_reserve}, "
+                f"final_per_wallet={min_required_per_wallet}")
+    
+    # Attempt readiness check with the calculated amount
     try:
-        readiness = api_client.check_spl_swap_readiness(child_wallets=child_wallets, min_swap_amount_sol=total_volume / (len(child_wallets) * 10))
-        min_required_per_wallet = readiness.get("min_required_per_wallet") or 0.012
+        readiness = api_client.check_spl_swap_readiness(child_wallets=child_wallets, min_swap_amount_sol=base_amount_per_wallet)
         session_manager.update_session_value(user.id, "spl_readiness_check", readiness)
     except Exception as e:
         logger.warning(f"Readiness check failed prior to funding: {e}")
-        # Use api_client funding minimum (api enforces >= 0.012 internally)
-        min_required_per_wallet = 0.012
 
     await context.bot.send_message(
         chat_id=user.id,
@@ -1325,6 +1527,8 @@ def register_start_handler(application):
             ],
             ConversationState.AWAIT_FUNDING: [
                 CallbackQueryHandler(check_balance, pattern=r"^check_balance$"),
+                CallbackQueryHandler(return_child_funds_handler, pattern=r"^return_child_funds$"),
+                CallbackQueryHandler(trigger_return_all_funds, pattern=r"^trigger_return_all_funds$"),
                 CallbackQueryHandler(begin_transfers, pattern=r"^begin_transfers$")
             ],
             ConversationState.BUNDLER_MANAGEMENT: [
