@@ -30,8 +30,12 @@ class APIBehaviorHandler:
     
     def __init__(self, pumpfun_client):
         self.pumpfun_client = pumpfun_client
-        self.verification_timeout = 180  # 3 minutes for verification
+        self.verification_timeout = 420  # 7 minutes base verification timeout
         self.check_interval = 10  # Check every 10 seconds
+        # Long-tail extension window to keep waiting if progress is still occurring
+        self.long_tail_extension = 120  # up to +2 minutes if progress observed
+        # Absolute ceiling to avoid indefinite waits even with progress
+        self.max_total_timeout = 600  # 10 minutes hard cap
         
     async def fund_with_verification(
         self, 
@@ -68,9 +72,10 @@ class APIBehaviorHandler:
         
         try:
             api_response = self.pumpfun_client.fund_bundled_wallets(
-                funding_request["childWallets"],
-                funding_request["amountPerWalletSOL"],
-                funding_request["motherWalletPrivateKeyBs58"]
+                amount_per_wallet=funding_request["amountPerWalletSOL"],
+                mother_private_key=funding_request["motherWalletPrivateKeyBs58"],
+                bundled_wallets=funding_request["childWallets"],
+                target_wallet_names=funding_request.get("targetWalletNames")
             )
             logger.info(f"🔧 API_VERIFICATION: Initial API call succeeded for {operation_id}")
             
@@ -93,10 +98,19 @@ class APIBehaviorHandler:
         # Step 2: Always verify actual wallet states regardless of API response
         logger.info(f"🔧 API_VERIFICATION: Starting wallet state verification for {operation_id}")
         
+        api_hints = None
+        try:
+            # Extract non-sensitive hints from API response (e.g., bundleId, transfer statuses)
+            api_hints = self._extract_api_hints(api_response) if api_response is not None else None
+        except Exception as e:
+            logger.debug(f"🔧 API_VERIFICATION: Failed to extract API hints: {e}")
+
         verification_result = await self._verify_funding_completion(
             funding_request["childWallets"],
             expected_amount_per_wallet,
-            operation_id
+            operation_id,
+            addresses_by_name=funding_request.get("addressesByName"),
+            api_hints=api_hints,
         )
         
         execution_time = time.time() - start_time
@@ -134,7 +148,9 @@ class APIBehaviorHandler:
         self,
         child_wallets: List[Dict[str, str]],
         expected_amount: float,
-        operation_id: str
+        operation_id: str,
+        addresses_by_name: Optional[Dict[str, str]] = None,
+        api_hints: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Verify actual funding completion by checking wallet balances.
@@ -167,9 +183,11 @@ class APIBehaviorHandler:
         funded_wallets = []
         unfunded_wallets = []
         verification_start = time.time()
+        last_progress_time = verification_start
+        prev_max_funded = 0
         
-        # Progressive verification with timeout
-        while time.time() - verification_start < self.verification_timeout:
+        # Progressive verification with timeout + long-tail extension on progress
+        while True:
             current_funded = []
             current_unfunded = []
             
@@ -179,6 +197,8 @@ class APIBehaviorHandler:
                 try:
                     # Get wallet address from private key
                     wallet_address = self._get_wallet_address(wallet)
+                    if not wallet_address and addresses_by_name:
+                        wallet_address = addresses_by_name.get(wallet_name)
                     
                     if not wallet_address:
                         logger.warning(f"Could not derive address for wallet {wallet_name}")
@@ -231,26 +251,55 @@ class APIBehaviorHandler:
                     "success_rate": success_rate
                 }
             )
-            
+
+            # Update progress timestamp if we observed more funded wallets this iteration
+            if funded_count > prev_max_funded:
+                prev_max_funded = funded_count
+                last_progress_time = time.time()
+
+            # Determine whether the API indicated in-progress work for any unfunded wallet
+            observed_activity = False
+            if api_hints and isinstance(api_hints, dict):
+                status_by_wallet = api_hints.get("transfer_status_by_wallet", {}) or {}
+                for item in unfunded_wallets:
+                    wname = item.get("name")
+                    wstatus = status_by_wallet.get(wname)
+                    if isinstance(wstatus, str) and wstatus.lower() in {"processing", "queued", "submitted", "pending"}:
+                        observed_activity = True
+                        break
+
             # Check if we should continue waiting
             if funded_count == 0:
                 # No wallets funded yet, continue waiting
                 await asyncio.sleep(self.check_interval)
-                continue
+                # Continue if still within base timeout, else only continue if activity observed and within long-tail
+                elapsed = time.time() - verification_start
+                if elapsed < self.verification_timeout:
+                    continue
+                if (elapsed < self.max_total_timeout) and (time.time() - last_progress_time < self.long_tail_extension or observed_activity):
+                    logger.info("🔧 VERIFICATION: Extending wait (no initial funding yet, activity observed or within long-tail window)")
+                    await asyncio.sleep(self.check_interval)
+                    continue
+                logger.info("🔧 VERIFICATION: Timeout reached with no funding observed")
+                break
             elif funded_count == total_wallets:
                 # All wallets funded, we're done
                 logger.info(f"🔧 VERIFICATION: All wallets funded successfully")
                 break
             else:
                 # Partial funding - wait a bit more to see if more complete
-                remaining_time = self.verification_timeout - (time.time() - verification_start)
-                if remaining_time > 30:  # If more than 30 seconds left, wait a bit more
+                elapsed = time.time() - verification_start
+                if elapsed < self.verification_timeout:
                     await asyncio.sleep(self.check_interval)
                     continue
-                else:
-                    # Time is running out, accept partial results
-                    logger.info(f"🔧 VERIFICATION: Accepting partial funding results due to timeout")
-                    break
+                # Base timeout exceeded: allow a long-tail extension if we recently saw progress or API hinted activity
+                if (elapsed < self.max_total_timeout) and (time.time() - last_progress_time < self.long_tail_extension or observed_activity):
+                    logger.info("🔧 VERIFICATION: Extending wait (partial funding with recent progress or API activity)")
+                    await asyncio.sleep(self.check_interval)
+                    continue
+                # Time is running out, accept partial results
+                logger.info(f"🔧 VERIFICATION: Accepting partial funding results due to timeout")
+                break
         
         verification_time = time.time() - verification_start
         
@@ -275,6 +324,51 @@ class APIBehaviorHandler:
         
         return results
     
+    def _extract_api_hints(self, api_response: Any) -> Dict[str, Any]:
+        """
+        Extract non-sensitive hints from the initial API response to guide verification.
+        This does not replace balance checks, but can inform extended waiting when activity is observed.
+
+        Attempts to parse commonly seen fields like 'data.transfers' or 'transfers' to map wallet names
+        to statuses if available, and capture a 'bundleId' if present.
+
+        Args:
+            api_response: Raw API response from fund_bundled_wallets()
+
+        Returns:
+            Dict with optional keys like 'bundleId' and 'transfer_status_by_wallet'.
+        """
+        hints: Dict[str, Any] = {}
+        if not isinstance(api_response, dict):
+            return hints
+        data = api_response.get("data") if isinstance(api_response.get("data"), (dict, list)) else None
+
+        # Bundle ID if present
+        if isinstance(data, dict) and "bundleId" in data:
+            hints["bundleId"] = data.get("bundleId")
+
+        # Transfers may be a list at api_response['data']['transfers'] or top-level 'transfers'
+        transfers = None
+        if isinstance(data, dict) and isinstance(data.get("transfers"), list):
+            transfers = data.get("transfers")
+        elif isinstance(api_response.get("transfers"), list):
+            transfers = api_response.get("transfers")
+
+        status_by_wallet: Dict[str, str] = {}
+        if isinstance(transfers, list):
+            for t in transfers:
+                if not isinstance(t, dict):
+                    continue
+                # Try to map by wallet name if present, otherwise skip
+                wname = t.get("name") or t.get("walletName")
+                wstatus = t.get("status") or t.get("state")
+                if isinstance(wname, str) and isinstance(wstatus, str):
+                    status_by_wallet[wname] = wstatus
+        if status_by_wallet:
+            hints["transfer_status_by_wallet"] = status_by_wallet
+
+        return hints
+
     def _is_async_processing_error(self, error_message: str) -> bool:
         """
         Check if an error message indicates async processing behavior.

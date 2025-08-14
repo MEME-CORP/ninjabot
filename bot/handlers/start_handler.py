@@ -839,8 +839,8 @@ async def start_balance_polling(user_id: int, context: CallbackContext) -> None:
                     break
         # Always present unified post-balance action buttons so user can continue
         action_keyboard = InlineKeyboardMarkup([
-            [build_button("� Check Child Wallets", "check_child_balances")],
-            [build_button("�🚀 Begin Transfers", "begin_transfers")],
+            [build_button("🔍 Check Child Wallets", "check_child_balances")],
+            [build_button("🚀 Begin Transfers", "begin_transfers")],
             [build_button("💸 Return All Funds", "trigger_return_all_funds")]
         ])
         await context.bot.send_message(
@@ -911,20 +911,13 @@ async def check_balance(update: Update, context: CallbackContext) -> int:
                         current_balance = tb.get('amount', 0)
                         token_symbol = tb.get('symbol', 'SOL')
                         break
-        current_balance = 0
-        token_symbol = "tokens"
-        if isinstance(balance_info, dict) and 'balances' in balance_info:
-            for tb in balance_info['balances']:
-                if tb.get('symbol') == 'SOL' or tb.get('token') == "So11111111111111111111111111111111111111112":
-                    current_balance = tb.get('amount', 0)
-                    token_symbol = tb.get('symbol', 'SOL')
-                    break
+        # Use either cached poller balance or direct API result above; no duplicate re-parsing
 
         if current_balance >= total_volume:
             # Provide consistent action buttons when balance is sufficient
             action_keyboard = InlineKeyboardMarkup([
-                [build_button("� Check Child Wallets", "check_child_balances")],
-                [build_button("�🚀 Begin Transfers", "begin_transfers")],
+                [build_button("🔍 Check Child Wallets", "check_child_balances")],
+                [build_button("🚀 Begin Transfers", "begin_transfers")],
                 [build_button("💸 Return All Funds", "trigger_return_all_funds")]
             ])
             try:

@@ -1343,9 +1343,20 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
             wallet_data_list = bundled_wallet_storage.load_bundled_wallets(airdrop_wallet, user.id)
         
         # Build childWallets array with proper API format
+        # Also build a name->address mapping for verification
+        addresses_by_name = {}
         for wallet in wallet_data_list:
             wallet_name = wallet.get("name", "Unknown")
-            wallet_private_key = wallet.get("privateKey") or wallet.get("private_key")
+            wallet_private_key = wallet.get("privateKey") or wallet.get("private_key") or wallet.get("privateKeyBs58")
+            # Capture known address fields for verification system
+            wallet_address_field = (
+                wallet.get("address")
+                or wallet.get("publicKey")
+                or wallet.get("public_key")
+                or wallet.get("wallet_address")
+            )
+            if wallet_address_field:
+                addresses_by_name[wallet_name] = wallet_address_field
             
             if wallet_private_key:
                 # Convert to base58 if needed
@@ -1494,7 +1505,9 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
                 "amountPerWalletSOL": dev_wallet_amount,
                 "childWallets": dev_wallets,
                 "motherWalletPrivateKeyBs58": mother_wallet_key,
-                "targetWalletNames": dev_wallet_names
+                "targetWalletNames": dev_wallet_names,
+                # Provide addresses for verification to map names->addresses
+                "addressesByName": {n: addresses_by_name[n] for n in dev_wallet_names if n in addresses_by_name}
             }
             
             dev_success, dev_results = await verification_system.fund_with_verification(
@@ -1526,7 +1539,9 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
                 "amountPerWalletSOL": other_wallet_amount,
                 "childWallets": other_wallets,
                 "motherWalletPrivateKeyBs58": mother_wallet_key,
-                "targetWalletNames": other_wallet_names
+                "targetWalletNames": other_wallet_names,
+                # Provide addresses for verification to map names->addresses
+                "addressesByName": {n: addresses_by_name[n] for n in other_wallet_names if n in addresses_by_name}
             }
             
             other_success, other_results = await verification_system.fund_with_verification(
