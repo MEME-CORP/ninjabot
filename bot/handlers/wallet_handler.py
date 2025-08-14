@@ -32,6 +32,7 @@ from bot.utils.message_utils import (
     format_return_funds_results_message,
     format_return_funds_option_message
 )
+from bot.utils.api_verification_utils import create_funding_verification_system
 from bot.state.session_manager import session_manager
 from bot.utils.wallet_storage import airdrop_wallet_storage, bundled_wallet_storage
 from bot.utils.validation_utils import validate_bundled_wallets_count, log_validation_result
@@ -681,6 +682,9 @@ async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
     
     await query.edit_message_text("🔍 **Checking Bundled Wallet Balances**...", parse_mode=ParseMode.MARKDOWN)
     
+    # Refresh session before potentially long balance checking operation
+    session_manager.refresh_session(user.id)
+    
     # STEP 1: Check bundled wallets first
     try:
         if not airdrop_wallet_address:
@@ -775,6 +779,9 @@ async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
                 })
         
         all_funded = funded_count == total_wallets
+        
+        # Refresh session after balance checking completes 
+        session_manager.refresh_session(user.id)
         
         logger.info(f"Bundled wallet funding status: {funded_count}/{total_wallets} wallets funded")
         
@@ -1453,11 +1460,27 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
         logger.info(f"Other wallets needing funding: {len(other_wallets_needing_funding)}")
         logger.info(f"Total funding needed: {total_funding_needed:.6f} SOL")
         
-        # Execute funding operation with correct API format according to bundler_api.md
-        logger.info(f"Executing wallet funding for user {user.id}")
+        # Execute funding operation with enhanced API verification system
+        logger.info(f"Executing wallet funding with verification for user {user.id}")
         
-        # CRITICAL FIX: Use separate funding calls for DevWallet vs other wallets
-        funding_results = {"data": []}
+        # Refresh session before long funding operation
+        session_manager.refresh_session(user.id)
+        
+        # Create verification system
+        verification_system = create_funding_verification_system(pumpfun_client)
+        
+        # Update progress message
+        await query.edit_message_text(
+            "💰 **Starting Wallet Funding with Verification**\n\n"
+            "🔄 Initiating funding operation with automatic verification...\n"
+            "⏳ This process includes error recovery and balance verification.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # ENHANCED FUNDING: Use verification system for all wallets
+        all_funding_results = []
+        total_funded_wallets = 0
+        total_unfunded_wallets = 0
         
         # Fund DevWallet first (if needed)
         if dev_wallets_needing_funding:
@@ -1465,49 +1488,94 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
             dev_wallets = [item["wallet"] for item in dev_wallets_needing_funding]
             dev_wallet_names = [item["name"] for item in dev_wallets_needing_funding]
             
-            logger.info(f"Funding DevWallet with {dev_wallet_amount:.6f} SOL")
+            logger.info(f"Funding DevWallet with verification: {dev_wallet_amount:.6f} SOL")
             
-            try:
-                dev_funding_results = pumpfun_client.fund_bundled_wallets(
-                    amount_per_wallet=dev_wallet_amount,
-                    mother_private_key=mother_wallet_key,
-                    bundled_wallets=dev_wallets,
-                    target_wallet_names=dev_wallet_names
-                )
-                logger.info(f"DevWallet funding results: {dev_funding_results}")
-                
-                # Merge results
-                if dev_funding_results.get('data'):
-                    funding_results["data"].extend(dev_funding_results["data"])
-                    
-            except Exception as dev_funding_error:
-                logger.error(f"DevWallet funding failed: {dev_funding_error}")
-                raise dev_funding_error
+            dev_funding_request = {
+                "amountPerWalletSOL": dev_wallet_amount,
+                "childWallets": dev_wallets,
+                "motherWalletPrivateKeyBs58": mother_wallet_key,
+                "targetWalletNames": dev_wallet_names
+            }
+            
+            dev_success, dev_results = await verification_system.fund_with_verification(
+                dev_funding_request,
+                dev_wallet_amount,
+                len(dev_wallets)
+            )
+            
+            all_funding_results.append({
+                "group": "DevWallet",
+                "success": dev_success,
+                "results": dev_results
+            })
+            
+            total_funded_wallets += dev_results["funded_wallets"]
+            total_unfunded_wallets += dev_results["unfunded_wallets"]
+            
+            logger.info(f"DevWallet funding completed: {dev_results['funded_wallets']}/{len(dev_wallets)} wallets funded")
         
-        # Fund other wallets (if needed)
+        # Fund other wallets (if needed)  
         if other_wallets_needing_funding:
             other_wallet_amount = bundled_wallet_required
             other_wallets = [item["wallet"] for item in other_wallets_needing_funding]
             other_wallet_names = [item["name"] for item in other_wallets_needing_funding]
             
-            logger.info(f"Funding {len(other_wallets)} other wallets with {other_wallet_amount:.6f} SOL each")
+            logger.info(f"Funding {len(other_wallets)} other wallets with verification: {other_wallet_amount:.6f} SOL each")
             
-            try:
-                other_funding_results = pumpfun_client.fund_bundled_wallets(
-                    amount_per_wallet=other_wallet_amount,
-                    mother_private_key=mother_wallet_key,
-                    bundled_wallets=other_wallets,
-                    target_wallet_names=other_wallet_names
-                )
-                logger.info(f"Other wallets funding results: {other_funding_results}")
-                
-                # Merge results
-                if other_funding_results.get('data'):
-                    funding_results["data"].extend(other_funding_results["data"])
-                    
-            except Exception as other_funding_error:
-                logger.error(f"Other wallets funding failed: {other_funding_error}")
-                raise other_funding_error
+            other_funding_request = {
+                "amountPerWalletSOL": other_wallet_amount,
+                "childWallets": other_wallets,
+                "motherWalletPrivateKeyBs58": mother_wallet_key,
+                "targetWalletNames": other_wallet_names
+            }
+            
+            other_success, other_results = await verification_system.fund_with_verification(
+                other_funding_request,
+                other_wallet_amount,
+                len(other_wallets)
+            )
+            
+            all_funding_results.append({
+                "group": "OtherWallets", 
+                "success": other_success,
+                "results": other_results
+            })
+            
+            total_funded_wallets += other_results["funded_wallets"]
+            total_unfunded_wallets += other_results["unfunded_wallets"]
+            
+            logger.info(f"Other wallets funding completed: {other_results['funded_wallets']}/{len(other_wallets)} wallets funded")
+        
+        # Refresh session after funding operations complete
+        session_manager.refresh_session(user.id)
+        
+        # Aggregate results for backward compatibility
+        funding_results = {"data": []}
+        
+        for group_result in all_funding_results:
+            verification_results = group_result["results"]["verification_results"]
+            
+            for funded_wallet in verification_results["funded_wallets"]:
+                funding_results["data"].append({
+                    'name': funded_wallet["name"],
+                    'publicKey': funded_wallet["address"],
+                    'status': 'success',
+                    'amountSent': group_result["results"]["verification_results"]["minimum_balance_threshold"] / 0.8,  # Reverse calculate
+                    'balanceAfter': funded_wallet["balance"],
+                    'signature': 'verified_funded',
+                    'verification_group': group_result["group"]
+                })
+            
+            for unfunded_wallet in verification_results["unfunded_wallets"]:
+                funding_results["data"].append({
+                    'name': unfunded_wallet["name"],
+                    'publicKey': unfunded_wallet["address"],
+                    'status': 'failed',
+                    'amountSent': 0,
+                    'balanceAfter': unfunded_wallet["balance"],
+                    'signature': 'verification_failed',
+                    'verification_group': group_result["group"]
+                })
         
         # Transform API response to expected format for message formatting
         api_data = funding_results.get('data', [])
@@ -1534,14 +1602,58 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
         session_manager.update_session_value(user.id, "funding_results", formatted_results)
         session_manager.update_session_value(user.id, "funding_summary", funding_summary)
         
-        # Show completion message
-        keyboard = InlineKeyboardMarkup([
-            [build_button("🚀 Create Token", "create_token_final")],
-            [build_button("🔄 Recheck Balances", "check_wallet_balance")]
-        ])
+        # Show completion message with enhanced status handling
+        total_expected = len(wallets_needing_funding)
+        actual_successful = successful_transfers
+        
+        if actual_successful == total_expected:
+            # Perfect success
+            keyboard = InlineKeyboardMarkup([
+                [build_button("🚀 Create Token", "create_token_final")],
+                [build_button("🔄 Recheck Balances", "check_wallet_balance")]
+            ])
+            success_message = format_wallet_funding_complete_message(formatted_results)
+        elif actual_successful > 0:
+            # Partial success - some wallets funded
+            keyboard = InlineKeyboardMarkup([
+                [build_button("🚀 Continue with Funded Wallets", "create_token_final")],
+                [build_button("🔄 Retry Failed Wallets", "retry_wallet_funding")],
+                [build_button("📊 Check All Balances", "check_wallet_balance")]
+            ])
+            success_message = (
+                f"⚠️ **Partial Wallet Funding Complete**\n\n"
+                f"✅ Successfully funded: {actual_successful} wallets\n"
+                f"❌ Failed to fund: {total_expected - actual_successful} wallets\n"
+                f"💰 Total SOL transferred: {total_sol_spent:.6f} SOL\n\n"
+                f"🎯 **Next Steps:**\n"
+                f"• Continue with successfully funded wallets\n"
+                f"• Retry funding for failed wallets\n"
+                f"• Check current balances to verify status\n\n"
+                f"💡 **Note**: The API may have processed some transactions despite errors. "
+                f"Use 'Check All Balances' to verify the current status."
+            )
+        else:
+            # Complete failure
+            keyboard = InlineKeyboardMarkup([
+                [build_button("🔄 Retry All Funding", "retry_wallet_funding")],
+                [build_button("📊 Check Balances", "check_wallet_balance")],
+                [build_button("« Back to Setup", "back_to_activities")]
+            ])
+            success_message = (
+                f"❌ **Wallet Funding Failed**\n\n"
+                f"No wallets were successfully funded.\n\n"
+                f"🔍 **Possible Issues:**\n"
+                f"• Insufficient SOL in airdrop wallet\n"
+                f"• Network connectivity problems\n"
+                f"• API processing delays\n\n"
+                f"💡 **Next Steps:**\n"
+                f"• Check your airdrop wallet balance\n"
+                f"• Retry the funding process\n"
+                f"• Consider returning funds from other wallets"
+            )
         
         await query.edit_message_text(
-            format_wallet_funding_complete_message(formatted_results),
+            success_message,
             reply_markup=keyboard,
             parse_mode=ParseMode.MARKDOWN
         )
@@ -1834,10 +1946,16 @@ async def execute_return_funds(update: Update, context: CallbackContext) -> int:
             parse_mode=ParseMode.MARKDOWN
         )
         
+        # Refresh session before long return funds operation
+        session_manager.refresh_session(user.id)
+        
         return_results = pumpfun_client.return_funds_to_mother(
             mother_wallet_public_key=airdrop_wallet_address,
             child_wallets=child_wallets_credentials
         )
+        
+        # Refresh session after long return funds operation completes
+        session_manager.refresh_session(user.id)
         
         # Enhanced response validation and logging
         import json

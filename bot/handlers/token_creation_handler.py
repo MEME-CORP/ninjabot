@@ -390,6 +390,9 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
         logger.info(f"Starting token creation with {len(wallets)} wallets using new dynamic API")
         start_time = time.time()
         
+        # Refresh session before long token creation operation
+        session_manager.refresh_session(user.id)
+        
         # Create token and execute buys with ALL wallets using new dynamic API
         try:
             token_result = pumpfun_client.create_token_and_buy(
@@ -415,6 +418,9 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             else:
                 # Not a rate limiting error, handle normally
                 raise e
+        
+        # Refresh session after long token creation operation completes
+        session_manager.refresh_session(user.id)
         
         # Debug: Log the exact API response structure
         logger.info(f"Token creation API response keys: {list(token_result.keys()) if isinstance(token_result, dict) else 'Not a dict'}")

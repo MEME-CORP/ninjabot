@@ -107,6 +107,17 @@ class SessionManager:
             del self._sessions[user_id]
             logger.debug(f"Session cleared for user {user_id}")
     
+    def refresh_session(self, user_id: int):
+        """
+        Refresh the session timestamp to prevent timeout during long operations.
+        
+        Args:
+            user_id: The Telegram user ID
+        """
+        if user_id in self._sessions:
+            self._sessions[user_id]['last_updated'] = time.time()
+            logger.debug(f"Session refreshed for user {user_id}")
+    
     def _is_session_expired(self, session: Dict[str, Any]) -> bool:
         """
         Check if a session has expired.
