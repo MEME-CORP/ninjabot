@@ -1964,10 +1964,54 @@ async def execute_return_funds(update: Update, context: CallbackContext) -> int:
         # Refresh session before long return funds operation
         session_manager.refresh_session(user.id)
         
-        return_results = pumpfun_client.return_funds_to_mother(
+        # Import and use enhanced verification system for return funds
+        from bot.utils.api_verification_utils import create_funding_verification_system
+        
+        logger.info(f"Creating enhanced return funds verification system for user {user.id}")
+        verification_handler = create_funding_verification_system(pumpfun_client)
+        
+        # Execute return funds with enhanced verification
+        logger.info(f"Executing return funds with enhanced verification for user {user.id}")
+        verification_success, verification_results = await verification_handler.return_with_verification(
             mother_wallet_public_key=airdrop_wallet_address,
             child_wallets=child_wallets_credentials
         )
+        
+        # Convert verification results to expected format for compatibility
+        return_results = {
+            "message": "Return funds process completed with enhanced verification.",
+            "data": {
+                "totalWallets": verification_results.get("total_count", len(child_wallets_credentials)),
+                "successfulTransfers": verification_results.get("returned_count", 0),
+                "failedTransfers": verification_results.get("not_returned_count", 0),
+                "totalAmount": sum(
+                    wallet.get("amount_returned", 0) 
+                    for wallet in verification_results.get("returned_wallets", [])
+                ),
+                "transfers": [
+                    {
+                        "name": wallet["name"],
+                        "publicKey": wallet["address"],
+                        "status": "success",
+                        "amountReturned": wallet.get("amount_returned", 0),
+                        "balanceAfter": wallet.get("final_balance", 0)
+                    }
+                    for wallet in verification_results.get("returned_wallets", [])
+                ] + [
+                    {
+                        "name": wallet["name"],
+                        "publicKey": wallet.get("address", "unknown"),
+                        "status": "failed" if wallet.get("error") else "skipped_low_balance",
+                        "amountReturned": wallet.get("amount_returned", 0),
+                        "balanceAfter": wallet.get("final_balance", 0)
+                    }
+                    for wallet in verification_results.get("not_returned_wallets", [])
+                ],
+                "verificationResults": verification_results,
+                "enhancedVerification": True,
+                "verificationSuccess": verification_success
+            }
+        }
         
         # Refresh session after long return funds operation completes
         session_manager.refresh_session(user.id)

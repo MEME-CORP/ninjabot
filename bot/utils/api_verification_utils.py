@@ -438,6 +438,295 @@ class APIBehaviorHandler:
         except Exception as e:
             logger.warning(f"Error checking balance for {wallet_name}: {str(e)}")
             return 0.0
+    
+    async def return_with_verification(
+        self, 
+        mother_wallet_public_key: str,
+        child_wallets: List[Dict[str, str]]
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Return funds to mother wallet with built-in verification for API behavioral quirks.
+        
+        This method mirrors the funding verification logic but checks for wallet balance 
+        reductions instead of increases to verify successful fund returns.
+        
+        Args:
+            mother_wallet_public_key: The mother wallet public key
+            child_wallets: List of child wallet credentials
+            
+        Returns:
+            Tuple of (success: bool, results: Dict)
+        """
+        start_time = time.time()
+        operation_id = f"return_funds_{int(start_time)}"
+        
+        logger.info(
+            f"🔧 API_VERIFICATION: Starting return funds operation {operation_id}",
+            extra={
+                "operation_id": operation_id,
+                "wallet_count": len(child_wallets)
+            }
+        )
+        
+        # Step 1: Record initial wallet balances to detect changes
+        logger.info(f"🔧 API_VERIFICATION: Recording initial wallet balances for {operation_id}")
+        initial_balances = {}
+        
+        for wallet in child_wallets:
+            wallet_name = wallet.get("name", "Unknown")
+            
+            # Use wallet address from wallet data (like funding verification does)
+            try:
+                wallet_address = self._get_wallet_address(wallet)
+                if not wallet_address:
+                    logger.warning(f"Could not find address for wallet {wallet_name}")
+                    continue
+                    
+                balance = await self._check_wallet_balance(wallet_address, wallet_name)
+                initial_balances[wallet_name] = {
+                    "address": wallet_address,
+                    "balance": balance
+                }
+                logger.info(f"🔧 VERIFICATION: Initial {wallet_name} balance: {balance:.6f} SOL")
+            except Exception as e:
+                logger.warning(f"🔧 VERIFICATION: Error recording initial balance for {wallet_name}: {str(e)}")
+                continue
+        
+        # Step 2: Execute initial API call
+        api_response = None
+        api_error = None
+        
+        try:
+            api_response = self.pumpfun_client.return_funds_to_mother(
+                mother_wallet_public_key=mother_wallet_public_key,
+                child_wallets=child_wallets
+            )
+            logger.info(f"🔧 API_VERIFICATION: Initial API call succeeded for {operation_id}")
+            
+        except Exception as e:
+            api_error = e
+            error_message = str(e)
+            
+            logger.warning(
+                f"🔧 API_VERIFICATION: Initial API call failed for {operation_id}: {error_message}",
+                extra={"operation_id": operation_id, "error_type": type(e).__name__}
+            )
+        
+        # Step 3: Always verify actual wallet states regardless of API response
+        logger.info(f"🔧 API_VERIFICATION: Starting wallet state verification for {operation_id}")
+        
+        # Extract hints from API response for better verification guidance
+        api_hints = self._extract_api_hints(api_response) if api_response else {}
+        
+        # Perform verification with enhanced logic
+        verification_results = await self._verify_return_completion(
+            initial_balances,
+            child_wallets,
+            operation_id,
+            api_hints
+        )
+        
+        # Step 4: Determine overall success
+        returned_wallets = verification_results["returned_wallets"]
+        not_returned_wallets = verification_results["not_returned_wallets"]
+        
+        total_returned = len(returned_wallets)
+        total_expected = len(initial_balances)
+        success_rate = (total_returned / total_expected * 100) if total_expected > 0 else 0
+        
+        # Consider operation successful if most wallets returned funds
+        overall_success = success_rate >= 80.0  # 80% threshold like funding verification
+        
+        operation_time = time.time() - start_time
+        
+        final_results = {
+            "success": overall_success,
+            "returned_wallets": returned_wallets,
+            "not_returned_wallets": not_returned_wallets,
+            "returned_count": total_returned,
+            "not_returned_count": len(not_returned_wallets),
+            "total_count": total_expected,
+            "success_rate": success_rate,
+            "operation_time": operation_time,
+            "api_response": api_response,
+            "api_error": str(api_error) if api_error else None,
+            "verification_results": verification_results
+        }
+        
+        logger.info(
+            f"🔧 API_VERIFICATION: Return funds operation {operation_id} completed - "
+            f"Success: {overall_success}, Rate: {success_rate:.1f}%",
+            extra={
+                "operation_id": operation_id,
+                "results": final_results
+            }
+        )
+        
+        return overall_success, final_results
+    
+    async def _verify_return_completion(
+        self,
+        initial_balances: Dict[str, Dict[str, Any]],
+        child_wallets: List[Dict[str, str]],
+        operation_id: str,
+        api_hints: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Verify return funds completion by checking wallet balance reductions.
+        
+        Args:
+            initial_balances: Dictionary of initial wallet balances
+            child_wallets: List of child wallet credentials
+            operation_id: Operation identifier for logging
+            api_hints: Hints from API response
+            
+        Returns:
+            Dictionary with verification results
+        """
+        verification_start = time.time()
+        returned_wallets = []
+        not_returned_wallets = []
+        
+        # Threshold for considering funds "returned" - balance should be significantly reduced
+        min_reduction_threshold = 0.02  # At least 0.02 SOL reduction to be considered "returned"
+        
+        # Progress tracking
+        prev_max_returned = 0
+        last_progress_time = verification_start
+        
+        while time.time() - verification_start < self.max_total_timeout:
+            current_returned = []
+            current_not_returned = []
+            
+            # Check each wallet's current balance vs initial balance
+            for wallet_name, initial_data in initial_balances.items():
+                try:
+                    wallet_address = initial_data["address"]
+                    initial_balance = initial_data["balance"]
+                    
+                    # Check current balance
+                    current_balance = await self._check_wallet_balance(wallet_address, wallet_name)
+                    balance_reduction = initial_balance - current_balance
+                    
+                    if balance_reduction >= min_reduction_threshold:
+                        current_returned.append({
+                            "name": wallet_name,
+                            "address": wallet_address,
+                            "initial_balance": initial_balance,
+                            "final_balance": current_balance,
+                            "amount_returned": balance_reduction
+                        })
+                        logger.info(f"🔧 VERIFICATION: ✅ {wallet_name} returned: {balance_reduction:.6f} SOL")
+                    else:
+                        current_not_returned.append({
+                            "name": wallet_name,
+                            "address": wallet_address,
+                            "initial_balance": initial_balance,
+                            "final_balance": current_balance,
+                            "amount_returned": balance_reduction
+                        })
+                        
+                except Exception as e:
+                    logger.warning(f"🔧 VERIFICATION: Error checking {wallet_name}: {str(e)}")
+                    current_not_returned.append({
+                        "name": wallet_name,
+                        "error": str(e),
+                        "initial_balance": initial_balances.get(wallet_name, {}).get("balance", 0.0),
+                        "final_balance": 0.0,
+                        "amount_returned": 0.0
+                    })
+            
+            returned_wallets = current_returned
+            not_returned_wallets = current_not_returned
+            
+            # Log progress
+            returned_count = len(returned_wallets)
+            total_wallets = len(initial_balances)
+            success_rate = (returned_count / total_wallets * 100) if total_wallets > 0 else 0
+            
+            logger.info(
+                f"🔧 VERIFICATION: Progress - {returned_count}/{total_wallets} wallets returned funds ({success_rate:.1f}%)",
+                extra={
+                    "operation_id": operation_id,
+                    "returned_count": returned_count,
+                    "total_wallets": total_wallets,
+                    "success_rate": success_rate
+                }
+            )
+
+            # Update progress timestamp if we observed more returned wallets this iteration
+            if returned_count > prev_max_returned:
+                prev_max_returned = returned_count
+                last_progress_time = time.time()
+
+            # Determine whether the API indicated in-progress work
+            observed_activity = False
+            if api_hints and isinstance(api_hints, dict):
+                status_by_wallet = api_hints.get("transfer_status_by_wallet", {}) or {}
+                for item in not_returned_wallets:
+                    wname = item.get("name")
+                    wstatus = status_by_wallet.get(wname)
+                    if isinstance(wstatus, str) and wstatus.lower() in {"processing", "queued", "submitted", "pending"}:
+                        observed_activity = True
+                        break
+
+            # Check if we should continue waiting
+            if returned_count == 0:
+                # No wallets returned yet, continue waiting
+                await asyncio.sleep(self.check_interval)
+                # Continue if still within base timeout, else only continue if activity observed and within long-tail
+                elapsed = time.time() - verification_start
+                if elapsed < self.verification_timeout:
+                    continue
+                if (elapsed < self.max_total_timeout) and (time.time() - last_progress_time < self.long_tail_extension or observed_activity):
+                    logger.info("🔧 VERIFICATION: Extending wait (no returns yet, activity observed or within long-tail window)")
+                    await asyncio.sleep(self.check_interval)
+                    continue
+                logger.info("🔧 VERIFICATION: Timeout reached with no returns observed")
+                break
+            elif returned_count == total_wallets:
+                # All wallets returned funds, we're done
+                logger.info(f"🔧 VERIFICATION: All wallets returned funds successfully")
+                break
+            else:
+                # Partial returns - wait a bit more to see if more complete
+                elapsed = time.time() - verification_start
+                if elapsed < self.verification_timeout:
+                    await asyncio.sleep(self.check_interval)
+                    continue
+                # Base timeout exceeded: allow a long-tail extension if we recently saw progress or API hinted activity
+                if (elapsed < self.max_total_timeout) and (time.time() - last_progress_time < self.long_tail_extension or observed_activity):
+                    logger.info("🔧 VERIFICATION: Extending wait (partial returns with recent progress or API activity)")
+                    await asyncio.sleep(self.check_interval)
+                    continue
+                # Time is running out, accept partial results
+                logger.info(f"🔧 VERIFICATION: Accepting partial return results due to timeout")
+                break
+        
+        verification_time = time.time() - verification_start
+        
+        results = {
+            "returned_wallets": returned_wallets,
+            "not_returned_wallets": not_returned_wallets,
+            "returned_count": len(returned_wallets),
+            "not_returned_count": len(not_returned_wallets),
+            "total_count": len(initial_balances),
+            "success_rate": (len(returned_wallets) / len(initial_balances) * 100) if initial_balances else 0,
+            "verification_time": verification_time,
+            "min_reduction_threshold": min_reduction_threshold
+        }
+        
+        logger.info(
+            f"🔧 VERIFICATION: Completed return verification in {verification_time:.1f}s",
+            extra={
+                "operation_id": operation_id,
+                "results": results
+            }
+        )
+        
+        return results
+    
+
 
 
 def create_funding_verification_system(pumpfun_client) -> APIBehaviorHandler:
