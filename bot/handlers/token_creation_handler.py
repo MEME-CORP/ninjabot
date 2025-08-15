@@ -84,6 +84,71 @@ def convert_base64_to_base58(base64_key: str) -> str:
         raise ValueError(f"Invalid base64 private key: {e}")
 
 
+# Recursive field extraction helpers for nested API responses
+def _norm_key(k: str) -> str:
+    """Normalize keys by removing underscores/hyphens and lowering for comparison."""
+    return re.sub(r'[_-]', '', k).lower()
+
+
+def _recursive_find_field(payload: Any, target_keys: List[str]) -> Optional[Any]:
+    """Recursively search dicts/lists for the first occurrence of target keys.
+
+    Returns the first non-collection value found for any of the target_keys.
+    """
+    try:
+        normalized_targets = {_norm_key(t) for t in target_keys}
+        if isinstance(payload, dict):
+            for k, v in payload.items():
+                # Only return direct matches when the value is a scalar; otherwise, keep recursing
+                if _norm_key(k) in normalized_targets and v is not None and not isinstance(v, (dict, list)):
+                    return v
+                res = _recursive_find_field(v, target_keys)
+                if res is not None:
+                    return res
+        elif isinstance(payload, list):
+            for item in payload:
+                res = _recursive_find_field(item, target_keys)
+                if res is not None:
+                    return res
+    except Exception:
+        # Be fault-tolerant; fall through to return None
+        pass
+    return None
+
+
+def _recursive_extract_address_from_strings(payload: Any) -> Optional[str]:
+    """Recursively search strings within payload for a plausible Solana address.
+
+    Prefers explicit 'Mint: <address>' hints; otherwise returns the first base58-like
+    address-length string (32-44 chars) found.
+    """
+    addr_pattern = r'[A-Za-z0-9]{32,50}'
+    mint_hint_pattern = r'Mint[:\s]+([A-Za-z0-9]{32,50})'
+    try:
+        if isinstance(payload, dict):
+            for v in payload.values():
+                res = _recursive_extract_address_from_strings(v)
+                if res:
+                    return res
+        elif isinstance(payload, list):
+            for item in payload:
+                res = _recursive_extract_address_from_strings(item)
+                if res:
+                    return res
+        elif isinstance(payload, str) and len(payload) > 30:
+            m = re.search(mint_hint_pattern, payload, re.IGNORECASE)
+            if m:
+                return m.group(1)
+            matches = re.findall(addr_pattern, payload)
+            for match in matches:
+                if 32 <= len(match) <= 44:
+                    return match
+    except Exception:
+        # Be fault-tolerant; fall through to return None
+        pass
+    return None
+
+
 def load_wallet_credentials_from_bundled_file(user_id: int) -> List[Dict[str, str]]:
     """
     Load wallet credentials from the bundled wallet file and convert to API format.
@@ -492,82 +557,63 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
                 logger.warning(f"Failed to cleanup temp image files: {cleanup_error}")
         
         # Store final results - normalize API response format
-        logger.info("Attempting to extract mint address from API response")
-        
+        logger.info("Attempting to extract mint address and bundle id from API response")
+
         mint_address = None
         bundle_id = ""
-        
+
         try:
-            # Try multiple possible field names where mint address might be stored
+            # Preferred field names (both camelCase and snake_case)
             possible_mint_fields = [
-                "mintAddress", "mint_address", "mint", "tokenAddress", "token_address", 
-                "contractAddress", "contract_address", "address", "tokenMint", "token_mint"
+                "mintAddress", "mint_address",
+                "tokenMint", "token_mint",
+                "tokenAddress", "token_address",
+                "mint"
             ]
-            
-            for field in possible_mint_fields:
-                if field in token_result and token_result[field]:
-                    mint_address = token_result[field]
-                    logger.info(f"Found mint address in field '{field}': {mint_address}")
-                    break
-            
-            # Try nested fields if mint address not found at top level
+
+            # Recursively find mint address anywhere in the payload (handles wrappers like data/result/results)
+            mint_address = _recursive_find_field(token_result, possible_mint_fields)
+            if mint_address:
+                logger.info(f"Found mint address via recursive search: {mint_address}")
+
+            # If not found, recursively scan for an address inside string fields
             if not mint_address:
-                logger.info("Mint address not found at top level, checking nested fields")
-                for key, value in token_result.items():
-                    if isinstance(value, dict):
-                        for nested_field in possible_mint_fields:
-                            if nested_field in value and value[nested_field]:
-                                mint_address = value[nested_field]
-                                logger.info(f"Found mint address in nested field '{key}.{nested_field}': {mint_address}")
-                                break
-                        if mint_address:
-                            break
-            
-            # Try to extract from message or any string field that might contain the mint address
+                logger.info("Mint address not found in structured fields, scanning strings recursively")
+                mint_address = _recursive_extract_address_from_strings(token_result)
+                if mint_address:
+                    logger.info(f"Extracted mint address from string content: {mint_address}")
+
+            # As a final fallback, regex on the entire serialized response
             if not mint_address:
-                logger.info("Mint address not found in structured fields, checking message content")
-                mint_pattern = r'[A-Za-z0-9]{32,50}'  # Solana address pattern
-                for key, value in token_result.items():
-                    if isinstance(value, str) and len(value) > 30:
-                        matches = re.findall(mint_pattern, value)
-                        if matches:
-                            # Look for addresses that might be mint addresses (not transaction signatures)
-                            for match in matches:
-                                if len(match) >= 32 and len(match) <= 44:  # Typical Solana address length
-                                    mint_address = match
-                                    logger.info(f"Extracted mint address from string field '{key}': {mint_address}")
-                                    break
-                            if mint_address:
-                                break
-            
-            # Extract bundle ID
-            bundle_id = token_result.get("bundleId") or token_result.get("bundle_id", "")
-            
-        except Exception as extraction_error:
-            logger.error(f"Error during mint address extraction: {str(extraction_error)}")
-            # Continue with empty mint_address to trigger the fallback below
-        
-        logger.info(f"Final extracted mint_address: {mint_address}")
-        logger.info(f"Final extracted bundle_id: {bundle_id}")
-        
-        if not mint_address:
-            logger.error(f"Mint address extraction failed. Available keys: {list(token_result.keys())}")
-            logger.error(f"Full response for debugging: {token_result}")
-            
-            # Try one more time with a hardcoded extraction from known API log format
-            try:
-                # From API logs: "Token NAME created and initial buys completed successfully in bundle ID. Mint: ADDRESS"
                 response_str = str(token_result)
                 mint_match = re.search(r'Mint[:\s]+([A-Za-z0-9]{32,50})', response_str, re.IGNORECASE)
                 if mint_match:
                     mint_address = mint_match.group(1)
-                    logger.info(f"Extracted mint address using regex pattern: {mint_address}")
-            except Exception as regex_error:
-                logger.error(f"Regex extraction also failed: {str(regex_error)}")
-                
-            if not mint_address:
-                raise Exception(f"Token creation succeeded but mint address not found in response. Available keys: {list(token_result.keys())}")
-            
+                    logger.info(f"Extracted mint address using global regex fallback: {mint_address}")
+
+            # Extract bundle ID recursively
+            bundle_id = _recursive_find_field(token_result, ["bundleId", "bundle_id"]) or ""
+            if bundle_id:
+                logger.info(f"Found bundle id via recursive search: {bundle_id}")
+
+        except Exception as extraction_error:
+            logger.error(f"Error during mint/bundle extraction: {str(extraction_error)}")
+            # Continue with empty values to trigger the fallback/validation below
+
+        logger.info(f"Final extracted mint_address: {mint_address}")
+        logger.info(f"Final extracted bundle_id: {bundle_id}")
+
+        if not mint_address:
+            # Provide more context if token_result is a dict
+            try:
+                keys_info = list(token_result.keys()) if isinstance(token_result, dict) else type(token_result).__name__
+            except Exception:
+                keys_info = "unknown"
+            logger.error(f"Mint address extraction failed. Available keys/context: {keys_info}")
+            logger.error(f"Full response for debugging: {token_result}")
+
+            raise Exception(f"Token creation succeeded but mint address not found in response. Keys/context: {keys_info}")
+
         logger.info(f"Successfully extracted mint address: {mint_address}")
             
         session_manager.update_session_value(user.id, "token_address", mint_address)

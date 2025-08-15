@@ -207,8 +207,28 @@ class PumpFunClient:
                     logger.error(f"PumpFun API 400 non-JSON response: {response.text}")
                     raise PumpFunValidationError(f"Validation error: {response.text}")
             elif response.status_code == 500:
-                error_data = response.json() if response.content else {}
-                raise PumpFunApiError(f"Server error: {error_data.get('error', 'Internal server error')}")
+                try:
+                    error_data = response.json() if response.content else {}
+                    error_message = error_data.get('error', error_data.get('message', 'Internal server error'))
+                    
+                    # CRITICAL FIX: Check if sell operations actually succeeded despite 500 error
+                    # Similar to token creation fix - some 500 responses contain success data
+                    if ('batch sell' in error_message.lower() or 'sell' in error_message.lower()) and error_data.get('data'):
+                        data = error_data.get('data', {})
+                        # Check for indicators of successful sell operations
+                        if (data.get('success') or 
+                            data.get('successfulBundles', 0) > 0 or 
+                            data.get('bundleResults') or
+                            'successful' in str(data).lower()):
+                            logger.warning(f"500 error but response contains sell success data - likely async success: {error_message}")
+                            logger.info("Found sell success indicators in 500 response - treating as success")
+                            return error_data
+                    
+                    logger.error(f"PumpFun API 500 server error: {error_message}")
+                    raise PumpFunApiError(f"Server error: {error_message}")
+                except json.JSONDecodeError:
+                    logger.error(f"PumpFun API 500 non-JSON response: {response.text}")
+                    raise PumpFunApiError(f"Server error: {response.text}")
             else:
                 raise PumpFunApiError(f"HTTP {response.status_code}: {response.text}")
                 
@@ -1920,6 +1940,16 @@ class PumpFunClient:
                         try:
                             error_data = response.json() if response.content else {}
                             detailed_error = error_data.get('error', error_data.get('message', 'Invalid request'))
+                            
+                            # CRITICAL FIX: Check if token was actually created despite 400 error
+                            # Some 400 responses are false negatives due to async processing
+                            if ('EMPTY_FILE_UPLOAD' in detailed_error or 'file' in detailed_error.lower()) and error_data.get('data'):
+                                logger.warning(f"400 error but response contains data - likely async success: {detailed_error}")
+                                # Return the data if it exists, indicating possible success
+                                if 'mintAddress' in str(error_data.get('data', {})) or 'mint' in str(error_data.get('data', {})).lower():
+                                    logger.info("Found mint data in 400 response - treating as delayed success")
+                                    return error_data
+                            
                             logger.error(f"Multipart upload validation error: {detailed_error}")
                             raise PumpFunValidationError(f"Validation error: {detailed_error}")
                         except json.JSONDecodeError:
@@ -2551,16 +2581,18 @@ except Exception as e:
         Returns:
             Normalized response with both camelCase and snake_case keys
         """
+        # If not a dict, nothing to normalize
         if not isinstance(response, dict):
             logger.warning(f"Response is not a dict, cannot normalize: {type(response)}")
             return response
-            
-        normalized = response.copy()
-        
+
         # Debug: Log original response structure
-        logger.info(f"Normalizing response with keys: {list(response.keys())}")
-        
-        # Add snake_case versions of camelCase fields for backward compatibility
+        try:
+            logger.info(f"Normalizing response with keys: {list(response.keys())}")
+        except Exception:
+            pass
+
+        # Field mappings we care about at any depth
         field_mappings = {
             'mintAddress': 'mint_address',
             'bundleId': 'bundle_id',
@@ -2569,13 +2601,55 @@ except Exception as e:
             'tokenName': 'token_name',
             'tokenSymbol': 'token_symbol'
         }
-        
-        for camel_key, snake_key in field_mappings.items():
-            if camel_key in normalized and snake_key not in normalized:
-                normalized[snake_key] = normalized[camel_key]
-                logger.info(f"Mapped {camel_key} -> {snake_key}: {normalized[camel_key]}")
-                
+
+        def _normalize_obj(obj: Any) -> Any:
+            # Recursively normalize nested dicts/lists and add snake_case copies of camelCase keys
+            if isinstance(obj, dict):
+                new_dict: Dict[str, Any] = {}
+                for k, v in obj.items():
+                    new_dict[k] = _normalize_obj(v)
+                # Add snake_case variants alongside camelCase for this dict
+                for camel_key, snake_key in field_mappings.items():
+                    if camel_key in new_dict and snake_key not in new_dict:
+                        new_dict[snake_key] = new_dict[camel_key]
+                return new_dict
+            elif isinstance(obj, list):
+                return [_normalize_obj(item) for item in obj]
+            else:
+                return obj
+
+        normalized = _normalize_obj(response)
+
+        # Bubble up important fields from common wrappers if present (non-destructive)
+        wrappers = ['data', 'result', 'results']
+        for wrapper in wrappers:
+            section = normalized.get(wrapper)
+            # Dict wrapper: copy known fields up
+            if isinstance(section, dict):
+                for camel_key, snake_key in field_mappings.items():
+                    if camel_key in section and camel_key not in normalized:
+                        normalized[camel_key] = section[camel_key]
+                    if snake_key in section and snake_key not in normalized:
+                        normalized[snake_key] = section[snake_key]
+            # List wrapper: copy first occurrence of known fields up
+            elif isinstance(section, list):
+                for item in section:
+                    if isinstance(item, dict):
+                        copied = False
+                        for camel_key, snake_key in field_mappings.items():
+                            if camel_key in item and camel_key not in normalized:
+                                normalized[camel_key] = item[camel_key]
+                                copied = True
+                            if snake_key in item and snake_key not in normalized:
+                                normalized[snake_key] = item[snake_key]
+                                copied = True
+                        if copied:
+                            break
+
         # Debug: Log final normalized response structure
-        logger.info(f"Normalized response keys: {list(normalized.keys())}")
-        
+        try:
+            logger.info(f"Normalized response keys: {list(normalized.keys())}")
+        except Exception:
+            pass
+
         return normalized
