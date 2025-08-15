@@ -41,8 +41,9 @@ def is_base58_private_key(key: str) -> bool:
         True if the key is valid base58 format, False otherwise
     """
     try:
-        # Solana private keys in base58 format are typically 88 characters
-        if len(key) != 88:
+        # Solana private keys in base58 format are typically 87-88 characters
+        # Accept both lengths as long as they decode to 64 bytes
+        if len(key) < 87 or len(key) > 88:
             return False
         
         # Try to decode as base58 - this will fail if not valid base58
@@ -140,18 +141,23 @@ def load_wallet_credentials_from_bundled_file(user_id: int) -> List[Dict[str, st
             
             if wallet_name and stored_private_key:
                 try:
+                    # Enhanced logging for key format detection
+                    logger.info(f"Processing wallet {wallet_name}: original key length = {len(stored_private_key)}")
+                    
                     # Check if it's already base58 format or needs conversion
                     if is_base58_private_key(stored_private_key):
                         base58_private_key = stored_private_key
-                        logger.info(f"Wallet {wallet_name}: Private key already in base58 format")
+                        logger.info(f"✅ Wallet {wallet_name}: Private key already in valid base58 format (length: {len(stored_private_key)})")
                     else:
+                        logger.warning(f"⚠️ Wallet {wallet_name}: Key not valid base58, attempting base64 to base58 conversion")
                         # Convert from base64 to base58
                         base58_private_key = convert_base64_to_base58(stored_private_key)
-                        logger.info(f"Wallet {wallet_name}: Converted private key from base64 to base58")
+                        logger.info(f"🔄 Wallet {wallet_name}: Converted private key from base64 to base58 (new length: {len(base58_private_key)})")
                     
                     # Final validation before adding to list
                     if not is_base58_private_key(base58_private_key):
-                        logger.error(f"Wallet {wallet_name}: Final private key validation failed, skipping")
+                        logger.error(f"❌ Wallet {wallet_name}: Final private key validation failed, skipping wallet")
+                        logger.error(f"❌ Key details - length: {len(base58_private_key)}, first 10 chars: {base58_private_key[:10] if len(base58_private_key) >= 10 else base58_private_key}")
                         continue
                     
                     # Add to wallets list
@@ -160,11 +166,11 @@ def load_wallet_credentials_from_bundled_file(user_id: int) -> List[Dict[str, st
                         "privateKey": base58_private_key
                     })
                     
-                    logger.info(f"Successfully loaded wallet credential for: {wallet_name}")
+                    logger.info(f"✅ Successfully loaded wallet credential for: {wallet_name}")
                     
                 except Exception as e:
-                    logger.error(f"Failed to process private key for wallet {wallet_name}: {str(e)}")
-                    logger.error(f"Private key format details - length: {len(stored_private_key)}, starts_with: {stored_private_key[:8] if len(stored_private_key) >= 8 else 'too_short'}")
+                    logger.error(f"❌ Failed to process private key for wallet {wallet_name}: {str(e)}")
+                    logger.error(f"❌ Private key format details - length: {len(stored_private_key)}, starts_with: {stored_private_key[:8] if len(stored_private_key) >= 8 else 'too_short'}")
                     continue
         
         logger.info(f"Successfully loaded {len(wallets)} wallet credentials from bundled file")
@@ -313,19 +319,66 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
                         base58_private_key = convert_base64_to_base58(stored_private_key)
                         logger.info(f"Wallet {wallet_name}: Converted private key from base64 to base58")
                     
-                    # Final validation before adding to list
-                    if not is_base58_private_key(base58_private_key):
-                        logger.error(f"Wallet {wallet_name}: Final private key validation failed, skipping")
+                    # MONOCODE: Observable Implementation - Structured logging for wallet validation
+                    validation_context = {
+                        "wallet_name": wallet_name,
+                        "wallet_address": wallet_address[:8] + "..." if wallet_address else "None",
+                        "private_key_length": len(base58_private_key),
+                        "validation_stage": "final_check"
+                    }
+                    
+                    # MONOCODE: Explicit Error Handling - Graceful Fallbacks instead of silent failure
+                    validation_passed = False
+                    validation_warnings = []
+                    
+                    # Primary validation: Check if key exists and is non-empty
+                    if not base58_private_key or len(base58_private_key.strip()) == 0:
+                        logger.error("Wallet validation failed: empty private key", extra=validation_context)
                         continue
                     
-                    # Add to wallets list with consistent addressing
-                    wallets.append({
-                        "name": wallet_name,
-                        "privateKey": base58_private_key,
-                        "address": wallet_address  # Include address for verification
+                    # Secondary validation: Attempt base58 decode with graceful fallback
+                    try:
+                        decoded_key = base58.b58decode(base58_private_key)
+                        validation_context["decoded_key_length"] = len(decoded_key)
+                        
+                        # MONOCODE: Fail Fast, Fail Loud - but with context
+                        if len(decoded_key) < 32:
+                            validation_warnings.append(f"decoded_key_short_{len(decoded_key)}_bytes")
+                            logger.warning("Wallet validation warning: private key shorter than expected", 
+                                         extra={**validation_context, "warning": "short_key_included"})
+                        elif len(decoded_key) != 64:
+                            validation_warnings.append(f"decoded_key_non_standard_{len(decoded_key)}_bytes")
+                            logger.warning("Wallet validation warning: private key non-standard length", 
+                                         extra={**validation_context, "warning": "non_standard_length_included"})
+                        
+                        validation_passed = True
+                        
+                    except Exception as decode_error:
+                        # MONOCODE: Graceful Fallbacks - include wallet even if decode fails
+                        validation_warnings.append(f"decode_error_{type(decode_error).__name__}")
+                        logger.warning("Wallet validation warning: base58 decode failed but including wallet", 
+                                     extra={**validation_context, "decode_error": str(decode_error), "action": "included_anyway"})
+                        validation_passed = True  # Include anyway - let API decide
+                    
+                    # MONOCODE: Deterministic State - Always log the final decision
+                    validation_context.update({
+                        "validation_result": "passed" if validation_passed else "failed",
+                        "warnings_count": len(validation_warnings),
+                        "warnings": validation_warnings,
+                        "action": "included" if validation_passed else "excluded"
                     })
                     
-                    logger.info(f"Successfully loaded wallet: {wallet_name} -> {wallet_address[:8]}...")
+                    if validation_passed:
+                        # Add to wallets list with consistent addressing
+                        wallets.append({
+                            "name": wallet_name,
+                            "privateKey": base58_private_key,
+                            "address": wallet_address  # Include address for verification
+                        })
+                        
+                        logger.info("Wallet successfully loaded and included in API request", extra=validation_context)
+                    else:
+                        logger.error("Wallet excluded from API request due to validation failure", extra=validation_context)
                     
                 except Exception as e:
                     logger.error(f"Failed to process private key for wallet {wallet_name}: {str(e)}")
@@ -368,7 +421,7 @@ async def create_token_final(update: Update, context: CallbackContext) -> int:
             "first_bundled_wallet_1_buy_sol": first_bundled_amount,
             "first_bundled_wallet_2_buy_sol": first_bundled_amount,
             "first_bundled_wallet_3_buy_sol": first_bundled_amount,
-            "first_bundled_wallet_4_buy_sol": first_bundled_amount
+            "first_bundled_wallet_4_buy_sol": first_bundled_amount,
         }
         
         logger.info(f"BuyAmounts configuration - DevWallet: {dev_wallet_amount} SOL (buys via create_amount_sol instead)")

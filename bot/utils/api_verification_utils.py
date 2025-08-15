@@ -14,6 +14,7 @@ import asyncio
 import time
 from typing import Dict, List, Any, Optional, Tuple
 from loguru import logger
+import base58
 
 from bot.api.pumpfun_client import PumpFunApiError
 
@@ -36,6 +37,39 @@ class APIBehaviorHandler:
         self.long_tail_extension = 120  # up to +2 minutes if progress observed
         # Absolute ceiling to avoid indefinite waits even with progress
         self.max_total_timeout = 600  # 10 minutes hard cap
+    
+    def _is_async_processing_error(self, message: str) -> bool:
+        """
+        Detect transient/async-processing API errors that shouldn't immediately abort verification.
+        """
+        msg = (message or "").lower()
+        patterns = [
+            "try again later",
+            "processing",
+            "queued",
+            "timeout",
+            "temporarily unavailable",
+            "please retry",
+            "rate limit",
+            "429",
+        ]
+        return any(p in msg for p in patterns)
+
+    def _is_insufficient_funds_error(self, message: str) -> bool:
+        """
+        Detect insufficient-funds style errors returned by the API/client.
+        Mirrors patterns recognized in pumpfun_client for consistency.
+        """
+        msg = (message or "").lower()
+        patterns = [
+            "custom program error: 1",
+            "insufficient funds",
+            "insufficient lamports",
+            "insufficient balance",
+            "not enough sol",
+            "insufficient account balance",
+        ]
+        return any(p in msg for p in patterns)
         
     async def fund_with_verification(
         self, 
@@ -94,6 +128,47 @@ class APIBehaviorHandler:
             else:
                 # This is likely a genuine error, but still verify to be sure
                 logger.info(f"🔧 API_VERIFICATION: Unknown error type - will still verify actual results")
+
+            # CRITICAL: If error indicates insufficient funds, do NOT enter long verification loop
+            try:
+                if self._is_insufficient_funds_error(error_message):
+                    logger.error(f"🔧 API_VERIFICATION: Insufficient funds detected for {operation_id} - aborting verification early")
+                    # Construct an immediate failure result without waiting
+                    child_wallets = funding_request["childWallets"]
+                    unfunded_wallets = []
+                    for wallet in child_wallets:
+                        wname = wallet.get("name", "Unknown")
+                        waddr = self._get_wallet_address(wallet) or (funding_request.get("addressesByName", {}) or {}).get(wname)
+                        unfunded_wallets.append({
+                            "name": wname,
+                            "address": waddr,
+                            "balance": 0.0
+                        })
+                    verification_result = {
+                        "funded_wallets": [],
+                        "unfunded_wallets": unfunded_wallets,
+                        "funded_count": 0,
+                        "unfunded_count": len(unfunded_wallets),
+                        "total_count": len(child_wallets),
+                        "success_rate": 0.0,
+                        "verification_time": 0.0,
+                        "minimum_balance_threshold": expected_amount_per_wallet * 0.8,
+                    }
+                    execution_time = time.time() - start_time
+                    results = {
+                        "operation_id": operation_id,
+                        "execution_time": execution_time,
+                        "initial_api_success": False,
+                        "initial_api_error": error_message,
+                        "verification_results": verification_result,
+                        "total_wallets": len(child_wallets),
+                        "funded_wallets": 0,
+                        "unfunded_wallets": len(child_wallets),
+                        "success_rate": 0.0,
+                    }
+                    return False, results
+            except Exception as early_exit_err:
+                logger.debug(f"🔧 API_VERIFICATION: Early-exit insufficient funds handling failed (continuing to verify): {early_exit_err}")
         
         # Step 2: Always verify actual wallet states regardless of API response
         logger.info(f"🔧 API_VERIFICATION: Starting wallet state verification for {operation_id}")
@@ -399,14 +474,49 @@ class APIBehaviorHandler:
             Wallet address if available
         """
         # Try different possible keys for address
-        address_keys = ["address", "publicKey", "public_key", "wallet_address"]
-        
+        address_keys = [
+            "address",
+            "publicKey",
+            "public_key",
+            "wallet_address",
+            "publicKeyBs58",
+            "walletAddress",
+            "public_key_bs58",
+        ]
+
         for key in address_keys:
-            if key in wallet and wallet[key]:
-                return wallet[key]
-        
-        # If no address found, try to derive from private key
-        # This would require additional crypto utilities
+            val = wallet.get(key)
+            if isinstance(val, str) and val.strip():
+                return val
+
+        # If no explicit address/public key, try to derive from base58-encoded private key bytes
+        # Many Solana "privateKey" strings are actually the 64-byte secret key (32-byte secret + 32-byte public)
+        # encoded in base58. In that case, the last 32 bytes are the public key bytes.
+        pk_keys = [
+            "privateKey",
+            "private_key",
+            "privateKeyBs58",
+            "secretKey",
+            "secret_key",
+        ]
+        for pk_key in pk_keys:
+            pk_str = wallet.get(pk_key)
+            if not isinstance(pk_str, str) or not pk_str.strip():
+                continue
+            try:
+                decoded = base58.b58decode(pk_str.strip())
+                # Expect 64+ bytes for a full keypair; take the last 32 bytes as the public key
+                if len(decoded) >= 64:
+                    pubkey_bytes = decoded[-32:]
+                    return base58.b58encode(pubkey_bytes).decode("utf-8")
+                else:
+                    # 32-byte secrets cannot reveal the public key without ed25519 derivation
+                    # We intentionally avoid extra deps here; fall through to None
+                    logger.debug("Private key appears to be 32 bytes; cannot derive public key without ed25519 lib")
+            except Exception as e:
+                logger.debug(f"Failed to derive address from private key for wallet {wallet.get('name', 'Unknown')}: {e}")
+
+        # Could not determine the address
         return None
     
     async def _check_wallet_balance(self, wallet_address: str, wallet_name: str) -> float:

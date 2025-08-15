@@ -1471,6 +1471,57 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
         logger.info(f"Other wallets needing funding: {len(other_wallets_needing_funding)}")
         logger.info(f"Total funding needed: {total_funding_needed:.6f} SOL")
         
+        # Preflight: Ensure airdrop (mother) wallet has enough SOL to cover transfers + fees
+        try:
+            mother_balance_resp = pumpfun_client.get_wallet_balance(airdrop_wallet)
+            mother_balance = 0.0
+            if isinstance(mother_balance_resp, dict):
+                mother_balance = float(mother_balance_resp.get("data", {}).get("balance", mother_balance_resp.get("balance", 0.0)))
+            elif isinstance(mother_balance_resp, (int, float)):
+                mother_balance = float(mother_balance_resp)
+            
+            dev_count = len(dev_wallets_needing_funding)
+            other_count = len(other_wallets_needing_funding)
+            total_wallets_to_fund = dev_count + other_count
+            
+            # Match fee assumptions in PumpFun client
+            base_fee_lamports = 5000
+            priority_fee_lamports = 20000
+            total_estimated_fee_lamports = base_fee_lamports + priority_fee_lamports
+            per_tx_fee_sol = total_estimated_fee_lamports / 1_000_000_000
+            minimum_reserve_sol = 100_000 / 1_000_000_000  # 0.0001 SOL
+            
+            # Compute what will actually be sent given uniform per-group amounts
+            required_transfers_sol = (dev_count * dev_wallet_required) + (other_count * bundled_wallet_required)
+            required_fees_sol = (total_wallets_to_fund * per_tx_fee_sol) + minimum_reserve_sol
+            required_total_sol = required_transfers_sol + required_fees_sol
+            
+            if mother_balance + 1e-9 < required_total_sol:
+                shortfall = max(0.0, required_total_sol - mother_balance)
+                logger.warning(f"Insufficient airdrop wallet balance. Have {mother_balance:.6f} SOL, need {required_total_sol:.6f} SOL (shortfall {shortfall:.6f} SOL)")
+                
+                keyboard = InlineKeyboardMarkup([
+                    [build_button("💰 Return Funds First", "return_funds_confirmation")],
+                    [build_button("🔄 Check Again", "check_wallet_balance")],
+                    [build_button("📝 Edit Buy Amounts", "edit_buy_amounts")]
+                ])
+                await query.edit_message_text(
+                    "❌ Insufficient Airdrop Wallet Balance\n\n"
+                    f"• Current balance: {mother_balance:.6f} SOL\n"
+                    f"• Required for this funding: {required_total_sol:.6f} SOL\n"
+                    f"• Shortfall: {shortfall:.6f} SOL\n\n"
+                    "Options:\n"
+                    "• Return funds from bundled wallets\n"
+                    "• Top up the airdrop wallet\n"
+                    "• Reduce buy amounts",
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return ConversationState.WALLET_FUNDING_REQUIRED
+        except Exception as preflight_err:
+            # Do not block funding due to preflight check errors; log and proceed to attempt funding
+            logger.warning(f"Preflight mother wallet balance check failed, proceeding anyway: {preflight_err}")
+        
         # Execute funding operation with enhanced API verification system
         logger.info(f"Executing wallet funding with verification for user {user.id}")
         
