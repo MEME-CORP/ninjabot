@@ -728,6 +728,7 @@ async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
             logger.info(f"BALANCE CHECK DEBUG: Will check {wallet_name} address: {wallet_address}")
         
         # Check each wallet's SOL balance with proper requirements
+        wallet_check_count = 0
         for wallet in bundled_wallets_data:
             # Use normalized address field (bundled_wallet_storage returns normalized structure)
             wallet_address = wallet.get("address") or wallet.get("publicKey")
@@ -737,6 +738,12 @@ async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
                 continue
                 
             try:
+                # Refresh session every 10 wallet checks to prevent timeout during long balance checking
+                wallet_check_count += 1
+                if wallet_check_count % 10 == 0:
+                    session_manager.refresh_session(user.id)
+                    logger.info(f"Session refreshed after checking {wallet_check_count} wallets")
+                
                 # Use enhanced SOL balance endpoint
                 balance_response = pumpfun_client.get_wallet_sol_balance(wallet_address)
                 
