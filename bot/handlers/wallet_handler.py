@@ -662,17 +662,29 @@ async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
         )
         return ConversationState.ACTIVITY_SELECTION
     
-    # Calculate individual buy amounts per wallet
-    dev_wallet_buy_amount = buy_amounts.get("DevWallet", 0.01)
-    first_bundled_buy_amount = buy_amounts.get("First Bundled Wallets", 0.01)
+    # Check if this is a sell operation to determine appropriate SOL requirements
+    pending_operation = session_manager.get_session_value(user.id, "token_operation")
+    is_sell_operation = pending_operation and pending_operation.startswith("sell_")
     
-    # CRITICAL FIX: Use exact API requirements from bundler_api.md
-    # DevWallet (tipper): 0.055 SOL minimum + create amount + buy amount
-    # Other wallets: 0.025 SOL minimum + buy amount
-    create_amount_sol = 0.001  # Standard create amount from API docs
-    dev_wallet_required = 0.055 + create_amount_sol + dev_wallet_buy_amount
-    # Bundled wallets: 0.025 base + buy_amount (no create amount needed)
-    bundled_wallet_required = 0.025 + first_bundled_buy_amount
+    if is_sell_operation:
+        # SELL OPERATIONS: Much lower requirements - only transaction fees needed
+        # Sell operations only need ~0.001-0.002 SOL for transaction fees
+        dev_wallet_required = 0.002  # Transaction fees for dev wallet
+        bundled_wallet_required = 0.002  # Transaction fees for bundled wallets
+        logger.info(f"BALANCE CHECK: Using SELL operation requirements - {dev_wallet_required:.4f} SOL per wallet")
+    else:
+        # BUY OPERATIONS: Full requirements from bundler_api.md
+        # Calculate individual buy amounts per wallet
+        dev_wallet_buy_amount = buy_amounts.get("DevWallet", 0.01)
+        first_bundled_buy_amount = buy_amounts.get("First Bundled Wallets", 0.01)
+        
+        # DevWallet (tipper): 0.055 SOL minimum + create amount + buy amount
+        # Other wallets: 0.025 SOL minimum + buy amount
+        create_amount_sol = 0.001  # Standard create amount from API docs
+        dev_wallet_required = 0.055 + create_amount_sol + dev_wallet_buy_amount
+        # Bundled wallets: 0.025 base + buy_amount (no create amount needed)
+        bundled_wallet_required = 0.025 + first_bundled_buy_amount
+        logger.info(f"BALANCE CHECK: Using BUY operation requirements - Dev: {dev_wallet_required:.4f}, Bundled: {bundled_wallet_required:.4f} SOL")
     
     # CRITICAL DEBUGGING: Log addresses being checked for balance consistency tracking
     airdrop_wallet_address = session_manager.get_session_value(user.id, "airdrop_wallet_address")

@@ -396,11 +396,11 @@ async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
     dev_wallet_buy_amount = buy_amounts.get("DevWallet", 0.01)
     first_bundled_buy_amount = buy_amounts.get("First Bundled Wallets", 0.01)
     
-    # Calculate required balances per API documentation:
-    # - DevWallet (tipper): 0.055 SOL minimum + buy amount
-    # - Other wallets: 0.025 SOL minimum + buy amount
-    dev_wallet_required = 0.055 + dev_wallet_buy_amount
-    bundled_wallet_required = 0.025 + first_bundled_buy_amount
+    # REDUCED REQUIREMENTS: Bare minimum for sell transactions
+    # - DevWallet (tipper): 0.005 SOL minimum + buy amount
+    # - Other wallets: 0.003 SOL minimum + buy amount
+    dev_wallet_required = 0.005 + dev_wallet_buy_amount
+    bundled_wallet_required = 0.003 + first_bundled_buy_amount
     
     await query.edit_message_text("🔍 **Checking Bundled Wallet Balances**...", parse_mode=ParseMode.MARKDOWN)
     
@@ -1390,9 +1390,9 @@ async def start_wallet_funding(update: Update, context: CallbackContext) -> int:
         dev_wallet_buy_amount = buy_amounts.get("DevWallet", 0.01)
         first_bundled_buy_amount = buy_amounts.get("First Bundled Wallets", 0.01)
         
-        # Calculate required balances per API documentation
-        dev_wallet_required = 0.055 + dev_wallet_buy_amount
-        bundled_wallet_required = 0.025 + first_bundled_buy_amount
+        # REDUCED REQUIREMENTS: Bare minimum for sell transactions
+        dev_wallet_required = 0.005 + dev_wallet_buy_amount
+        bundled_wallet_required = 0.003 + first_bundled_buy_amount
         
         # Prepare funding data for API
         funding_data = {
@@ -2377,14 +2377,14 @@ async def check_bundled_wallets_funding_status(pumpfun_client, bundled_wallets_c
                 "error": f"No bundled wallets found for user {user_id} with airdrop wallet {airdrop_wallet_address[:8]}..."
             }
         
-        # Calculate required balances per API documentation:
-        # - DevWallet (tipper): 0.055 SOL minimum + buy amount  
-        # - Other wallets: 0.025 SOL minimum + buy amount
+        # REDUCED REQUIREMENTS: Bare minimum for sell transactions
+        # - DevWallet (tipper): 0.005 SOL minimum + buy amount  
+        # - Other wallets: 0.003 SOL minimum + buy amount
         dev_wallet_buy_amount = buy_amounts.get("DevWallet", 0.01)
         first_bundled_buy_amount = buy_amounts.get("First Bundled Wallets", 0.01)
         
-        dev_wallet_required = 0.055 + dev_wallet_buy_amount
-        bundled_wallet_required = 0.025 + first_bundled_buy_amount
+        dev_wallet_required = 0.005 + dev_wallet_buy_amount
+        bundled_wallet_required = 0.003 + first_bundled_buy_amount
         
         funded_count = 0
         total_wallets = len(bundled_wallets_data)

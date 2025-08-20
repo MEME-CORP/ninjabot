@@ -1913,6 +1913,14 @@ def register_start_handler(application):
         wallet_balance_overview_choice
     )
     
+    # Import bundler management handlers - NO BALANCE CHECKING
+    from bot.handlers.bundler_management_handler import (
+        bundler_sell_percentage_choice,
+        execute_bundler_sell_operation,
+        handle_airdrop_wallet_selection_for_selling,
+        handle_token_selection_for_selling
+    )
+    
     # Import the bundling handlers
     from bot.handlers.wallet_handler import (
         create_airdrop_wallet,
@@ -2020,7 +2028,11 @@ def register_start_handler(application):
                 CallbackQueryHandler(activity_choice, pattern=r"^back_to_activities$")
             ],
             ConversationState.TOKEN_TRADING_OPERATION: [
-                CallbackQueryHandler(back_to_token_options, pattern=r"^back_to_token_options$")
+                CallbackQueryHandler(back_to_token_options, pattern=r"^back_to_token_options$"),
+                # Bundler sell operations - NO BALANCE CHECKING
+                CallbackQueryHandler(bundler_sell_percentage_choice, pattern=r"^bundler_sell_"),
+                CallbackQueryHandler(bundler_sell_percentage_choice, pattern=r"^back_to_bundler_percentage$"),
+                CallbackQueryHandler(execute_bundler_sell_operation, pattern=r"^bundler_execute_sell$")
             ],
             ConversationState.SELL_PERCENTAGE_SELECTION: [
                 CallbackQueryHandler(sell_percentage_choice)
@@ -2114,6 +2126,13 @@ def register_start_handler(application):
             ConversationState.RETURN_FUNDS_COMPLETE: [
                 CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
                 CallbackQueryHandler(create_token_final, pattern=r"^create_token_final$")
+            ],
+            # NEW WALLET-FIRST SELLING FLOW - NO BALANCE CHECKING
+            ConversationState.SELLING_AIRDROP_SELECTION: [
+                CallbackQueryHandler(handle_airdrop_wallet_selection_for_selling)
+            ],
+            ConversationState.SELLING_TOKEN_SELECTION: [
+                CallbackQueryHandler(handle_token_selection_for_selling)
             ]
         },
         fallbacks=[CommandHandler("start", start)],

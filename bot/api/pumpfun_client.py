@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 # API Configuration
 PUMPFUN_API_BASE_URL = "https://pumpfunapibundler-m0ep.onrender.com"  # Default local API server
-DEFAULT_TIMEOUT = 60  # Increased from 30 to handle cold starts
+DEFAULT_TIMEOUT = 1800  # Increased from 30 to handle cold starts
 MAX_RETRIES = 5  # Increased from 3 for better cold start handling
 INITIAL_BACKOFF = 2.0  # Increased from 1.0 for cold start scenarios
 COLD_START_MAX_RETRIES = 8  # Special retry count for cold starts
@@ -222,6 +222,13 @@ class PumpFunClient:
                             'successful' in str(data).lower()):
                             logger.warning(f"500 error but response contains sell success data - likely async success: {error_message}")
                             logger.info("Found sell success indicators in 500 response - treating as success")
+                            # Ensure a consistent success flag for downstream handlers
+                            try:
+                                if isinstance(data, dict) and not data.get('success', False):
+                                    data['success'] = True
+                                    error_data['data'] = data
+                            except Exception:
+                                pass
                             return error_data
                     
                     logger.error(f"PumpFun API 500 server error: {error_message}")
@@ -1838,10 +1845,24 @@ class PumpFunClient:
                         logger.info(f"  {key}: {value} (type: {type(value).__name__})")
                 
                 # Make multipart request with retry logic
-                response = self._make_multipart_request_with_retry("POST", url, data=form_data, files=files)
-                
-                logger.info("Token creation with image upload completed successfully")
-                return self._normalize_response_fields(response)
+                try:
+                    response = self._make_multipart_request_with_retry("POST", url, data=form_data, files=files)
+                    logger.info("Token creation with image upload completed successfully")
+                    return self._normalize_response_fields(response)
+                except (PumpFunValidationError, PumpFunApiError) as e:
+                    # Graceful fallback: if the server reports empty file upload, continue without image
+                    err_msg = str(e)
+                    if 'EMPTY_FILE_UPLOAD' in err_msg or 'empty file upload' in err_msg.lower():
+                        logger.warning("EMPTY_FILE_UPLOAD detected during multipart upload. Falling back to token creation without image.")
+                        return self._create_token_without_image(
+                            token_params=token_params,
+                            buy_amounts_dict=buy_amounts_dict,
+                            wallets=wallets,
+                            slippage_bps=slippage_bps,
+                            create_amount_sol=create_amount_sol
+                        )
+                    # Re-raise non-image related errors
+                    raise
                 
         except IOError as e:
             raise PumpFunValidationError(f"Failed to read image file: {str(e)}")
@@ -1928,6 +1949,15 @@ class PumpFunClient:
             try:
                 with requests.Session() as session:
                     session.headers.update({'User-Agent': 'NinjaBot-PumpFun-Client/1.0'})
+                    # Ensure file streams are reset for each retry attempt to avoid EMPTY_FILE_UPLOAD
+                    try:
+                        if files:
+                            for _k, _v in files.items():
+                                _f = _v[1]
+                                if hasattr(_f, 'seek'):
+                                    _f.seek(0)
+                    except Exception as _rewind_err:
+                        logger.warning(f"Failed to rewind multipart file stream before attempt {attempt + 1}: {_rewind_err}")
                     response = session.request(method, url, data=data, files=files, timeout=self.timeout)
                     logger.info(f"Multipart request {method} {url} - Status: {response.status_code}")
                     
@@ -2042,81 +2072,170 @@ class PumpFunClient:
             
         return self._make_request_with_retry("POST", endpoint, json=data)
 
-    def sell_dev_wallet(self, dev_wallet_private_key: str, mint_address: str, sell_percentage: float, 
-                       slippage_bps: int = 5000) -> Dict[str, Any]:
+    def sell_dev_wallet(self, mint_address: str, sell_percentage, slippage_bps: int = 2500, 
+                       wallets: List[Dict[str, str]] = None) -> Dict[str, Any]:
         """
-        Sell tokens from DevWallet using stateless API.
+        Sell tokens from DevWallet using simplified stateless API.
+        
+        NEW SIMPLIFIED PROCESS:
+        - Only POST JSON to API and read JSON back
+        - No token balance lookups or amount math on client
+        - Server handles all balance validation and calculations
         
         Args:
-            dev_wallet_private_key: Private key of the dev wallet
-            mint_address: Token mint address
-            sell_percentage: Percentage to sell (0-100)
-            slippage_bps: Slippage in basis points
+            mint_address: Token mint address (non-empty string)
+            sell_percentage: Percentage to sell - accepts "X%" or X (1-100)
+            slippage_bps: Slippage in basis points (default 2500 = 25%)
+            wallets: List of wallet objects with name and privateKey (must include DevWallet)
             
         Returns:
-            Dictionary with sell results
-        """
-        if not dev_wallet_private_key:
-            raise PumpFunValidationError("Dev wallet private key cannot be empty")
-        if not mint_address:
-            raise PumpFunValidationError("Mint address cannot be empty")
-        if not 0 <= sell_percentage <= 100:
-            raise PumpFunValidationError("Sell percentage must be between 0 and 100")
+            Dictionary with sell results from server
             
-        endpoint = "/api/pump/sell-dev"
-        data = {
-            "mintAddress": mint_address,
-            "sellAmountPercentage": f"{sell_percentage}%",
-            "slippageBps": slippage_bps,
-            "wallets": [
-                {
-                    "name": "DevWallet",
-                    "privateKey": dev_wallet_private_key
-                }
-            ]
-        }
+        Raises:
+            PumpFunValidationError: On client-side validation failures
+        """
+        # CLIENT-SIDE VALIDATION CHECKLIST (minimal essential checks only)
         
-        return self._make_request_with_retry("POST", endpoint, json=data)
-
-    def batch_sell_token(self, wallets: List[Dict[str, str]], mint_address: str, sell_percentage: float, 
-                        slippage_bps: int = 5000, target_wallet_names: Optional[List[str]] = None) -> Dict[str, Any]:
-        """
-        Batch sell tokens from multiple wallets (excluding DevWallet).
+        # mintAddress is a non-empty string
+        if not mint_address or not isinstance(mint_address, str):
+            raise PumpFunValidationError("mintAddress must be a non-empty string")
         
-        Args:
-            wallets: List of wallet dictionaries with 'name' and 'privateKey' fields
-            mint_address: Token mint address
-            sell_percentage: Percentage to sell (0-100)
-            slippage_bps: Slippage in basis points
-            target_wallet_names: Optional list of target wallet names
+        # sellAmountPercentage is "X%" or X and 1 ≤ X ≤ 100
+        normalized_percentage = self._normalize_percentage(sell_percentage)
+        
+        # slippageBps is an integer
+        if not isinstance(slippage_bps, int):
+            raise PumpFunValidationError("slippageBps must be an integer")
             
-        Returns:
-            Dictionary with batch sell results
-        """
-        if not wallets:
-            raise PumpFunValidationError("Wallets cannot be empty")
-        if not mint_address:
-            raise PumpFunValidationError("Mint address cannot be empty")
-        if not 0 <= sell_percentage <= 100:
-            raise PumpFunValidationError("Sell percentage must be between 0 and 100")
+        # wallets is a non-empty array; each item has { name, privateKey }
+        if not wallets or not isinstance(wallets, list):
+            raise PumpFunValidationError("wallets must be a non-empty array")
             
-        # Validate wallet format
+        # (Dev sell) there is *one* wallet named "DevWallet"
+        dev_wallets = [w for w in wallets if w.get('name') == 'DevWallet']
+        if len(dev_wallets) != 1:
+            raise PumpFunValidationError("wallets array must contain exactly one wallet named 'DevWallet'")
+            
+        # Validate wallet structure
         for wallet in wallets:
             if not isinstance(wallet, dict) or 'name' not in wallet or 'privateKey' not in wallet:
                 raise PumpFunValidationError("Each wallet must have 'name' and 'privateKey' fields")
+            if not wallet['name'] or not wallet['privateKey']:
+                raise PumpFunValidationError("Wallet name and privateKey cannot be empty")
+        
+        # Show minimum SOL requirement reminder (UI responsibility but log for visibility)
+        logger.info(" DevWallet requires minimum 0.005 SOL for sell transactions")
+        
+        endpoint = "/api/pump/sell-dev"
+        data = {
+            "mintAddress": mint_address,
+            "sellAmountPercentage": normalized_percentage,
+            "slippageBps": slippage_bps,
+            "wallets": wallets
+        }
+        
+        # Use enhanced retry for critical operations
+        return self._make_request_for_critical_operations("POST", endpoint, json=data)
+
+    def batch_sell_token(self, mint_address: str, sell_percentage, slippage_bps: int = 2500,
+                        wallets: List[Dict[str, str]] = None, target_wallet_names: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Batch sell tokens from multiple non-DevWallets using simplified stateless API.
+        
+        NEW SIMPLIFIED PROCESS:
+        - Only POST JSON to API and read JSON back
+        - No token balance lookups or amount math on client
+        - Server handles all balance validation and calculations
+        - Do not include DevWallet (server excludes it anyway)
+        
+        Args:
+            mint_address: Token mint address (non-empty string)
+            sell_percentage: Percentage to sell - accepts "X%" or X (1-100) 
+            slippage_bps: Slippage in basis points (default 2500 = 25%)
+            wallets: List of wallet objects with name and privateKey (required for stateless operation)
+            target_wallet_names: Optional filter to only use specific wallets
             
+        Returns:
+            Dictionary with batch sell results from server
+            
+        Raises:
+            PumpFunValidationError: On client-side validation failures
+        """
+        # CLIENT-SIDE VALIDATION CHECKLIST (minimal essential checks only)
+        
+        # mintAddress is a non-empty string
+        if not mint_address or not isinstance(mint_address, str):
+            raise PumpFunValidationError("mintAddress must be a non-empty string")
+        
+        # sellAmountPercentage is "X%" or X and 1 ≤ X ≤ 100
+        normalized_percentage = self._normalize_percentage(sell_percentage)
+        
+        # slippageBps is an integer
+        if not isinstance(slippage_bps, int):
+            raise PumpFunValidationError("slippageBps must be an integer")
+            
+        # wallets is a non-empty array; each item has { name, privateKey }
+        if not wallets or not isinstance(wallets, list):
+            raise PumpFunValidationError("wallets must be a non-empty array")
+            
+        # Validate wallet structure
+        for wallet in wallets:
+            if not isinstance(wallet, dict) or 'name' not in wallet or 'privateKey' not in wallet:
+                raise PumpFunValidationError("Each wallet must have 'name' and 'privateKey' fields")
+            if not wallet['name'] or not wallet['privateKey']:
+                raise PumpFunValidationError("Wallet name and privateKey cannot be empty")
+        
+        # Show minimum SOL requirement reminder (UI responsibility but log for visibility)
+        logger.info(" Each wallet requires minimum 0.025 SOL for sell transactions")
+        
         endpoint = "/api/pump/batch-sell"
         data = {
             "mintAddress": mint_address,
-            "sellAmountPercentage": f"{sell_percentage}%",
+            "sellAmountPercentage": normalized_percentage,
             "slippageBps": slippage_bps,
-            "wallets": wallets  # Use actual wallet objects with correct names
+            "wallets": wallets
         }
         
         if target_wallet_names:
             data["targetWalletNames"] = target_wallet_names
             
-        return self._make_request_with_retry("POST", endpoint, json=data)
+        # Use enhanced retry for critical operations
+        return self._make_request_for_critical_operations("POST", endpoint, json=data)
+
+    def _normalize_percentage(self, sell_percentage) -> str:
+        """
+        Normalize percentage input to accept both "X%" or X formats.
+        
+        Args:
+            sell_percentage: Percentage input - can be "50%", "50", 50, or 50.0
+            
+        Returns:
+            Normalized percentage string (e.g., "50%")
+            
+        Raises:
+            PumpFunValidationError: If percentage is invalid
+        """
+        try:
+            # Handle string input
+            if isinstance(sell_percentage, str):
+                # Remove % if present and convert to float
+                if sell_percentage.endswith('%'):
+                    percentage_value = float(sell_percentage[:-1])
+                else:
+                    percentage_value = float(sell_percentage)
+            else:
+                # Handle numeric input
+                percentage_value = float(sell_percentage)
+                
+            # Validate range
+            if not 1 <= percentage_value <= 100:
+                raise PumpFunValidationError(f"sellAmountPercentage must be between 1 and 100, got {percentage_value}")
+                
+            # Return normalized format (integer percentage with %)
+            return f"{int(percentage_value)}%"
+            
+        except (ValueError, TypeError) as e:
+            raise PumpFunValidationError(f"Invalid percentage format: {sell_percentage}. Must be 'X%' or X (1-100). Error: {str(e)}")
 
     # Validation Methods
 

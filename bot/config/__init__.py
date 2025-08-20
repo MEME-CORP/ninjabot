@@ -110,6 +110,10 @@ class ConversationState:
     TOKEN_TRADING_OPERATION = 65   # Updated index
     SELL_PERCENTAGE_SELECTION = 66 # Updated index
     SELL_CONFIRM_EXECUTE = 67      # Updated index
+    
+    # NEW WALLET-FIRST SELLING FLOW - NO BALANCE CHECKING
+    SELLING_AIRDROP_SELECTION = 68  # Select airdrop wallet for selling
+    SELLING_TOKEN_SELECTION = 69    # Select token after loading child wallets
 
 # Volume generation strategies
 class VolumeStrategy:

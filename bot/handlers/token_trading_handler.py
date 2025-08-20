@@ -35,6 +35,41 @@ from bot.api.pumpfun_client import PumpFunClient  # Added for token trading oper
 from bot.utils.wallet_storage import airdrop_wallet_storage, bundled_wallet_storage
 
 
+def get_latest_token_mint_address(user_id: int) -> Optional[str]:
+    """
+    Get the mint address of the most recently created token for a user.
+    
+    Args:
+        user_id: User ID to get tokens for
+        
+    Returns:
+        Mint address of the latest token, or None if no tokens found
+    """
+    try:
+        user_tokens = token_storage.get_user_tokens(user_id)
+        if not user_tokens:
+            logger.info(f"No tokens found for user {user_id}")
+            return None
+        
+        # Sort tokens by created_at timestamp (most recent first)
+        sorted_tokens = sorted(
+            user_tokens, 
+            key=lambda x: x.get('created_at', ''), 
+            reverse=True
+        )
+        
+        latest_token = sorted_tokens[0]
+        mint_address = latest_token.get('mint_address')
+        token_name = latest_token.get('token_name', 'Unknown')
+        
+        logger.info(f"Latest token for user {user_id}: {token_name} ({mint_address})")
+        return mint_address
+        
+    except Exception as e:
+        logger.error(f"Failed to get latest token for user {user_id}: {e}")
+        return None
+
+
 # =============================================================================
 # BUNDLER MANAGEMENT FUNCTIONS - Token management operations
 # =============================================================================
@@ -141,7 +176,7 @@ async def token_selection(update: Update, context: CallbackContext) -> int:
         # Go back to airdrop wallet selection (updated flow)
         return await show_airdrop_wallet_selection(update, context)
     elif choice == "back_to_wallet_overview":
-        # Go back to wallet balance overview
+        # Go back to wallet overview (no balance checking)
         selected_airdrop_wallet = session_manager.get_session_value(user.id, "selected_airdrop_wallet")
         if selected_airdrop_wallet:
             return await show_wallet_balance_overview(update, context, selected_airdrop_wallet)
@@ -481,6 +516,9 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
     user = update.callback_query.from_user
     query = update.callback_query
     
+    # Refresh session before potentially long sell operation
+    session_manager.refresh_session(user.id)
+    
     # Get session data
     selected_token = session_manager.get_session_value(user.id, "selected_token")
     operation = session_manager.get_session_value(user.id, "token_operation")
@@ -518,11 +556,16 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
         
         # Method 2: Fallback to session airdrop wallet (legacy support)
         if not airdrop_address:
+            # Refresh session before accessing session data to prevent expiration issues
+            session_manager.refresh_session(user.id)
             session_data = session_manager.get_session_data(user.id)
-            airdrop_wallet = session_data.get('airdrop_wallet')
-            if airdrop_wallet and 'address' in airdrop_wallet:
-                airdrop_address = airdrop_wallet['address']
-                logger.info(f"Found airdrop wallet in session: {airdrop_address[:8]}...")
+            if session_data:  # Check if session_data is not None
+                airdrop_wallet = session_data.get('airdrop_wallet')
+                if airdrop_wallet and 'address' in airdrop_wallet:
+                    airdrop_address = airdrop_wallet['address']
+                    logger.info(f"Found airdrop wallet in session: {airdrop_address[:8]}...")
+            else:
+                logger.warning(f"Session data is None for user {user.id}, session may have expired")
         
         # Method 3: Try to get airdrop address from token record
         if not airdrop_address and 'airdrop_wallet_address' in selected_token:
@@ -600,49 +643,52 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
         pumpfun_client = PumpFunClient()
         
         if operation == "sell_dev":
-            # Sell with DevWallet only
+            # Sell with DevWallet only - SIMPLIFIED PROCESS
             progress_data['current_step'] = 'Executing DevWallet sell...'
             await query.edit_message_text(
                 format_sell_operation_progress(progress_data),
                 parse_mode=ParseMode.MARKDOWN
             )
             
+            # Filter for DevWallet only
             dev_wallets = [w for w in wallets_data if w['name'] == 'DevWallet']
-            if dev_wallets:
-                # Extract dev wallet credentials for PumpFun API
-                dev_wallet = dev_wallets[0]
-                logger.info(f"Starting DevWallet sell for mint {mint_address} with {sell_percentage}% of tokens")
-                
-                results = pumpfun_client.sell_dev_wallet(
-                    dev_wallet_private_key=dev_wallet.get('privateKey'),
-                    mint_address=mint_address,
-                    sell_percentage=sell_percentage,
-                    slippage_bps=slippage_bps
-                )
-                
-                logger.info(f"DevWallet sell completed successfully: {results}")
-            else:
+            if not dev_wallets:
                 raise Exception("DevWallet not found in wallet data")
+            
+            logger.info(f"Starting simplified DevWallet sell for mint {mint_address} with {sell_percentage}% of tokens")
+            
+            # ✅ SIMPLIFIED API CALL - API handles balance validation internally
+            results = pumpfun_client.sell_dev_wallet(
+                mint_address=mint_address,
+                sell_percentage=sell_percentage,
+                slippage_bps=slippage_bps,
+                wallets=dev_wallets  # Pass wallet objects directly
+            )
+            
+            logger.info(f"DevWallet sell completed: {results}")
         
         elif operation == "sell_bundled":
-            # Sell with bundled wallets only (excluding DevWallet)
+            # Sell with bundled wallets only - SIMPLIFIED PROCESS
             progress_data['current_step'] = 'Executing batch sell...'
             await query.edit_message_text(
                 format_sell_operation_progress(progress_data),
                 parse_mode=ParseMode.MARKDOWN
             )
             
+            # Filter non-DevWallets (server excludes DevWallet anyway)
             bundled_wallets_only = [w for w in wallets_data if w['name'] != 'DevWallet']
-            if bundled_wallets_only:
-                # Pass complete wallet objects to PumpFun API for correct naming
-                results = pumpfun_client.batch_sell_token(
-                    wallets=bundled_wallets_only,
-                    mint_address=mint_address,
-                    sell_percentage=sell_percentage,
-                    slippage_bps=slippage_bps
-                )
-            else:
+            if not bundled_wallets_only:
                 raise Exception("No bundled wallets found in wallet data")
+            
+            logger.info(f"Starting simplified batch sell for mint {mint_address} with {sell_percentage}% of tokens")
+            
+            # ✅ SIMPLIFIED API CALL - API handles balance validation internally
+            results = pumpfun_client.batch_sell_token(
+                mint_address=mint_address,
+                sell_percentage=sell_percentage,
+                slippage_bps=slippage_bps,
+                wallets=bundled_wallets_only
+            )
         
         elif operation == "sell_all":
             # Sell with all wallets (DevWallet + bundled)
@@ -658,13 +704,12 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
             
             dev_wallets = [w for w in wallets_data if w['name'] == 'DevWallet']
             if dev_wallets:
-                # Extract dev wallet credentials for PumpFun API
-                dev_wallet = dev_wallets[0]
+                # ✅ SIMPLIFIED API CALL for DevWallet - API validates internally
                 dev_result = pumpfun_client.sell_dev_wallet(
-                    dev_wallet_private_key=dev_wallet.get('privateKey'),
                     mint_address=mint_address,
                     sell_percentage=sell_percentage,
-                    slippage_bps=slippage_bps
+                    slippage_bps=slippage_bps,
+                    wallets=dev_wallets
                 )
                 all_results['dev_wallet'] = dev_result
             
@@ -678,20 +723,40 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
             
             bundled_wallets_only = [w for w in wallets_data if w['name'] != 'DevWallet']
             if bundled_wallets_only:
-                # Pass complete wallet objects to PumpFun API for correct naming
+                # ✅ SIMPLIFIED API CALL for batch sell - API validates internally
                 batch_result = pumpfun_client.batch_sell_token(
-                    wallets=bundled_wallets_only,
                     mint_address=mint_address,
                     sell_percentage=sell_percentage,
-                    slippage_bps=slippage_bps
+                    slippage_bps=slippage_bps,
+                    wallets=bundled_wallets_only
                 )
                 all_results['bundled_wallets'] = batch_result
             
             # Combine results for display
+            # Determine overall success from sub-operation results
+            def _op_success(res):
+                try:
+                    if isinstance(res, dict) and isinstance(res.get("data"), dict):
+                        d = res["data"]
+                        if d.get("success"):
+                            return True
+                        if d.get("successfulBundles", 0) > 0:
+                            return True
+                        br = d.get("bundleResults") or []
+                        if isinstance(br, list) and any(isinstance(item, dict) and item.get("success") for item in br):
+                            return True
+                except Exception:
+                    pass
+                return False
+
+            op_values = [v for v in all_results.values() if v is not None]
+            overall_success = any(_op_success(v) for v in op_values) if op_values else False
+
             results = {
                 "message": "All wallets sell completed",
                 "data": {
-                    "status": "success",
+                    "success": overall_success,
+                    "status": "success" if overall_success else "failed",
                     "mintAddress": mint_address,
                     "sellPercentage": sell_percentage,
                     "operations": all_results
@@ -708,8 +773,22 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
             if isinstance(results, dict) and "data" in results:
                 api_data = results["data"]
                 
-                # Check if the operation was successful
-                if api_data.get("success", False):
+                # Enhanced success detection - check multiple indicators like in PumpFun client
+                def _is_sell_successful(data):
+                    """Check multiple success indicators from API response."""
+                    if data.get("success"):
+                        return True
+                    if data.get("successfulBundles", 0) > 0:
+                        return True
+                    bundle_results = data.get("bundleResults", [])
+                    if isinstance(bundle_results, list) and any(
+                        isinstance(item, dict) and item.get("success") for item in bundle_results
+                    ):
+                        return True
+                    return False
+                
+                # Check if the operation was successful using enhanced detection
+                if _is_sell_successful(api_data):
                     result_message = (
                         f"✅ **Sell Operation Completed Successfully!**\n\n"
                         f"Your tokens have been sold and confirmed on-chain.\n\n"
@@ -739,7 +818,8 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
                         if len(bundle_results) > 3:
                             result_message += f"• ... and {len(bundle_results) - 3} more bundle(s)\n"
                     
-                    result_message += f"\n🎉 **Check your wallet balances to see the updated SOL amounts!**"
+                    result_message += f"\n🎉 **Transaction completed! Check your wallets to see updated amounts!**\n\n"
+                    result_message += f"**Please note that it may take some time for the transaction to be fully processed.**"
                     
                 else:
                     # Handle failed operations
@@ -761,7 +841,7 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
                     f"• Token: `{mint_address[:8]}...{mint_address[-4:]}`\n"
                     f"• Percentage Sold: {sell_percentage}%\n"
                     f"• Operation Type: {operation.replace('_', ' ').title()}\n\n"
-                    f"🎉 **Check your wallet balances to see the updated amounts!**"
+                    f"🎉 **Transaction completed! Check your wallets to see updated amounts!**"
                 )
                 
         except Exception as format_error:
@@ -776,7 +856,7 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
                 f"• Token: `{mint_address[:8]}...{mint_address[-4:]}`\n"
                 f"• Percentage Sold: {sell_percentage}%\n"
                 f"• Operation Type: {operation.replace('_', ' ').title()}\n\n"
-                f"🎉 **Check your wallet balances to confirm the transaction!**"
+                f"🎉 **Transaction submitted! Check your wallets to confirm completion!**"
             )
             
         await query.edit_message_text(
@@ -784,6 +864,9 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
+        
+        # Refresh session after sell operation completes
+        session_manager.refresh_session(user.id)
         
         return ConversationState.TOKEN_TRADING_OPERATION
         
@@ -797,11 +880,11 @@ async def execute_sell_operation(update: Update, context: CallbackContext) -> in
             f"An error occurred while executing the sell operation:\n\n"
             f"`{str(e)}`\n\n"
             f"**Common issues:**\n"
-            f"• Insufficient SOL balance for transaction fees\n"
+            f"• Insufficient funds (validated by API)\n"
             f"• No tokens to sell in the specified wallets\n"
             f"• Network congestion or API timeout\n"
             f"• Invalid wallet credentials\n\n"
-            f"Please check your wallet balances and try again.",
+            f"The API validates all balances automatically. Please try again.",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
@@ -935,6 +1018,18 @@ async def airdrop_wallet_selection_choice(update: Update, context: CallbackConte
                 # Store selected airdrop wallet in session
                 session_manager.update_session_value(user.id, "selected_airdrop_wallet", selected_airdrop_wallet)
                 
+                # Check if there's a pending sell operation from bundler management
+                pending_operation = session_manager.get_session_value(user.id, "token_operation")
+                selected_token = session_manager.get_session_value(user.id, "selected_token")
+                
+                logger.info(f"DEBUG: Airdrop wallet selected - pending_operation: {pending_operation}, selected_token exists: {bool(selected_token)}")
+                
+                if pending_operation and pending_operation.startswith("sell_") and selected_token:
+                    # ✅ BYPASS BALANCE CHECKING - API handles validation internally
+                    logger.info(f"⚡ Direct sell flow (no balance checking): {pending_operation}")
+                    from .bundler_management_handler import show_bundler_sell_percentage_selection
+                    return await show_bundler_sell_percentage_selection(update, context, selected_token, pending_operation)
+                
                 return await show_wallet_balance_overview(update, context, selected_airdrop_wallet)
             else:
                 logger.error(f"Invalid airdrop wallet index: {wallet_index}")
@@ -947,7 +1042,7 @@ async def airdrop_wallet_selection_choice(update: Update, context: CallbackConte
 
 async def show_wallet_balance_overview(update: Update, context: CallbackContext, airdrop_wallet: Dict[str, Any]) -> int:
     """
-    Show balance overview for selected airdrop wallet and its bundled wallets.
+    Show wallet overview WITHOUT balance checking - API handles validation internally.
     
     Args:
         update: The update object
@@ -963,16 +1058,9 @@ async def show_wallet_balance_overview(update: Update, context: CallbackContext,
     try:
         airdrop_address = airdrop_wallet['address']
         
-        # Show loading message
-        await query.edit_message_text(
-            f"🔍 **Checking Wallet Balances**\n\n"
-            f"Loading balance information for airdrop wallet:\n"
-            f"`{airdrop_address[:8]}...{airdrop_address[-4:]}`\n\n"
-            f"⏳ Please wait...",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        logger.info(f"✅ Loading wallet overview for {airdrop_address[:8]}...{airdrop_address[-4:]} - NO BALANCE CHECKING")
         
-        # Load bundled wallets
+        # Load bundled wallets - NO BALANCE CALLS
         bundled_wallets = bundled_wallet_storage.load_bundled_wallets(airdrop_address, user.id)
         
         if not bundled_wallets:
@@ -989,149 +1077,32 @@ async def show_wallet_balance_overview(update: Update, context: CallbackContext,
             
             return ConversationState.WALLET_BALANCE_OVERVIEW
         
-        # Initialize PumpFun client for balance checking
-        pumpfun_client = PumpFunClient()
+        # Build wallet summary WITHOUT balance checking
+        dev_wallet_count = len([w for w in bundled_wallets if w.get('name') == 'DevWallet'])
+        bundled_wallet_count = len([w for w in bundled_wallets if w.get('name') != 'DevWallet'])
         
-        # Check balances for all wallets
-        wallet_balances = []
-        dev_wallet_balance = None
+        logger.info(f"📊 Wallet summary: {dev_wallet_count} DevWallet, {bundled_wallet_count} bundled wallets")
         
-        for wallet in bundled_wallets:
-            wallet_address = wallet.get('address') or wallet.get('public_key')
-            wallet_name = wallet.get('name', 'Unknown')
-            
-            if wallet_address:
-                try:
-                    # Get SOL balance using the working legacy endpoint
-                    balance_response = pumpfun_client.get_wallet_balance(wallet_address)
-                    
-                    # Parse balance from response (handles both enhanced and legacy formats)
-                    sol_balance = 0.0
-                    if balance_response and 'data' in balance_response:
-                        data = balance_response['data']
-                        sol_balance = data.get('balance', 0.0)
-                    
-                    # Try to get complete balance (SOL + SPL tokens) if available
-                    token_info = []
-                    try:
-                        complete_balance = pumpfun_client.get_wallet_complete_balance(wallet_address)
-                        if complete_balance and 'data' in complete_balance:
-                            complete_data = complete_balance['data']
-                            tokens = complete_data.get('tokens', [])
-                            for token in tokens:
-                                if token.get('balance', 0) > 0:  # Only include tokens with positive balance
-                                    token_info.append({
-                                        'mint': token.get('mint'),
-                                        'balance': token.get('balance', 0),
-                                        'uiAmount': token.get('uiAmount', 0.0),
-                                        'decimals': token.get('decimals', 6),
-                                        'symbol': token.get('symbol')
-                                    })
-                    except Exception as token_error:
-                        logger.warning(f"Could not fetch SPL tokens for {wallet_name}: {str(token_error)}")
-                    
-                    logger.info(f"Balance check for {wallet_name} ({wallet_address[:8]}...{wallet_address[-4:]}): {sol_balance} SOL, {len(token_info)} SPL tokens")
-                    
-                    wallet_info = {
-                        'name': wallet_name,
-                        'address': wallet_address,
-                        'sol_balance': sol_balance,
-                        'spl_tokens': token_info,
-                        'token_count': len(token_info),
-                        'is_dev_wallet': wallet_name == 'DevWallet'
-                    }
-                    
-                    wallet_balances.append(wallet_info)
-                    
-                    if wallet_name == 'DevWallet':
-                        dev_wallet_balance = sol_balance
-                        
-                except Exception as e:
-                    logger.error(f"Error checking balance for wallet {wallet_name}: {str(e)}")
-                    wallet_balances.append({
-                        'name': wallet_name,
-                        'address': wallet_address,
-                        'sol_balance': 0.0,
-                        'spl_tokens': [],
-                        'token_count': 0,
-                        'error': str(e),
-                        'is_dev_wallet': wallet_name == 'DevWallet'
-                    })
-        
-        # Store wallet information in session
-        session_manager.update_session_value(user.id, "wallet_balances", wallet_balances)
-        
-        # Build balance overview message
-        message_text = f"💰 **Wallet Balance Overview**\n\n"
+        # Build overview message - NO BALANCE DATA
+        message_text = f"🎯 **Wallet Overview**\n\n"
         message_text += f"**Airdrop Wallet:** `{airdrop_address[:8]}...{airdrop_address[-4:]}`\n\n"
+        message_text += f"📁 **Wallet Summary:**\n"
+        message_text += f"   └ DevWallet: {dev_wallet_count} wallet(s)\n"
+        message_text += f"   └ Bundled Wallets: {bundled_wallet_count} wallet(s)\n"
+        message_text += f"   └ Total Wallets: {len(bundled_wallets)}\n\n"
         
-        # Show DevWallet first
-        dev_wallets = [w for w in wallet_balances if w['is_dev_wallet']]
-        if dev_wallets:
-            dev_wallet = dev_wallets[0]
-            message_text += f"🏆 **DevWallet**\n"
-            message_text += f"   └ Address: `{dev_wallet['address'][:8]}...{dev_wallet['address'][-4:]}`\n"
-            message_text += f"   └ SOL Balance: **{dev_wallet['sol_balance']:.6f} SOL**\n"
-            
-            # Show SPL tokens if any
-            spl_tokens = dev_wallet.get('spl_tokens', [])
-            if spl_tokens:
-                message_text += f"   └ SPL Tokens: **{len(spl_tokens)} token(s)**\n"
-                for token in spl_tokens[:3]:  # Show first 3 tokens
-                    symbol = token.get('symbol') or f"{token.get('mint', '')[:8]}..."
-                    ui_amount = token.get('uiAmount', 0.0)
-                    message_text += f"     • {symbol}: {ui_amount:.4f}\n"
-                if len(spl_tokens) > 3:
-                    message_text += f"     • ... and {len(spl_tokens) - 3} more\n"
-            
-            if dev_wallet.get('error'):
-                message_text += f"   └ ⚠️ Error: {dev_wallet['error']}\n"
-            message_text += "\n"
+        message_text += f"⚡ **Ready for Trading**\n"
+        message_text += f"All wallet credentials loaded and ready for API operations.\n"
+        message_text += f"Balance validation will be handled by the API during trading.\n\n"
         
-        # Show bundled wallets
-        bundled_only = [w for w in wallet_balances if not w['is_dev_wallet']]
-        if bundled_only:
-            message_text += f"🎯 **Bundled Wallets ({len(bundled_only)})**\n"
-            total_bundled_balance = 0.0
-            total_bundled_tokens = 0
-            
-            for wallet in bundled_only[:5]:  # Show first 5 bundled wallets
-                token_count = wallet.get('token_count', 0)
-                total_bundled_tokens += token_count
-                message_text += f"   └ {wallet['name']}: **{wallet['sol_balance']:.6f} SOL**"
-                if token_count > 0:
-                    message_text += f" + {token_count} tokens"
-                message_text += "\n"
-                total_bundled_balance += wallet['sol_balance']
-            
-            if len(bundled_only) > 5:
-                remaining_wallets = bundled_only[5:]
-                remaining_balance = sum(w['sol_balance'] for w in remaining_wallets)
-                remaining_tokens = sum(w.get('token_count', 0) for w in remaining_wallets)
-                total_bundled_balance += remaining_balance
-                total_bundled_tokens += remaining_tokens
-                message_text += f"   └ ... and {len(remaining_wallets)} more wallets\n"
-            
-            message_text += f"\n**Total Bundled Balance:** {total_bundled_balance:.6f} SOL"
-            if total_bundled_tokens > 0:
-                message_text += f" + {total_bundled_tokens} SPL tokens"
-            message_text += "\n\n"
-        
-        # Add trading readiness assessment
-        min_sol_for_trading = 0.001  # Minimum SOL needed per wallet for trading
-        
-        if dev_wallet_balance is not None and dev_wallet_balance >= min_sol_for_trading:
-            message_text += "✅ **DevWallet Ready for Trading**\n"
-        else:
-            message_text += "❌ **DevWallet Needs Funding** (min 0.001 SOL)\n"
-        
-        tradeable_bundled = len([w for w in bundled_only if w['sol_balance'] >= min_sol_for_trading])
-        message_text += f"🎯 **{tradeable_bundled}/{len(bundled_only)} Bundled Wallets Ready**\n\n"
+        message_text += f"💡 **Next Steps:**\n"
+        message_text += f"• Select 'View Tokens' to start trading operations\n"
+        message_text += f"• API will validate balances automatically during transactions\n"
+        message_text += f"• No pre-validation delays or session timeouts\n"
         
         # Build keyboard
         keyboard = [
             [build_button("🪙 View Tokens for Trading", f"{CallbackPrefix.WALLET_BALANCE_VIEW}view_tokens")],
-            [build_button("🔄 Refresh Balances", f"{CallbackPrefix.WALLET_BALANCE_VIEW}refresh")],
             [build_button("« Back to Airdrop Selection", "back_to_airdrop_selection")]
         ]
         
@@ -1144,13 +1115,13 @@ async def show_wallet_balance_overview(update: Update, context: CallbackContext,
         return ConversationState.WALLET_BALANCE_OVERVIEW
         
     except Exception as e:
-        logger.error(f"Error showing wallet balance overview: {str(e)}")
+        logger.error(f"❌ Error loading wallet overview: {str(e)}")
         
         keyboard = [[build_button("« Back to Airdrop Selection", "back_to_airdrop_selection")]]
         
         await query.edit_message_text(
-            f"❌ **Error Loading Wallet Balances**\n\n"
-            f"An error occurred while checking wallet balances:\n\n"
+            f"❌ **Error Loading Wallet Overview**\n\n"
+            f"An error occurred while loading wallet information:\n\n"
             f"`{str(e)}`\n\n"
             f"Please try again or select a different airdrop wallet.",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -1162,7 +1133,7 @@ async def show_wallet_balance_overview(update: Update, context: CallbackContext,
 
 async def wallet_balance_overview_choice(update: Update, context: CallbackContext) -> int:
     """
-    Handle wallet balance overview choices.
+    Handle wallet overview choices - NO BALANCE OPERATIONS.
     
     Args:
         update: The update object
@@ -1180,17 +1151,13 @@ async def wallet_balance_overview_choice(update: Update, context: CallbackContex
     if choice == "back_to_airdrop_selection":
         return await show_airdrop_wallet_selection(update, context)
     
-    # Handle balance overview actions
+    # Handle overview actions
     if choice.startswith(CallbackPrefix.WALLET_BALANCE_VIEW):
         action = choice.replace(CallbackPrefix.WALLET_BALANCE_VIEW, "")
         
         if action == "view_tokens":
+            logger.info(f"🪙 User {user.id} navigating to token list - NO BALANCE CHECKING")
             return await show_token_list(update, context)
-        elif action == "refresh":
-            # Refresh balances by re-showing the overview
-            selected_airdrop_wallet = session_manager.get_session_value(user.id, "selected_airdrop_wallet")
-            if selected_airdrop_wallet:
-                return await show_wallet_balance_overview(update, context, selected_airdrop_wallet)
     
     return ConversationState.WALLET_BALANCE_OVERVIEW
 
