@@ -413,7 +413,7 @@ async def continue_to_bundled_wallets_setup(update: Update, context: CallbackCon
         # Debug: Show what files exist in the bundled wallets directory
         try:
             import os
-            bundled_dir = "ninjabot/data/bundled_wallets"
+            bundled_dir = "data/bundled_wallets"
             if os.path.exists(bundled_dir):
                 files = os.listdir(bundled_dir)
                 user_files = [f for f in files if f.startswith(f"bundled_{user.id}_")]
@@ -929,6 +929,7 @@ async def check_wallet_balance(update: Update, context: CallbackContext) -> int:
 async def fund_bundled_wallets_now(update: Update, context: CallbackContext) -> int:
     """
     Fund bundled wallets with SOL from airdrop wallet.
+    Directly executes the funding process without intermediate screens.
     
     Args:
         update: The update object
@@ -951,26 +952,19 @@ async def fund_bundled_wallets_now(update: Update, context: CallbackContext) -> 
         if not all([pumpfun_client, bundled_wallets_count, airdrop_wallet]):
             raise Exception("Missing required session data for wallet funding")
         
-        # Show funding requirement message
-        keyboard = InlineKeyboardMarkup([
-            [build_button("💰 Start Funding", "start_wallet_funding")],
-            [build_button("« Back to Balance Check", "check_wallet_balance")]
-        ])
-        
-        # Import message formatter dynamically
-        from bot.utils.message_utils import format_wallet_funding_required_message
-        
+        # Show initial progress message
         await query.edit_message_text(
-            format_wallet_funding_required_message(airdrop_wallet, bundled_wallets_count, buy_amounts),
-            reply_markup=keyboard,
+            "💰 **Starting Wallet Funding Process...**\n\n"
+            "⏳ Preparing to fund child wallets. This may take a moment...",
             parse_mode=ParseMode.MARKDOWN
         )
         
-        return ConversationState.WALLET_FUNDING_REQUIRED
+        # Directly execute the funding process (same logic as start_wallet_funding)
+        return await start_wallet_funding(update, context)
         
     except Exception as e:
         logger.error(
-            f"Failed to show funding requirement for user {user.id}: {str(e)}",
+            f"Failed to start funding process for user {user.id}: {str(e)}",
             extra={"user_id": user.id}
         )
         
@@ -980,7 +974,7 @@ async def fund_bundled_wallets_now(update: Update, context: CallbackContext) -> 
         ])
         
         await query.edit_message_text(
-            format_pumpfun_error_message("funding_requirement", str(e)),
+            format_pumpfun_error_message("funding_start", str(e)),
             reply_markup=keyboard,
             parse_mode=ParseMode.MARKDOWN
         )
@@ -2144,8 +2138,9 @@ async def execute_return_funds(update: Update, context: CallbackContext) -> int:
             logger.info(f"    Fee calculation applied: {data.get('feeCalculation', 'N/A')}")
             logger.info(f"    Bundle ID: {data.get('bundleId', 'N/A')}")
         
-        # Show completion message
+        # Show completion message with funding option
         keyboard = InlineKeyboardMarkup([
+            [build_button("💰 Fund Child Wallets", "fund_bundled_wallets_now")],
             [build_button("🔄 Check Balance Again", "check_wallet_balance")],
             [build_button("🚀 Proceed to Token Creation", "create_token_final")]
         ])

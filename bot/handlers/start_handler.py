@@ -213,11 +213,25 @@ async def start(update: Update, context: CallbackContext) -> int:
     # Import message formatters
     from bot.utils.message_utils import format_activity_selection_message
 
-    # Build keyboard with activity options
+    # Build keyboard with activity options - add debugging
+    volume_callback = f"{CallbackPrefix.ACTIVITY}{CallbackPrefix.VOLUME_GENERATION}"
+    bundling_callback = f"{CallbackPrefix.ACTIVITY}{CallbackPrefix.BUNDLING}"
+    management_callback = f"{CallbackPrefix.ACTIVITY}{CallbackPrefix.BUNDLER_MANAGEMENT}"
+    
+    logger.info(
+        f"Creating activity buttons for user {user.id}",
+        extra={
+            "user_id": user.id,
+            "volume_callback": volume_callback,
+            "bundling_callback": bundling_callback,
+            "management_callback": management_callback
+        }
+    )
+    
     keyboard = [
-        [build_button("📊 Volume Generation", f"{CallbackPrefix.ACTIVITY}{CallbackPrefix.VOLUME_GENERATION}")],
-        [build_button("🚀 Token Bundling (PumpFun)", f"{CallbackPrefix.ACTIVITY}{CallbackPrefix.BUNDLING}")],
-        [build_button("🎛️ Bundler Management", f"{CallbackPrefix.ACTIVITY}{CallbackPrefix.BUNDLER_MANAGEMENT}")]
+        [build_button("📊 Volume Generation", volume_callback)],
+        [build_button("🚀 Token Bundling (PumpFun)", bundling_callback)],
+        [build_button("🎛️ Bundler Management", management_callback)]
     ]
 
     # Send activity selection message
@@ -248,6 +262,12 @@ async def activity_choice(update: Update, context: CallbackContext) -> int:
 
     choice = query.data
     
+    # Enhanced logging for debugging button issues
+    logger.info(
+        f"Activity choice received: {choice} from user {user.id}",
+        extra={"user_id": user.id, "callback_data": choice}
+    )
+    
     # Import message formatters
     from bot.utils.message_utils import format_activity_confirmation_message
 
@@ -256,21 +276,35 @@ async def activity_choice(update: Update, context: CallbackContext) -> int:
         session_manager.update_session_value(user.id, "activity_type", "volume_generation")
         
         logger.info(
-            f"User {user.id} selected Volume Generation",
+            f"User {user.id} selected Volume Generation - proceeding to workflow",
             extra={"user_id": user.id, "activity": "volume_generation"}
         )
         
-        # Show confirmation and redirect to wallet setup for volume generation
-        await query.edit_message_text(
-            format_activity_confirmation_message("volume_generation"),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        # Add small delay for user to read confirmation
-        await asyncio.sleep(2)
-        
-        # Redirect to wallet choice for volume generation workflow
-        return await start_volume_generation_workflow(update, context)
+        try:
+            # Show confirmation and redirect to wallet setup for volume generation
+            await query.edit_message_text(
+                format_activity_confirmation_message("volume_generation"),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            # Add small delay for user to read confirmation
+            await asyncio.sleep(2)
+            
+            # Redirect to wallet choice for volume generation workflow
+            return await start_volume_generation_workflow(update, context)
+            
+        except Exception as e:
+            logger.error(
+                f"Error in volume generation workflow start: {e}",
+                extra={"user_id": user.id, "error": str(e)},
+                exc_info=True
+            )
+            await query.edit_message_text(
+                f"❌ Error starting volume generation: {str(e)}\n\nPlease try again or contact support.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[build_button("🔄 Try Again", "activity_volume_gen")]])
+            )
+            return ConversationState.ACTIVITY_SELECTION
     
     elif choice == f"{CallbackPrefix.ACTIVITY}{CallbackPrefix.BUNDLING}":
         # User selected Bundling
@@ -2124,6 +2158,7 @@ def register_start_handler(application):
                 CallbackQueryHandler(edit_buy_amounts, pattern=r"^edit_buy_amounts$")
             ],
             ConversationState.RETURN_FUNDS_COMPLETE: [
+                CallbackQueryHandler(fund_bundled_wallets_now, pattern=r"^fund_bundled_wallets_now$"),
                 CallbackQueryHandler(check_wallet_balance, pattern=r"^check_wallet_balance$"),
                 CallbackQueryHandler(create_token_final, pattern=r"^create_token_final$")
             ],
