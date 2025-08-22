@@ -925,10 +925,7 @@ class ApiClient:
             fee = total_volume * SERVICE_FEE_RATE
             remaining_volume = total_volume - fee
             
-            # VOLUME ENFORCEMENT: Calculate per-wallet spending limit based on total volume
-            # Distribute the volume across all trades respecting the user's total limit
-            max_per_wallet_spend = min(0.0013, remaining_volume / (len(child_wallets) * 2))  # Conservative limit per wallet per trade
-            
+            # VOLUME ENFORCEMENT: Distribute the full remaining volume across all trades
             # Create random transfers with realistic amounts
             transfers = []
             total_transferred = 0
@@ -938,13 +935,13 @@ class ApiClient:
                 # Determine a random amount for this transfer
                 max_possible = remaining_volume - total_transferred
                 if num_transfers - i > 1:
-                    # Leave some for remaining transfers, but respect wallet limits
-                    max_amount = min(max_possible * 0.8, max_per_wallet_spend)
-                    min_amount = min(max_possible * 0.01, max_per_wallet_spend * 0.1)
+                    # Leave some for remaining transfers, distribute remaining volume
+                    max_amount = max_possible * 0.8
+                    min_amount = max_possible * 0.01
                     amount = random.uniform(min_amount, max_amount)
                 else:
-                    # Last transfer, use remaining amount but cap at wallet limit
-                    amount = min(max_possible, max_per_wallet_spend)
+                    # Last transfer, use remaining amount to complete full volume
+                    amount = max_possible
                 
                 total_transferred += amount
                 
@@ -5109,28 +5106,53 @@ class ApiClient:
             sell_operations = []
             wallet_token_balances = {wallet: 0.0 for wallet in child_wallets}  # Track token holdings per wallet
             
+            # Compute available capacity across wallets and adjust intended volume if needed
+            try:
+                available_capacity = 0.0
+                for w in child_wallets:
+                    # Pass a large amount (100 SOL) to get actual usable balance per wallet
+                    available_capacity += calculate_safe_swap_amount(w, 100.0)
+                logger.info(f"Volume enforcement: Available capacity across wallets: {available_capacity:.6f} SOL")
+                if available_capacity < intended_total_volume:
+                    logger.warning(
+                        f"Requested volume exceeds capacity. Capping intended volume from {intended_total_volume:.6f} SOL to {available_capacity:.6f} SOL"
+                    )
+                    intended_total_volume = available_capacity
+            except Exception as e:
+                logger.warning(f"Capacity estimation failed, proceeding without cap adjustment: {e}")
+            
             # Phase 1: Generate BUY operations across different wallets
             logger.info("🛍️ PHASE 1: Generating distributed BUY operations...")
             
+            planned_volume = 0.0
             for i, trade in enumerate(trades):
                 wallet_idx = trade.get("wallet_index", i % len(child_wallets))
                 wallet_address = child_wallets[wallet_idx]
                 trade_sol_amount = trade.get("amount", trade.get("amount_sol", 0.001))
                 
-                # VOLUME ENFORCEMENT: Check if adding this swap would exceed intended total
-                if total_volume + trade_sol_amount > intended_total_volume * 1.1:  # Allow 10% tolerance
-                    logger.warning(f"Skipping buy {i+1}: would exceed intended volume limit")
+                # If we've already planned up to the intended total, stop planning further
+                remaining = max(0.0, intended_total_volume - planned_volume)
+                if remaining <= 0:
+                    break
+                
+                # Determine a safe per-wallet amount and cap it to the remaining target
+                safe_amount = calculate_safe_swap_amount(wallet_address, trade_sol_amount)
+                if safe_amount <= 0:
+                    logger.warning(f"Skipping buy {i+1}: insufficient balance for wallet {wallet_address[:8]}...")
                     continue
+                
+                # Cap to remaining intended volume
+                planned_amount = min(safe_amount, remaining)
                 
                 buy_operations.append({
                     "type": "buy",
                     "wallet_address": wallet_address,
                     "wallet_private_key": private_key_map[wallet_address],
-                    "amount_sol": trade_sol_amount,
+                    "amount_sol": planned_amount,
                     "operation_id": f"buy_{i}",
                     "original_trade_index": i
                 })
-                total_volume += trade_sol_amount
+                planned_volume += planned_amount
 
             # Shuffle buy operations to randomize execution order
             random.shuffle(buy_operations)
@@ -5144,8 +5166,8 @@ class ApiClient:
                     wallet_private_key = buy_op["wallet_private_key"]
                     trade_sol_amount = buy_op["amount_sol"]
                     
-                    # Calculate safe swap amount
-                    safe_sol_amount = calculate_safe_swap_amount(wallet_address, trade_sol_amount)
+                    # Re-calculate safe swap amount at execution time and cap to planned amount
+                    safe_sol_amount = min(calculate_safe_swap_amount(wallet_address, trade_sol_amount), trade_sol_amount)
                     
                     if safe_sol_amount <= 0:
                         logger.error(f"Wallet {wallet_address} has insufficient balance for buy operation")
@@ -5179,6 +5201,8 @@ class ApiClient:
                             
                             # Track token balance for this wallet (estimate)
                             wallet_token_balances[wallet_address] += safe_sol_amount  # Use SOL amount as proxy
+                            # Count executed buy amount towards total executed volume
+                            total_volume += safe_sol_amount
                             
                             results["swap_results"].append({
                                 "operation_id": buy_op["operation_id"],
