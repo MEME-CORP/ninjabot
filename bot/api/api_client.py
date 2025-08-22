@@ -925,25 +925,32 @@ class ApiClient:
             fee = total_volume * SERVICE_FEE_RATE
             remaining_volume = total_volume - fee
             
-            # VOLUME ENFORCEMENT: Distribute the full remaining volume across all trades
-            # Create random transfers with realistic amounts
+            # VOLUME ENFORCEMENT: Deterministic volume distribution ensuring exact sum
+            # Create transfers that guarantee total volume consumption
             transfers = []
             total_transferred = 0
             num_transfers = len(child_wallets) * 2  # Each wallet does ~2 transfers
             
-            for i in range(num_transfers - 1):
-                # Determine a random amount for this transfer
-                max_possible = remaining_volume - total_transferred
-                if num_transfers - i > 1:
-                    # Leave some for remaining transfers, distribute remaining volume
-                    max_amount = max_possible * 0.8
-                    min_amount = max_possible * 0.01
-                    amount = random.uniform(min_amount, max_amount)
+            # Calculate base amount per transfer for even distribution
+            base_amount_per_transfer = remaining_volume / num_transfers
+            
+            logger.info(f"Volume distribution: {remaining_volume:.6f} SOL across {num_transfers} transfers, base amount: {base_amount_per_transfer:.6f} SOL per transfer")
+            
+            for i in range(num_transfers):
+                if i == num_transfers - 1:
+                    # Last transfer gets all remaining volume to ensure exact sum
+                    amount = remaining_volume - total_transferred
+                    logger.info(f"Final transfer {i+1}/{num_transfers}: using remaining {amount:.6f} SOL to complete exact volume")
                 else:
-                    # Last transfer, use remaining amount to complete full volume
-                    amount = max_possible
+                    # Use base amount with small randomization (±10%)
+                    variation = random.uniform(0.9, 1.1)
+                    amount = base_amount_per_transfer * variation
+                    # Ensure we don't exceed remaining volume
+                    max_possible = remaining_volume - total_transferred
+                    amount = min(amount, max_possible * 0.9)  # Leave buffer for remaining transfers
                 
                 total_transferred += amount
+                logger.debug(f"Transfer {i+1}/{num_transfers}: {amount:.6f} SOL, running total: {total_transferred:.6f} SOL")
                 
                 # Random sender and receiver from child wallets
                 sender_idx = random.randint(0, len(child_wallets) - 1)
@@ -966,7 +973,20 @@ class ApiClient:
                     "status": "pending"
                 })
             
-            # Add one more transfer for the fee
+            # Validate exact volume distribution before adding fee
+            volume_validation_tolerance = 0.000001  # 1 microSOL tolerance
+            volume_difference = abs(total_transferred - remaining_volume)
+            
+            if volume_difference > volume_validation_tolerance:
+                logger.error(f"Volume distribution error: transferred {total_transferred:.9f} SOL != expected {remaining_volume:.9f} SOL (diff: {volume_difference:.9f})")
+                # Adjust last transfer to fix any rounding errors
+                if transfers:
+                    transfers[-1]["amount"] += (remaining_volume - total_transferred)
+                    logger.info(f"Adjusted final transfer by {remaining_volume - total_transferred:.9f} SOL to achieve exact volume")
+            else:
+                logger.info(f"✅ Volume distribution validated: {total_transferred:.9f} SOL matches expected {remaining_volume:.9f} SOL")
+            
+            # Add service fee transfer
             transfers.append({
                 "id": "tx_fee",
                 "from": child_wallets[0],  # Use first child wallet for fee
@@ -3680,14 +3700,44 @@ class ApiClient:
             # Restore original timeout
             self.timeout = original_timeout
             
-            # Validate response structure
-            if not isinstance(response, dict):
-                raise ApiClientError("Invalid response format from Jupiter swap API")
-            
-            # Check for successful swap execution
-            if response.get("status") != "success":
-                error_msg = response.get("message", "Unknown error in Jupiter swap execution")
-                raise ApiClientError(f"Jupiter swap failed: {error_msg}")
+            # Enhanced response validation with structured logging
+            try:
+                # Validate response structure with detailed error handling
+                if not isinstance(response, dict):
+                    logger.error(f"❌ Jupiter swap: Invalid response type {type(response)}, expected dict")
+                    raise ApiClientError("Invalid response format from Jupiter swap API - response is not a dictionary")
+                
+                # Log response structure for debugging
+                response_keys = list(response.keys()) if response else []
+                logger.info(f"🔍 Jupiter swap response keys: {response_keys}")
+                
+                # Check for successful swap execution with robust error message extraction
+                if response.get("status") != "success":
+                    # Robust error message extraction with fallbacks
+                    error_msg = None
+                    try:
+                        error_msg = response.get("message", "")
+                        if not error_msg or error_msg == '':
+                            error_msg = response.get("error", "")
+                        if not error_msg or error_msg == '':
+                            error_msg = str(response.get("data", {}).get("message", ""))
+                        if not error_msg or error_msg == '':
+                            error_msg = "Unknown Jupiter swap execution error"
+                    except Exception as msg_extract_error:
+                        logger.warning(f"⚠️ Jupiter swap: Error extracting message: {str(msg_extract_error)}")
+                        error_msg = f"Jupiter swap failed with malformed error response: {str(response)[:200]}"
+                    
+                    logger.error(f"❌ Jupiter swap failed: status={response.get('status')}, message={error_msg}")
+                    raise ApiClientError(f"Jupiter swap failed: {error_msg}")
+                    
+            except ApiClientError:
+                # Re-raise known API errors
+                raise
+            except Exception as validation_error:
+                # Handle unexpected validation errors with detailed logging
+                logger.error(f"❌ Jupiter swap validation error: {str(validation_error)}, response_type: {type(response)}")
+                logger.error(f"❌ Jupiter swap raw response (first 300 chars): {str(response)[:300]}")
+                raise ApiClientError(f"Jupiter swap response validation failed: {str(validation_error)}")
             
             # Extract swap results
             transaction_id = response.get("transactionId")
@@ -4995,7 +5045,7 @@ class ApiClient:
             }
             
             def calculate_safe_swap_amount(wallet_address: str, requested_sol: float) -> float:
-                """Calculate safe swap amount with volume limit enforcement"""
+                """Calculate safe swap amount based on actual wallet balance and requirements"""
                 try:
                     balance_response = self.check_balance(wallet_address)
                     if not balance_response.get("success"):
@@ -5005,34 +5055,47 @@ class ApiClient:
                     current_balance_sol = balance_response.get("balance", 0.0)
                     current_lamports = int(current_balance_sol * 1_000_000_000)
                     
-                    # Jupiter-compatible buffer: REDUCED to work with 0.0075 SOL funded wallets
-                    # Jupiter requires ~0.001 SOL for account rent + ~0.0005 SOL for transaction fees
-                    reserved_lamports = 500_000  # 0.0005 SOL for Jupiter compatibility (further reduced)
+                    # Dynamic buffer calculation based on actual wallet balance
+                    # Adaptive percentage-based buffer instead of fixed amount
+                    if current_balance_sol >= 0.08:  # High balance
+                        buffer_percentage = 0.05  # 5% buffer
+                        logger.debug(f"💰 Wallet {wallet_address[:8]}: High balance mode - 5% buffer")
+                    elif current_balance_sol >= 0.05:  # Medium balance  
+                        buffer_percentage = 0.08  # 8% buffer
+                        logger.debug(f"💰 Wallet {wallet_address[:8]}: Medium balance mode - 8% buffer")
+                    elif current_balance_sol >= 0.02:  # Low balance
+                        buffer_percentage = 0.12  # 12% buffer
+                        logger.debug(f"⚠️ Wallet {wallet_address[:8]}: Low balance mode - 12% buffer")
+                    else:  # Critical balance
+                        buffer_percentage = 0.20  # 20% buffer
+                        logger.debug(f"🔴 Wallet {wallet_address[:8]}: Critical balance mode - 20% buffer")
+                    
+                    # Calculate dynamic buffer in lamports
+                    reserved_lamports = int(current_lamports * buffer_percentage)
+                    # Ensure minimum buffer for rent exemption (never less than 300k lamports)
+                    reserved_lamports = max(reserved_lamports, 300_000)
+                    
                     usable_lamports = current_lamports - reserved_lamports
+                    logger.debug(f"🔧 Dynamic buffer for {wallet_address[:8]}: {reserved_lamports/1_000_000_000:.6f} SOL ({buffer_percentage:.1%})")
                     
-                    # Reduced minimum swap amount for 0.0075 SOL funded wallets
-                    min_swap_lamports = 50_000  # 0.00005 SOL minimum (reduced from 100K)
+                    # Minimum viable swap amount
+                    min_swap_lamports = 50_000  # 0.00005 SOL minimum
                     
-                    # VOLUME LIMIT ENFORCEMENT: Respect the requested amount as the maximum
-                    # Instead of using all available balance, use the smaller of requested vs available
+                    # For capacity calculation: return actual usable balance (not capped by request)
+                    # This fixes the volume capping issue by showing true wallet capacity
+                    if requested_sol >= 50.0:  # Large request indicates capacity check
+                        actual_capacity = max(0, usable_lamports / 1_000_000_000)
+                        logger.debug(f"Capacity check for {wallet_address[:8]}: {actual_capacity:.6f} SOL usable")
+                        return actual_capacity
+                    
+                    # For actual swap calculations: respect requested amount
                     requested_lamports = int(requested_sol * 1_000_000_000)
-                    
-                    # Ensure we don't exceed either the requested amount OR available balance
                     safe_lamports = min(usable_lamports, requested_lamports)
                     
-                    # Enhanced debug logging with Jupiter compatibility analysis
-                    logger.info(f"DEBUG - Jupiter-Compatible Balance Check for Wallet {wallet_address[:8]}...")
-                    logger.info(f"  ✅ API Response Success: {balance_response.get('success', False)}")
-                    logger.info(f"  💰 Current balance: {current_balance_sol:.6f} SOL ({current_lamports} lamports)")
-                    logger.info(f"  🔒 Reserved amount: {reserved_lamports/1_000_000_000:.6f} SOL ({reserved_lamports} lamports) [JUPITER BUFFER - REDUCED]")
-                    logger.info(f"  ⚡ Usable amount: {usable_lamports/1_000_000_000:.6f} SOL ({usable_lamports} lamports)")
-                    logger.info(f"  📋 Requested amount: {requested_sol:.6f} SOL ({requested_lamports} lamports)")
-                    logger.info(f"  ✨ Safe amount: {safe_lamports/1_000_000_000:.6f} SOL ({safe_lamports} lamports)")
-                    logger.info(f"  ❓ Sufficient for swap: {safe_lamports >= min_swap_lamports}")
-                    logger.info(f"  🎯 Jupiter ready: {(safe_lamports + reserved_lamports) >= 5_500_000} (needs ~0.0055 SOL total - FURTHER REDUCED)")
+                    logger.debug(f"Swap calc for {wallet_address[:8]}: balance={current_balance_sol:.6f}, usable={usable_lamports/1_000_000_000:.6f}, safe={safe_lamports/1_000_000_000:.6f} SOL")
                     
                     if safe_lamports < min_swap_lamports:
-                        logger.warning(f"Wallet {wallet_address} has insufficient balance for swap: safe_lamports={safe_lamports} < {min_swap_lamports}")
+                        logger.warning(f"Wallet {wallet_address[:8]} insufficient for swap: {safe_lamports/1_000_000_000:.6f} < {min_swap_lamports/1_000_000_000:.6f} SOL")
                         return 0.0
                     
                     return safe_lamports / 1_000_000_000
@@ -5096,7 +5159,10 @@ class ApiClient:
             
             # VOLUME ENFORCEMENT: Calculate total intended volume from trades
             intended_total_volume = sum(trade.get("amount", trade.get("amount_sol", 0.001)) for trade in trades)
-            logger.info(f"Volume enforcement: Intended total volume: {intended_total_volume:.6f} SOL across {len(trades)} trades")
+            logger.info(f"✅ Volume enforcement: Intended total volume: {intended_total_volume:.6f} SOL across {len(trades)} trades")
+            
+            # Add volume conservation validation checkpoint
+            logger.info(f"📊 Volume pipeline checkpoint - Trades total: {intended_total_volume:.6f} SOL")
 
             # NEW SEPARATED PATTERN LOGIC - Phase-based approach
             import random
@@ -5106,23 +5172,14 @@ class ApiClient:
             sell_operations = []
             wallet_token_balances = {wallet: 0.0 for wallet in child_wallets}  # Track token holdings per wallet
             
-            # Compute available capacity across wallets and adjust intended volume if needed
-            try:
-                available_capacity = 0.0
-                for w in child_wallets:
-                    # Pass a large amount (100 SOL) to get actual usable balance per wallet
-                    available_capacity += calculate_safe_swap_amount(w, 100.0)
-                logger.info(f"Volume enforcement: Available capacity across wallets: {available_capacity:.6f} SOL")
-                if available_capacity < intended_total_volume:
-                    logger.warning(
-                        f"Requested volume exceeds capacity. Capping intended volume from {intended_total_volume:.6f} SOL to {available_capacity:.6f} SOL"
-                    )
-                    intended_total_volume = available_capacity
-            except Exception as e:
-                logger.warning(f"Capacity estimation failed, proceeding without cap adjustment: {e}")
+            # Volume enforcement: Trust schedule generation for accurate volume distribution
+            # Remove artificial capacity capping that was reducing intended volume incorrectly
+            logger.info(f"Volume enforcement: Processing intended volume: {intended_total_volume:.6f} SOL across {len(trades)} trades")
+            logger.info(f"Volume enforcement: Trusting schedule generation - no artificial volume capping applied")
             
             # Phase 1: Generate BUY operations across different wallets
             logger.info("🛍️ PHASE 1: Generating distributed BUY operations...")
+            logger.info(f"📊 Volume checkpoint: Processing {intended_total_volume:.6f} SOL across {len(trades)} planned trades")
             
             planned_volume = 0.0
             for i, trade in enumerate(trades):
@@ -5130,10 +5187,15 @@ class ApiClient:
                 wallet_address = child_wallets[wallet_idx]
                 trade_sol_amount = trade.get("amount", trade.get("amount_sol", 0.001))
                 
-                # If we've already planned up to the intended total, stop planning further
+                # Volume conservation: Track planned vs intended volume
                 remaining = max(0.0, intended_total_volume - planned_volume)
                 if remaining <= 0:
+                    logger.info(f"📊 Volume planning complete: {planned_volume:.6f} SOL planned (target: {intended_total_volume:.6f} SOL)")
                     break
+                
+                # Log volume distribution progress
+                if i % 10 == 0:  # Log every 10th trade to avoid spam
+                    logger.debug(f"Volume planning progress: {planned_volume:.6f}/{intended_total_volume:.6f} SOL ({i+1}/{len(trades)} trades)")
                 
                 # Determine a safe per-wallet amount and cap it to the remaining target
                 safe_amount = calculate_safe_swap_amount(wallet_address, trade_sol_amount)
@@ -5153,12 +5215,21 @@ class ApiClient:
                     "original_trade_index": i
                 })
                 planned_volume += planned_amount
-
             # Shuffle buy operations to randomize execution order
             random.shuffle(buy_operations)
             
             # Phase 2: Execute BUY operations with delays
-            logger.info(f"🚀 PHASE 1: Executing {len(buy_operations)} BUY operations...")
+            # Validate Phase 1 volume conservation
+            actual_buy_volume = sum(op.get('amount_sol', 0) for op in buy_operations)
+            buy_volume_compliance = (actual_buy_volume / intended_total_volume) * 100 if intended_total_volume > 0 else 0
+            
+            logger.info(f"🛍️ Phase 1 complete: {len(buy_operations)} BUY operations planned")
+            logger.info(f"📊 Buy phase volume: {actual_buy_volume:.6f} SOL (compliance: {buy_volume_compliance:.1f}% of {intended_total_volume:.6f} SOL target)")
+            
+            if buy_volume_compliance < 95.0:
+                logger.warning(f"⚠️ Buy phase volume shortfall detected: {actual_buy_volume:.6f} < {intended_total_volume:.6f} SOL")
+            
+            planned_volume = actual_buy_volume  # Update planned_volume to actual
             
             for buy_op in buy_operations:
                 try:
@@ -5166,21 +5237,35 @@ class ApiClient:
                     wallet_private_key = buy_op["wallet_private_key"]
                     trade_sol_amount = buy_op["amount_sol"]
                     
-                    # Re-calculate safe swap amount at execution time and cap to planned amount
-                    safe_sol_amount = min(calculate_safe_swap_amount(wallet_address, trade_sol_amount), trade_sol_amount)
+                    # Real-time balance verification before trade execution
+                    pre_trade_check = calculate_safe_swap_amount(wallet_address, trade_sol_amount)
                     
-                    if safe_sol_amount <= 0:
-                        logger.error(f"Wallet {wallet_address} has insufficient balance for buy operation")
+                    # Dynamic adjustment if wallet balance changed since planning
+                    if pre_trade_check < trade_sol_amount:
+                        logger.info(f"🔄 Real-time adjustment: {wallet_address[:8]} {trade_sol_amount:.6f} → {pre_trade_check:.6f} SOL (balance declined)")
+                        amount = pre_trade_check
+                    else:
+                        amount = trade_sol_amount
+                    
+                    # Enhanced minimum threshold check with structured logging
+                    if amount <= 0.001:  # Increased from 0 to 0.001 SOL minimum
+                        current_bal = self.check_balance(wallet_address).get("balance", 0.0)
+                        logger.warning(f"⚠️ Skipping {wallet_address[:8]}: insufficient balance {current_bal:.6f} SOL → safe amount {amount:.6f} SOL")
                         results["swaps_failed"] += 1
                         continue
                     
-                    logger.info(f"BUY Operation: {safe_sol_amount:.6f} SOL → {token_address[:8]}... (Wallet: {wallet_address[:8]}...)")
+                    # Volume conservation logging with emoji indicators
+                    if amount < trade_sol_amount:
+                        reduction_pct = ((trade_sol_amount - amount) / trade_sol_amount) * 100
+                        logger.info(f"📉 Volume reduction: {wallet_address[:8]} {trade_sol_amount:.6f} → {amount:.6f} SOL (-{reduction_pct:.1f}%)")
+                    
+                    logger.info(f"BUY Operation: {amount:.6f} SOL → {token_address[:8]}... (Wallet: {wallet_address[:8]}...)")
                     
                     # BUY operation (SOL -> Token)
                     buy_quote = self.get_jupiter_quote(
                         input_mint=SOL_MINT,
                         output_mint=token_address,
-                        amount=int(safe_sol_amount * 1_000_000_000),  # Convert to lamports
+                        amount=int(amount * 1_000_000_000),  # Convert to lamports
                         slippage_bps=100
                     )
                     
@@ -5196,19 +5281,19 @@ class ApiClient:
                         buy_result_successful = (buy_result.get("status") == "success" or buy_result.get("success") == True)
                         
                         if buy_result_successful:
-                            logger.info(f"✅ BUY successful: {safe_sol_amount:.6f} SOL → {token_address[:8]}... (Wallet: {wallet_address[:8]}...)")
+                            logger.info(f"✅ BUY successful: {amount:.6f} SOL → {token_address[:8]}... (Wallet: {wallet_address[:8]}...)")
                             successful_buys += 1
                             
                             # Track token balance for this wallet (estimate)
-                            wallet_token_balances[wallet_address] += safe_sol_amount  # Use SOL amount as proxy
+                            wallet_token_balances[wallet_address] += amount  # Use SOL amount as proxy
                             # Count executed buy amount towards total executed volume
-                            total_volume += safe_sol_amount
+                            total_volume += amount
                             
                             results["swap_results"].append({
                                 "operation_id": buy_op["operation_id"],
                                 "type": "buy",
                                 "wallet": wallet_address[:8] + "...",
-                                "amount_sol": safe_sol_amount,
+                                "amount_sol": amount,
                                 "status": "success",
                                 "timestamp": time.time()
                             })
@@ -5225,7 +5310,46 @@ class ApiClient:
                     await asyncio.sleep(random.uniform(1, 5))
                     
                 except Exception as e:
-                    logger.error(f"Error in buy operation: {str(e)}")
+                    error_msg = str(e)
+                    logger.error(f"Error in buy operation: {error_msg}")
+                    
+                    # Intelligent recovery for balance-related failures
+                    if '"message"' in error_msg or 'insufficient' in error_msg.lower():
+                        logger.info(f"🔄 Attempting balance recovery for {wallet_address[:8]}")
+                        
+                        # Try with 50% of current amount
+                        recovery_amount = amount * 0.5
+                        recovery_safe_amount = calculate_safe_swap_amount(wallet_address, recovery_amount)
+                        
+                        if recovery_safe_amount >= 0.0005:  # Worth retrying
+                            logger.info(f"🔄 Recovery attempt: {recovery_safe_amount:.6f} SOL (50% reduction)")
+                            try:
+                                # Retry with recovery amount
+                                recovery_quote = self.get_jupiter_quote(
+                                    input_mint=SOL_MINT,
+                                    output_mint=token_address,
+                                    amount=int(recovery_safe_amount * 1_000_000_000),
+                                    slippage_bps=100
+                                )
+                                
+                                if recovery_quote.get("quoteResponse") is not None:
+                                    recovery_result = self.execute_jupiter_swap(
+                                        user_wallet_private_key=wallet_private_key,
+                                        quote_response=recovery_quote,
+                                        verify_swap=verify_transfers
+                                    )
+                                    
+                                    if recovery_result.get("success"):
+                                        logger.info(f"✅ Recovery successful: {recovery_safe_amount:.6f} SOL → {token_address[:8]}... (Wallet: {wallet_address[:8]}...)")
+                                        results["buys_succeeded"] += 1
+                                        results["total_volume_sol"] += recovery_safe_amount
+                                        continue
+                                        
+                            except Exception as recovery_error:
+                                logger.warning(f"🔴 Recovery failed: {str(recovery_error)}")
+                        else:
+                            logger.warning(f"❌ Recovery not viable: {recovery_safe_amount:.6f} SOL too small")
+                    
                     results["swaps_failed"] += 1
                     continue
 
@@ -5334,10 +5458,28 @@ class ApiClient:
             else:
                 results["status"] = "failed"
             
+            # VOLUME CONSERVATION FINAL VALIDATION
+            volume_compliance = (total_volume / intended_total_volume) * 100 if intended_total_volume > 0 else 0
+            volume_difference = abs(total_volume - intended_total_volume)
+            
+            # Log final volume conservation analysis
+            if volume_compliance >= 95.0:
+                logger.info(f"✅ Volume conservation SUCCESS: {volume_compliance:.1f}% compliance (diff: {volume_difference:.6f} SOL)")
+            elif volume_compliance >= 90.0:
+                logger.warning(f"⚠️ Volume conservation ACCEPTABLE: {volume_compliance:.1f}% compliance (diff: {volume_difference:.6f} SOL)")
+            else:
+                logger.error(f"❌ Volume conservation FAILED: {volume_compliance:.1f}% compliance (diff: {volume_difference:.6f} SOL)")
+            
+            logger.info(f"📊 VOLUME PIPELINE SUMMARY:")
+            logger.info(f"   User Input → Schedule → Execution → Final")
+            logger.info(f"   Intended: {intended_total_volume:.6f} SOL")
+            logger.info(f"   Achieved: {total_volume:.6f} SOL")
+            logger.info(f"   Compliance: {volume_compliance:.1f}%")
+            
             logger.info(f"🎯 ADVANCED SPL volume generation completed: {successful_buys} buys, {successful_sells} sells, "
                        f"{results['swaps_failed']} failures in {results['duration']:.2f} seconds. "
                        f"Total volume: {total_volume:.6f} SOL "
-                       f"(intended: {intended_total_volume:.6f} SOL, compliance: {((total_volume/intended_total_volume)*100):.1f}%) "
+                       f"(intended: {intended_total_volume:.6f} SOL, compliance: {volume_compliance:.1f}%) "
                        f"Pattern: Separated phases with {separation_delay:.1f}s gap")
             
             return results

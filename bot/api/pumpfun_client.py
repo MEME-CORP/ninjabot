@@ -231,7 +231,6 @@ class PumpFunClient:
                                 pass
                             return error_data
                     
-                    logger.error(f"PumpFun API 500 server error: {error_message}")
                     raise PumpFunApiError(f"Server error: {error_message}")
                 except json.JSONDecodeError:
                     logger.error(f"PumpFun API 500 non-JSON response: {response.text}")
